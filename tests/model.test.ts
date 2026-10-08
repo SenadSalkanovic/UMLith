@@ -1,5 +1,119 @@
 import {describe,it,expect} from 'vitest';
-import {GraphSchema,NodeSchema,SourceSchema,resolveSourceEvidence,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,type Layout,type GraphInput} from '../shared/model';
+import {GraphSchema,NodeSchema,SourceSchema,resolveSourceEvidence,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,AnalysisSchema,QualitySchema,DiagnosticSchema,GraphUpdateSchema,applyGraphUpdate,type Layout,type GraphInput} from '../shared/model';
+
+describe('analysis snapshots and graph updates',()=>{
+ const source={path:'run.ts',start:0,end:3,line:1,hash:'h1',revision:'r1'};
+ const graph=GraphSchema.parse({nodes:[{id:'run',kind:'function',name:'Run',source},{id:'work',kind:'function',name:'Work'}],
+  edges:[{id:'call',source:'run',target:'work',kind:'calls'}],requirements:[{id:'req',text:'Work',nodeIds:['work'],edgeIds:['call']}]});
+ const quality={eligibleFiles:1,analyzedFiles:1,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]};
+ const snapshot={revision:'r1',sequence:1,analyzedAt:'2026-10-08T00:00:00Z',status:'current',graph,quality,files:{'run.ts':{hash:'h1',text:'run'}},durationMs:3};
+ const after=GraphSchema.parse({nodes:[{id:'run',kind:'function',name:'Renamed',source}],edges:[],requirements:[]});
+ const update={type:'analysis',schemaVersion:1,baseRevision:'r1',revision:'r2',baseSequence:1,sequence:2,
+  analyzedAt:'2026-10-08T00:00:01Z',durationMs:2,status:'current',quality,delta:graphDelta(graph,after)};
+
+ it('applies node, edge and requirement deletions without mutating the last snapshot',()=>{
+  const restored=GraphUpdateSchema.parse(JSON.parse(JSON.stringify(update)));
+  expect(applyGraphUpdate(snapshot,restored)).toEqual(after);
+  expect(snapshot.graph.nodes.map(n=>n.id)).toEqual(['run','work']);
+  expect(snapshot.graph.edges.map(e=>e.id)).toEqual(['call']);
+  expect(snapshot.graph.requirements.map(r=>r.id)).toEqual(['req']);
+ });
+
+ it('rejects mismatched source revisions and sequences, including replay at an unchanged source revision',()=>{
+  expect(()=>applyGraphUpdate({...snapshot,revision:'other'},update)).toThrow(/revision/i);
+  expect(()=>applyGraphUpdate({...snapshot,sequence:2},update)).toThrow(/sequence/i);
+  const sameSource={...update,revision:'r1'};
+  expect(applyGraphUpdate(snapshot,sameSource)).toEqual(after);
+  expect(()=>applyGraphUpdate({...snapshot,sequence:2},sameSource)).toThrow(/sequence/i);
+ });
+
+ it('applies the first update only to an empty lineage',()=>{
+  const initial={...update,baseRevision:null,baseSequence:0,sequence:1,delta:graphDelta(emptyGraph(),after)};
+  expect(applyGraphUpdate(undefined,initial)).toEqual(after);
+  expect(()=>applyGraphUpdate(snapshot,initial)).toThrow(/revision|sequence/i);
+ });
+
+ it('deletes every nonempty ID accepted by the existing graph contract without trimming it',()=>{
+  const legacy=GraphSchema.parse({nodes:[{id:' ',kind:'function',name:'Space'},{id:'work',kind:'function',name:'Work'}],
+   edges:[{id:' ',source:' ',target:'work',kind:'calls'}],requirements:[{id:' ',text:'Legacy',nodeIds:[' '],edgeIds:[' ']}]});
+  const deletion={...update,delta:graphDelta(legacy,emptyGraph())};
+  expect(applyGraphUpdate({...snapshot,graph:legacy},deletion)).toEqual(emptyGraph());
+ });
+
+ it.each(['partial','stale','updating'] as const)('round-trips %s diagnostics and retained outdated evidence',status=>{
+  const input={...snapshot,status,staleEvidence:{scope:'paths',paths:['run.ts'],reason:'Source changed'},
+   quality:{...quality,diagnostics:[{severity:'error',path:'run.ts',line:1,code:'parse',message:'Invalid saved syntax'}]}};
+  const restored=AnalysisSchema.parse(JSON.parse(JSON.stringify(input)));
+  expect(restored).toEqual(input);
+  expect(resolveSourceEvidence(restored.graph.nodes[0].source,restored,'r1')).toEqual({status:'stale',source,text:'run'});
+  expect(restored.graph.nodes[0].source?.revision).toBe('r1');
+  expect(restored.files['run.ts'].hash).toBe('h1');
+ });
+
+ it('keeps unaffected evidence current in a partial snapshot and marks all retained evidence stale on failure',()=>{
+  const partial=AnalysisSchema.parse({...snapshot,status:'partial',staleEvidence:{scope:'paths',paths:['other.ts'],reason:'Other file failed'}});
+  expect(resolveSourceEvidence(source,partial,'r1')).toMatchObject({status:'current',text:'run'});
+  const stale=AnalysisSchema.parse({...snapshot,status:'stale',staleEvidence:{scope:'all',paths:[],reason:'Analysis failed'}});
+  expect(resolveSourceEvidence(source,stale,'r1')).toMatchObject({status:'stale',source,text:'run'});
+ });
+
+ it.each([
+  ['negative count',{eligibleFiles:-1}],['fractional count',{inferredItems:0.5}],['unsafe count',{unsupportedConstructs:Number.MAX_SAFE_INTEGER+1}],
+  ['analyzed exceeds eligible',{analyzedFiles:2}],['nonfinite count',{unresolvedReferences:Infinity}],
+  ['behavioral completeness claim',{behavioralCompleteness:true}],['invalid Prisma status',{prismaValidation:'complete'}],
+ ])('rejects misleading quality metadata: %s',(_name,fields)=>{
+  expect(QualitySchema.safeParse({...quality,...fields}).success).toBe(false);
+ });
+
+ it('accepts full file coverage without asserting behavioral completeness',()=>{
+  const report=QualitySchema.parse({...quality,unsupportedConstructs:3,inferredItems:2});
+  expect(report.analyzedFiles).toBe(report.eligibleFiles);
+  expect(report).not.toHaveProperty('behavioralCompleteness');
+  expect(report.unsupportedConstructs).toBe(3);
+  expect(report.inferredItems).toBe(2);
+ });
+
+ it.each([
+  {severity:'fatal'},{message:' '},{path:''},{line:0},{line:1.5},{line:Number.MAX_SAFE_INTEGER+1},{code:' '},
+ ])('rejects malformed diagnostic fields %j',fields=>{
+  expect(DiagnosticSchema.safeParse({severity:'warning',message:'Unresolved reference',path:'run.ts',line:1,...fields}).success).toBe(false);
+ });
+
+ it.each([
+  {status:'complete'},{sequence:-1},{sequence:0},{sequence:0.5},{revision:' '},{analyzedAt:'yesterday'},{durationMs:Infinity},
+  {quality:{...quality,analyzedFiles:-1}},{graph:{...graph,schemaVersion:2}},
+  {status:'stale'},{staleEvidence:{scope:'all',paths:[],reason:'Changed'}},
+  {status:'partial',staleEvidence:{scope:'paths',paths:[],reason:'Changed'}},
+  {status:'stale',staleEvidence:{scope:'all',paths:[],reason:' '}},
+  {files:{'run.ts':{hash:'',text:'run'}}},
+ ])('rejects invalid snapshot metadata %j',fields=>{
+  expect(AnalysisSchema.safeParse({...snapshot,...fields}).success).toBe(false);
+ });
+
+ it('represents failure before any valid evidence without inventing a source revision',()=>{
+  expect(AnalysisSchema.safeParse({...snapshot,revision:'',sequence:0,status:'stale',graph:emptyGraph(),files:{},
+   staleEvidence:{scope:'all',paths:[],reason:'First analysis failed'}}).success).toBe(true);
+  expect(AnalysisSchema.safeParse({...snapshot,revision:''}).success).toBe(false);
+ });
+
+ it.each([
+  {baseRevision:' '},{baseRevision:null},{revision:''},{sequence:1},{baseSequence:-1},{schemaVersion:2},
+  {status:'stale'},{quality:{...quality,analyzedFiles:2}},
+  {delta:{...update.delta,deletedNodes:['']}},
+  {delta:{...update.delta,deletedEdges:['']}},
+  {delta:{...update.delta,deletedRequirements:['']}},
+  {delta:{...update.delta,deletedNodes:['work','work']}},
+  {delta:{...update.delta,deletedNodes:['run']}},
+  {delta:{...update.delta,changedNodes:[after.nodes[0],after.nodes[0]]}},
+ ])('rejects invalid update metadata and ambiguous operations %j',fields=>{
+  expect(GraphUpdateSchema.safeParse({...update,...fields}).success).toBe(false);
+ });
+
+ it('validates the resulting graph instead of hiding dangling edges, requirements or parents',()=>{
+  expect(()=>applyGraphUpdate(snapshot,{...update,delta:{...update.delta,deletedEdges:[],deletedRequirements:[]}})).toThrow(/endpoint|requirement/i);
+  expect(()=>applyGraphUpdate(snapshot,{...update,delta:{...update.delta,changedNodes:[{...after.nodes[0],parentId:'missing'}]}})).toThrow(/parent/i);
+ });
+});
 
 describe('source evidence and provenance',()=>{
  const source={path:'run.ts',symbol:'run',start:3,end:5,line:2,hash:'captured-hash',revision:'r1'};

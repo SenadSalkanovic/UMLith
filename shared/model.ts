@@ -166,7 +166,7 @@ export type SourceEvidence=
   | {status:'current'|'stale';source:Source;text:string}
   | {status:'invalid'|'unavailable';message:string};
 // Captures supply trusted hashes; never slice newer content using an older binding.
-export function resolveSourceEvidence(source:Source|undefined,capture:Pick<Analysis,'revision'|'status'|'files'>|undefined,currentRevision?:string):SourceEvidence {
+export function resolveSourceEvidence(source:Source|undefined,capture:Pick<Analysis,'revision'|'status'|'files'|'staleEvidence'>|undefined,currentRevision?:string):SourceEvidence {
   if(!source)return {status:'unavailable',message:'No source binding is available'};
   const parsed=SourceSchema.safeParse(source);
   if(!parsed.success)return {status:'invalid',message:parsed.error.message};
@@ -178,7 +178,8 @@ export function resolveSourceEvidence(source:Source|undefined,capture:Pick<Analy
   if(source.end>file.text.length)return {status:'invalid',message:'Source range exceeds the captured content'};
   if(source.line!==file.text.slice(0,source.start).split('\n').length)
     return {status:'invalid',message:'Source line does not match the captured range'};
-  const status=source.revision===currentRevision && (capture.status==='current'||capture.status==='partial')?'current':'stale';
+  const outdated=capture.staleEvidence?.scope==='all'||capture.staleEvidence?.paths.includes(source.path);
+  const status=!outdated && source.revision===currentRevision && (capture.status==='current'||capture.status==='partial')?'current':'stale';
   return {status,source:parsed.data,text:file.text.slice(source.start,source.end)};
 }
 export const createNodeId=():string=>globalThis.crypto.randomUUID();
@@ -190,16 +191,76 @@ export function sourceIdentityKey(node:Pick<ProgramNode,'kind'|'source'>):string
   if(!source.symbol)return undefined;
   return JSON.stringify([source.path,node.kind,source.symbol]);
 }
-export type Diagnostic={severity:'error'|'warning'|'info'; message:string; path?:string; line?:number; code?:string};
-export type Quality={
-  eligibleFiles:number; analyzedFiles:number; unresolvedReferences:number; unsupportedConstructs:number; inferredItems:number;
-  prismaValidation:'passed'|'failed'|'unavailable'|'not-applicable';
-  diagnostics:Diagnostic[];
-};
-export type Analysis={
-  revision:string; sequence:number; analyzedAt:string; status:'current'|'partial'|'stale'|'updating';
-  graph:Graph; quality:Quality; files:Record<string,{hash:string;text:string}>; durationMs:number;
-};
+const NonblankSchema=z.string().refine(value=>!!value.trim(),{message:'Must not be blank'});
+const CountSchema=z.number().int().nonnegative();
+export const AnalysisStatusSchema=z.enum(['updating','current','partial','stale']);
+export const DiagnosticSchema=z.object({
+  severity:z.enum(['error','warning','info']),message:NonblankSchema,
+  path:NonblankSchema.optional(),line:z.number().int().positive().optional(),code:NonblankSchema.optional(),
+}).strict();
+// These are structural coverage counts, never proof of runtime behavior or intent.
+export const QualitySchema=z.object({
+  eligibleFiles:CountSchema,analyzedFiles:CountSchema,unresolvedReferences:CountSchema,
+  unsupportedConstructs:CountSchema,inferredItems:CountSchema,
+  prismaValidation:z.enum(['passed','failed','unavailable','not-applicable']),diagnostics:z.array(DiagnosticSchema),
+}).strict().refine(quality=>quality.analyzedFiles<=quality.eligibleFiles,{path:['analyzedFiles'],message:'Analyzed files exceed eligible files'});
+export const StaleEvidenceSchema=z.object({
+  scope:z.enum(['all','paths']),paths:z.array(NonblankSchema),reason:NonblankSchema,
+}).strict().refine(evidence=>evidence.scope==='all'||evidence.paths.length>0,{path:['paths'],message:'Outdated portions require at least one path'});
+const AnalysisMetadataSchema=z.object({
+  revision:z.string().refine(value=>value===''||!!value.trim()),sequence:CountSchema,
+  analyzedAt:z.iso.datetime({offset:true}),status:AnalysisStatusSchema,quality:QualitySchema,
+  durationMs:z.number().finite().nonnegative(),staleEvidence:StaleEvidenceSchema.optional(),
+});
+function validateAnalysisStatus(value:{status:z.infer<typeof AnalysisStatusSchema>;staleEvidence?:z.infer<typeof StaleEvidenceSchema>},ctx:z.RefinementCtx) {
+  if(value.status==='stale'&&!value.staleEvidence)
+    ctx.addIssue({code:'custom',path:['staleEvidence'],message:'Stale analysis must identify outdated evidence'});
+  if(value.status==='current'&&value.staleEvidence)
+    ctx.addIssue({code:'custom',path:['staleEvidence'],message:'Current analysis cannot contain outdated evidence'});
+}
+export const AnalysisSchema=AnalysisMetadataSchema.extend({
+  graph:GraphSchema,files:z.record(NonblankSchema,z.object({hash:NonblankSchema,text:z.string()}).strict()),
+}).strict().superRefine((analysis,ctx)=>{
+  validateAnalysisStatus(analysis,ctx);
+  // Existing empty-revision sentinel means the first analysis failed, with no evidence.
+  if(analysis.revision===''&&(analysis.status!=='stale'||analysis.sequence!==0||analysis.graph.nodes.length||analysis.graph.edges.length||analysis.graph.requirements.length||Object.keys(analysis.files).length))
+    ctx.addIssue({code:'custom',path:['revision'],message:'An empty revision is only valid before any captured evidence'});
+  if(analysis.revision!==''&&analysis.sequence===0)
+    ctx.addIssue({code:'custom',path:['sequence'],message:'Captured evidence requires a positive publication sequence'});
+});
+export const GraphDeltaSchema=z.object({
+  changedNodes:z.array(NodeSchema),deletedNodes:z.array(NodeSchema.shape.id),
+  changedEdges:z.array(EdgeSchema),deletedEdges:z.array(z.string().min(1)),
+  changedRequirements:z.array(RequirementSchema),deletedRequirements:z.array(RequirementSchema.shape.id),
+}).strict().superRefine((delta,ctx)=>{
+  for(const [changedKey,deletedKey] of [['changedNodes','deletedNodes'],['changedEdges','deletedEdges'],['changedRequirements','deletedRequirements']] as const) {
+    const changed=new Set<string>(),deleted=new Set<string>();
+    delta[changedKey].forEach((item,i)=>{
+      if(changed.has(item.id))ctx.addIssue({code:'custom',path:[changedKey,i,'id'],message:'Duplicate changed ID: '+item.id});
+      changed.add(item.id);
+    });
+    delta[deletedKey].forEach((id,i)=>{
+      if(deleted.has(id)||changed.has(id))ctx.addIssue({code:'custom',path:[deletedKey,i],message:'Duplicate or changed/deleted ID: '+id});
+      deleted.add(id);
+    });
+  }
+});
+export const GraphUpdateSchema=AnalysisMetadataSchema.extend({
+  type:z.literal('analysis'),schemaVersion:z.literal(GRAPH_SCHEMA_VERSION),
+  baseRevision:NonblankSchema.nullable(),baseSequence:CountSchema,delta:GraphDeltaSchema,
+}).strict().superRefine((update,ctx)=>{
+  validateAnalysisStatus(update,ctx);
+  if(!update.revision)ctx.addIssue({code:'custom',path:['revision'],message:'Graph updates require a captured source revision'});
+  if((update.baseRevision===null)!==(update.baseSequence===0))
+    ctx.addIssue({code:'custom',path:['baseRevision'],message:'Only an empty lineage has a null base revision and zero base sequence'});
+  if(update.sequence<=update.baseSequence)
+    ctx.addIssue({code:'custom',path:['sequence'],message:'The next sequence must advance the base sequence'});
+});
+export type Diagnostic=z.infer<typeof DiagnosticSchema>;
+export type Quality=z.infer<typeof QualitySchema>;
+export type Analysis=z.infer<typeof AnalysisSchema>;
+export type GraphDelta=z.infer<typeof GraphDeltaSchema>;
+export type GraphUpdate=z.infer<typeof GraphUpdateSchema>;
 export type Layout=Record<string,{x:number;y:number}>;
 export type Project={
   id:string; name:string; description:string; target:string; root:string; managed:boolean; createdAt:string;
@@ -218,7 +279,7 @@ export type AgentJob={
   proposal?:DesignProposal;preview?:Analysis;error?:string;
 };
 export const emptyGraph=():Graph=>({schemaVersion:GRAPH_SCHEMA_VERSION,nodes:[],edges:[],requirements:[]});
-export function graphDelta(before:Graph,after:Graph) {
+export function graphDelta(before:Graph,after:Graph):GraphDelta {
   const oldNodes=new Map(before.nodes.map(n=>[n.id,n]));
   const oldEdges=new Map(before.edges.map(e=>[e.id,e]));
   const oldRequirements=new Map(before.requirements.map(r=>[r.id,r]));
@@ -230,4 +291,22 @@ export function graphDelta(before:Graph,after:Graph) {
     changedRequirements:after.requirements.filter(r=>JSON.stringify(r)!==JSON.stringify(oldRequirements.get(r.id))),
     deletedRequirements:before.requirements.filter(r=>!after.requirements.some(a=>a.id===r.id)).map(r=>r.id),
   };
+}
+// A mismatch requires a fresh snapshot; never apply a delta to an unrelated graph.
+export function applyGraphUpdate(before:Pick<Analysis,'revision'|'sequence'|'graph'>|undefined,input:unknown):Graph {
+  const update=GraphUpdateSchema.parse(input);
+  if((before?.revision||null)!==update.baseRevision)throw new Error('Graph update base revision mismatch; fetch a fresh snapshot');
+  if((before?.sequence??0)!==update.baseSequence)throw new Error('Graph update base sequence mismatch; fetch a fresh snapshot');
+  const graph=GraphSchema.parse(before?.graph??emptyGraph());
+  const merge=<T extends {id:string}>(items:T[],changed:T[],deleted:string[])=>{
+    const records=new Map(items.map(item=>[item.id,item]));
+    for(const id of deleted)records.delete(id);
+    for(const item of changed)records.set(item.id,item);
+    return Array.from(records.values()).sort((a,b)=>a.id.localeCompare(b.id));
+  };
+  return GraphSchema.parse({schemaVersion:update.schemaVersion,
+    nodes:merge(graph.nodes,update.delta.changedNodes,update.delta.deletedNodes),
+    edges:merge(graph.edges,update.delta.changedEdges,update.delta.deletedEdges),
+    requirements:merge(graph.requirements,update.delta.changedRequirements,update.delta.deletedRequirements),
+  });
 }

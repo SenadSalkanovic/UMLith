@@ -2,7 +2,7 @@ import {EventEmitter} from 'node:events';
 import chokidar,{type FSWatcher} from 'chokidar';
 import {join,basename} from 'node:path';
 import type {Analysis} from '../shared/model';
-import {graphDelta,emptyGraph} from '../shared/model';
+import {graphDelta,emptyGraph,GRAPH_SCHEMA_VERSION,AnalysisSchema,GraphUpdateSchema} from '../shared/model';
 import {AnalysisWorker} from './worker';
 import {ProjectStore} from './store';
 import {captureFiles,hashes,ignoredDirs,excluded} from './files';
@@ -50,17 +50,22 @@ export class SyncService extends EventEmitter {
    const p=await this.store.get(id);const before=p.analysis;
    this.emit('notification',id,{type:'status',status:'updating',sequence:before?.sequence||0});
    try{
-    const result=await session.worker.analyze(p.root);
+    const result=AnalysisSchema.parse(await session.worker.analyze(p.root));
     if(generation!==session.generation){continue;}
     if(session.closed)return;
     result.sequence=(before?.sequence||0)+1;
+    const update=GraphUpdateSchema.parse({type:'analysis',schemaVersion:GRAPH_SCHEMA_VERSION,
+     baseRevision:before?.revision||null,baseSequence:before?.sequence||0,
+     sequence:result.sequence,revision:result.revision,analyzedAt:result.analyzedAt,durationMs:result.durationMs,
+     status:result.status,quality:result.quality,staleEvidence:result.staleEvidence,delta:graphDelta(before?.graph||emptyGraph(),result.graph)});
     await this.store.updateAnalysis(id,result);
-    this.emit('notification',id,{type:'analysis',baseSequence:before?.sequence||0,sequence:result.sequence,revision:result.revision,status:result.status,quality:result.quality,delta:graphDelta(before?.graph||emptyGraph(),result.graph)});
+    this.emit('notification',id,update);
    }catch(error){
     if(generation!==session.generation)continue;
-    const stale:Analysis=before?{...before,status:'stale',quality:{...before.quality,diagnostics:[...before.quality.diagnostics.filter(d=>d.code!=='analysis-failure'),{severity:'error',code:'analysis-failure',message:(error as Error).message}]}}:
-     {revision:'',sequence:0,analyzedAt:new Date().toISOString(),status:'stale',graph:emptyGraph(),files:{},durationMs:0,quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'unavailable',diagnostics:[{severity:'error',code:'analysis-failure',message:(error as Error).message}]}};
-    if(!session.closed){await this.store.updateAnalysis(id,stale);this.emit('notification',id,{type:'status',status:'stale',message:(error as Error).message});}
+    const staleEvidence={scope:'all' as const,paths:[],reason:(error as Error).message};
+    const stale:Analysis=before?{...before,status:'stale',staleEvidence,quality:{...before.quality,diagnostics:[...before.quality.diagnostics.filter(d=>d.code!=='analysis-failure'),{severity:'error',code:'analysis-failure',message:(error as Error).message}]}}:
+     {revision:'',sequence:0,analyzedAt:new Date().toISOString(),status:'stale',staleEvidence,graph:emptyGraph(),files:{},durationMs:0,quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'unavailable',diagnostics:[{severity:'error',code:'analysis-failure',message:(error as Error).message}]}};
+    if(!session.closed){await this.store.updateAnalysis(id,stale);this.emit('notification',id,{type:'status',status:'stale',sequence:stale.sequence,revision:stale.revision,quality:stale.quality,staleEvidence,message:(error as Error).message});}
    }
    finished=generation;
   }
