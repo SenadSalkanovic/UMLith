@@ -18,6 +18,13 @@ export function bundleFiles(project:Project,task:string,scope:string[]){
   n.outputPath?'Output boundary: '+n.outputPath:'',
   n.source?'Source binding: '+n.source.path+(n.source.symbol?' :: '+n.source.symbol:''):'',
  ].filter(Boolean).join('\n\n'));
+ const requirements=graph.requirements.map(r=>[
+  '### '+r.id, r.text,
+  r.nodeIds.length?'Graph nodes: '+r.nodeIds.join(', '):'',
+  r.edgeIds.length?'Graph relationships: '+r.edgeIds.join(', '):'',
+  r.constraints.length?'Constraints:\n'+r.constraints.map(s=>'- '+s).join('\n'):'',
+  r.scenarios.length?'Acceptance scenarios:\n'+r.scenarios.map(s=>'- '+s).join('\n'):'',
+ ].filter(s=>s!=='').join('\n\n'));
  const taskText=[
  '# Coding-agent task',task,
  'Read specification.json and ARCHITECTURE.md. The human-owned specification is authoritative.',
@@ -28,7 +35,7 @@ export function bundleFiles(project:Project,task:string,scope:string[]){
  'Preserve existing repository instructions. Add tests for required behavior. Do not claim that tests prove every prose requirement.',
  'Return a concise implementation summary and any unresolved requirements. Code will be independently analyzed and reviewed before application.',
  ].join('\n\n');
- return {'specification.json':JSON.stringify(blueprint,null,2),'ARCHITECTURE.md':['# '+project.name,'Target: '+project.target,project.description,...sections,'## Relationships',...graph.edges.map(e=>'- '+e.source+' '+e.kind+' '+e.target+(e.label?' ('+e.label+')':''))].join('\n\n'),'AGENT_TASK.md':taskText,'IMPORT_REPORT.json':JSON.stringify(project.analysis?.quality||{message:'No source has been analyzed.'},null,2)};
+ return {'specification.json':JSON.stringify(blueprint,null,2),'ARCHITECTURE.md':['# '+project.name,'Target: '+project.target,project.description,...sections,...(requirements.length?['## Requirements',...requirements]:[]),'## Relationships',...graph.edges.map(e=>'- '+e.source+' '+e.kind+' '+e.target+(e.label?' ('+e.label+')':''))].join('\n\n'),'AGENT_TASK.md':taskText,'IMPORT_REPORT.json':JSON.stringify(project.analysis?.quality||{message:'No source has been analyzed.'},null,2)};
 }
 export function exportBundle(project:Project,task:string,scope:string[]){
  return zipSync(Object.fromEntries(Object.entries(bundleFiles(project,task,scope)).map(([path,text])=>[path,strToU8(text)])));

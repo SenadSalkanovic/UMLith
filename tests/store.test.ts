@@ -4,9 +4,39 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {ProjectStore} from '../server/store';
 import {Analyzer} from '../server/analyzer';
-import {NodeSchema,type Analysis} from '../shared/model';
+import {GraphSchema,NodeSchema,type Analysis} from '../shared/model';
 const analysisMetadata:Omit<Analysis,'graph'>={revision:'source-1',sequence:1,analyzedAt:'2026-10-08T00:00:00Z',status:'current',files:{},durationMs:0,
  quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
+it('preserves requirements through edits and history and rejects deleted-function references before writing',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-requirements-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Requirements'});
+  const requirements=[
+   {id:'project',text:'  Keep all documents\r\nOffline ✓\n',nodeIds:[],edgeIds:[],constraints:['No data loss\nEven on failure'],scenarios:['Given a document\nThen retain it\n']},
+   {id:'save-rule',text:'Save atomically\n',nodeIds:['save'],edgeIds:[],constraints:[],scenarios:['When saving\nThen return success']},
+  ];
+  const graph=GraphSchema.parse({nodes:[{id:'save',kind:'function',name:'save',scenarios:['Function scenario\n  Preserve spaces']}],edges:[],requirements});
+  const first=await store.updateSpec(p.id,0,graph);
+  expect(first.specification.requirements).toEqual(requirements);
+  const edited=await store.updateSpec(p.id,1,{...first.specification,nodes:[{...first.specification.nodes[0],name:'saveDocument'}],
+   requirements:first.specification.requirements.map(r=>r.id==='save-rule'?{...r,text:'Save edited text\n'}:r)});
+  const reopened=await new ProjectStore(dir).get(p.id);
+  expect(reopened.specification.requirements).toEqual([requirements[0],{...requirements[1],text:'Save edited text\n'}]);
+  expect(reopened.specification.nodes[0].scenarios).toEqual(['Function scenario\n  Preserve spaces']);
+  const history=await store.history(p.id);
+  expect(history[1].graph.requirements).toEqual(requirements);
+  expect(history[2].graph.requirements).toEqual([requirements[0],{...requirements[1],text:'Save edited text\n'}]);
+  const file=join(store.projectDir(p.id),'project.json'),before=await readFile(file,'utf8');
+  await expect(store.updateSpec(p.id,2,{...edited.specification,nodes:[]})).rejects.toMatchObject({issues:expect.arrayContaining([
+   expect.objectContaining({path:['requirements',1,'nodeIds',0],message:expect.stringMatching(/missing requirement node.*save/i)}),
+  ])});
+  expect(await readFile(file,'utf8')).toBe(before);
+  expect((await store.history(p.id)).length).toBe(3);
+  expect((await store.get(p.id)).specRevision).toBe(2);
+  const removed=await store.updateSpec(p.id,2,{...edited.specification,nodes:[],requirements:[requirements[0]]});
+  expect(removed.specification.requirements).toEqual([requirements[0]]);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
 it('persists graph revisions, keeps layout separate and rejects stale edits',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-store-'));
  try {

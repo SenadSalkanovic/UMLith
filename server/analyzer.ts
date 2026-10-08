@@ -231,7 +231,7 @@ export class Analyzer {
    }catch(error){diagnostics.push({severity:'error',message:'Prisma parse failed: '+(error as Error).message,path});}
   }
   const dedup=Array.from(new Map(diagnostics.map(d=>[JSON.stringify(d),d])).values());
-  const graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id))};
+  const graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id)),requirements:[]};
   return {revision,sequence:++this.sequence,analyzedAt:new Date().toISOString(),status:dedup.some(d=>d.severity!=='info')?'partial':'current',graph,files,durationMs:performance.now()-start,quality:{eligibleFiles:eligible.length,analyzedFiles:analyzed,unresolvedReferences:unresolved,unsupportedConstructs:unsupported,inferredItems:0,prismaValidation:eligible.some(p=>p.endsWith('.prisma'))?'unavailable':'not-applicable',diagnostics:dedup}};
  }
 }

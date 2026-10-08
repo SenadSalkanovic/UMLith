@@ -25,6 +25,11 @@ export const EdgeSchema = z.object({
   label:z.string().default(''), provenance:z.enum(['human','extracted','ai']).default('human'),
   uncertain:z.boolean().default(false),
 });
+export const RequirementSchema = z.object({
+  id:z.string().min(1), text:z.string(),
+  nodeIds:z.array(z.string().min(1)).default([]), edgeIds:z.array(z.string().min(1)).default([]),
+  constraints:z.array(z.string()).default([]), scenarios:z.array(z.string()).default([]),
+});
 export function validRelationship(kind:ProgramEdge['kind'],source:ProgramNode['kind'],target:ProgramNode['kind']) {
   switch(kind) {
     case 'depends-on': return source!=='step' && target!=='step';
@@ -49,7 +54,7 @@ export function validRelationship(kind:ProgramEdge['kind'],source:ProgramNode['k
 export const GraphSchema = z.object({
   // Existing unversioned graphs are v1; an explicit version must match exactly.
   schemaVersion:z.literal(GRAPH_SCHEMA_VERSION).default(GRAPH_SCHEMA_VERSION),
-  nodes:z.array(NodeSchema), edges:z.array(EdgeSchema),
+  nodes:z.array(NodeSchema), edges:z.array(EdgeSchema), requirements:z.array(RequirementSchema).default([]),
 }).superRefine((graph,ctx)=>{
   const nodes=new Map<string,ProgramNode>();
   graph.nodes.forEach((n,i)=>{
@@ -86,6 +91,17 @@ export const GraphSchema = z.object({
       if(e.kind==='contains') contain(e.source,e.target);
     }
   });
+  const requirementIds=new Set<string>();
+  graph.requirements.forEach((r,i)=>{
+    if(requirementIds.has(r.id)) ctx.addIssue({code:'custom',path:['requirements',i,'id'],message:'Duplicate requirement ID: '+r.id});
+    requirementIds.add(r.id);
+    r.nodeIds.forEach((id,j)=>{
+      if(!nodes.has(id)) ctx.addIssue({code:'custom',path:['requirements',i,'nodeIds',j],message:'Missing requirement node: '+id});
+    });
+    r.edgeIds.forEach((id,j)=>{
+      if(!edgeIds.has(id)) ctx.addIssue({code:'custom',path:['requirements',i,'edgeIds',j],message:'Missing requirement edge: '+id});
+    });
+  });
   // Only containment participates; calls and workflow loops can legitimately cycle.
   const pending=Array.from(incoming).filter(([,count])=>count===0).map(([id])=>id);
   let visited=0;
@@ -100,6 +116,7 @@ export const GraphSchema = z.object({
 });
 export type ProgramNode=z.infer<typeof NodeSchema>;
 export type ProgramEdge=z.infer<typeof EdgeSchema>;
+export type Requirement=z.infer<typeof RequirementSchema>;
 export type Graph=z.infer<typeof GraphSchema>;
 export type GraphInput=z.input<typeof GraphSchema>;
 export type Source=z.infer<typeof SourceSchema>;
@@ -139,14 +156,17 @@ export type AgentJob={
   workspace:string;events:{time:string;message:string}[];report?:ValidationReport;
   proposal?:DesignProposal;preview?:Analysis;error?:string;
 };
-export const emptyGraph=():Graph=>({schemaVersion:GRAPH_SCHEMA_VERSION,nodes:[],edges:[]});
+export const emptyGraph=():Graph=>({schemaVersion:GRAPH_SCHEMA_VERSION,nodes:[],edges:[],requirements:[]});
 export function graphDelta(before:Graph,after:Graph) {
   const oldNodes=new Map(before.nodes.map(n=>[n.id,n]));
   const oldEdges=new Map(before.edges.map(e=>[e.id,e]));
+  const oldRequirements=new Map(before.requirements.map(r=>[r.id,r]));
   return {
     changedNodes:after.nodes.filter(n=>JSON.stringify(n)!==JSON.stringify(oldNodes.get(n.id))),
     deletedNodes:before.nodes.filter(n=>!after.nodes.some(a=>a.id===n.id)).map(n=>n.id),
     changedEdges:after.edges.filter(e=>JSON.stringify(e)!==JSON.stringify(oldEdges.get(e.id))),
     deletedEdges:before.edges.filter(e=>!after.edges.some(a=>a.id===e.id)).map(e=>e.id),
+    changedRequirements:after.requirements.filter(r=>JSON.stringify(r)!==JSON.stringify(oldRequirements.get(r.id))),
+    deletedRequirements:before.requirements.filter(r=>!after.requirements.some(a=>a.id===r.id)).map(r=>r.id),
   };
 }

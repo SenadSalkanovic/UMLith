@@ -1,6 +1,52 @@
 import {describe,it,expect} from 'vitest';
 import {GraphSchema,NodeSchema,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,type Layout} from '../shared/model';
 describe('program graph',()=>{
+ it('round-trips ordered project and function requirements and multiline scenarios without changing text',()=>{
+  const requirements=[
+   {id:'project-safety',text:'  Preserve documents.\r\nKeep Unicode: č, ✓\n',nodeIds:[],edgeIds:[],constraints:['  Offline only\nNo network  '],scenarios:['Given a document\nWhen reopened\nThen text is unchanged\n']},
+   {id:'save-safety',text:'Save safely\nEven when interrupted',nodeIds:['save','document'],edgeIds:['write'],constraints:[],scenarios:['First scenario\n  with indentation','Second scenario\r\n']},
+  ];
+  const input={nodes:[{id:'save',kind:'function',name:'save',scenarios:['  Function scenario\nThen return ✓\n']},{id:'document',kind:'entity',name:'Document'}],
+   edges:[{id:'write',source:'save',target:'document',kind:'writes'}],requirements};
+  const graph=GraphSchema.parse(input);
+  const restored=GraphSchema.parse(JSON.parse(JSON.stringify(graph)));
+  expect(restored).toMatchObject({requirements,nodes:[{scenarios:['  Function scenario\nThen return ✓\n']},{}]});
+  const edited=GraphSchema.parse({...restored,nodes:restored.nodes.map(n=>({...n,name:n.name+' renamed'})),
+   requirements:requirements.map(r=>({...r,text:r.text+'Updated\n'}))});
+  expect(edited.requirements.map(r=>r.id)).toEqual(['project-safety','save-safety']);
+  expect(edited.requirements[1]).toMatchObject({nodeIds:['save','document'],edgeIds:['write'],text:'Save safely\nEven when interruptedUpdated\n'});
+ });
+
+ it('normalizes legacy graphs and omitted requirement details without inventing proof or references',()=>{
+  expect(GraphSchema.parse({nodes:[],edges:[]}).requirements).toEqual([]);
+  expect(GraphSchema.parse({nodes:[],edges:[],requirements:[{id:'project',text:'Keep data'}]}).requirements)
+   .toEqual([{id:'project',text:'Keep data',nodeIds:[],edgeIds:[],constraints:[],scenarios:[]}]);
+ });
+
+ it.each([
+  ['duplicate identifiers',[{id:'r',text:'One'},{id:'r',text:'Two'}],['requirements',1,'id'],/duplicate requirement/i],
+  ['deleted function',[{id:'r',text:'Save',nodeIds:['deleted']}],['requirements',0,'nodeIds',0],/missing requirement node.*deleted/i],
+  ['deleted relationship',[{id:'r',text:'Write',edgeIds:['deleted']}],['requirements',0,'edgeIds',0],/missing requirement edge.*deleted/i],
+ ] as const)('reports an explicit requirement error for %s',(_name,requirements,path,message)=>{
+  const result=GraphSchema.safeParse({nodes:[],edges:[],requirements});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toContainEqual(expect.objectContaining({path:[...path],message:expect.stringMatching(message)}));
+ });
+
+ it.each([
+  {id:'',text:'Save'}, {id:'r'}, {id:'r',text:42}, {id:'r',text:'Save',nodeIds:['']},
+  {id:'r',text:'Save',edgeIds:['']}, {id:'r',text:'Save',scenarios:[42]}, {id:'r',text:'Save',constraints:[false]},
+ ])('rejects malformed requirement records: %j',requirement=>{
+  expect(GraphSchema.safeParse({nodes:[],edges:[],requirements:[requirement]}).success).toBe(false);
+ });
+
+ it('reports requirement edits and deletions in graph deltas',()=>{
+  const before=GraphSchema.parse({nodes:[],edges:[],requirements:[{id:'keep',text:'Old'},{id:'remove',text:'Removed'}]});
+  const after=GraphSchema.parse({...before,requirements:[{...before.requirements[0],text:'New'},{id:'add',text:'Added'}]});
+  expect(graphDelta(before,after)).toMatchObject({changedRequirements:[{id:'keep',text:'New'},{id:'add',text:'Added'}],deletedRequirements:['remove'],changedNodes:[],deletedNodes:[]});
+  expect(graphDelta(after,GraphSchema.parse(JSON.parse(JSON.stringify(after))))).toMatchObject({changedRequirements:[],deletedRequirements:[]});
+ });
+
  it('rejects cycles, duplicates and dangling relationships',()=>{
   const a=NodeSchema.parse({id:'a',kind:'module',name:'A',parentId:'b'});
   const b=NodeSchema.parse({id:'b',kind:'module',name:'B',parentId:'a'});
@@ -113,7 +159,7 @@ describe('program graph',()=>{
  it('normalizes existing unversioned graphs to v1 without losing their entities',()=>{
   const parsed=GraphSchema.parse({nodes:[{id:'legacy',kind:'module',name:'Existing'}],edges:[]});
   expect(parsed).toMatchObject({schemaVersion:1,nodes:[{id:'legacy',name:'Existing'}]});
-  expect(emptyGraph()).toEqual({schemaVersion:1,nodes:[],edges:[]});
+  expect(emptyGraph()).toEqual({schemaVersion:1,nodes:[],edges:[],requirements:[]});
  });
 
  it.each([0,2,-1,1.5,'1',null])('rejects unsupported schema version %s',schemaVersion=>{

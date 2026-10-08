@@ -1,10 +1,10 @@
 # Shared program graph contract
 
-T001 defines one graph in `shared/model.ts` for architecture, ER, and optional function workflows. Views select entities from `nodes` and relationships from `edges`; they retain the same IDs and references. Layout remains outside the graph. Requirements, scenarios, policies, provenance, and source bindings remain on the existing node records.
+T001 defines one graph in `shared/model.ts` for architecture, ER, and optional function workflows. Views select entities from `nodes` and relationships from `edges`; they retain the same IDs and references. Layout remains outside the graph. T003 adds graph-level requirements; function scenarios, policies, provenance, and source bindings remain on the existing node records.
 
 ## Version and input boundary
 
-`GRAPH_SCHEMA_VERSION` is currently `1`. `Graph` is the normalized output type of `GraphSchema`: it requires `schemaVersion: 1` and includes node/edge defaults. `GraphInput` is its input type, allowing omitted defaults and an omitted version for compatibility with existing unversioned JSON. Use `GraphSchema.parse` or `safeParse` at an external graph boundary; a TypeScript annotation alone does not validate JSON.
+`GRAPH_SCHEMA_VERSION` is currently `1`. `Graph` is the normalized output type of `GraphSchema`: it requires `schemaVersion: 1` and includes node/edge defaults and a `requirements` array. `GraphInput` is its input type, allowing omitted defaults and an omitted version for compatibility with existing unversioned JSON. Use `GraphSchema.parse` or `safeParse` at an external graph boundary; a TypeScript annotation alone does not validate JSON.
 
 An omitted version is treated as legacy v1. Explicit versions other than numeric `1`, including null and strings, are rejected. This is compatibility normalization, not a migration of unknown versions. `emptyGraph()` and analyzer results include the version. `ProjectStore.updateSpec` accepts `GraphInput` and persists validated output; `updateAnalysis` validates its graph before writing, so invalid analysis cannot replace the last readable project. Project reads parse both the intended specification and any implemented analysis graph; history reads parse revision graphs. Reading legacy data normalizes the returned graph without rewriting the original file.
 
@@ -39,6 +39,44 @@ Issues identify duplicate IDs, missing references, or invalid relationship kinds
 T002–T009 consume the normalized graph and existing node/edge records. T002 owns subsequent identity allocation and reconciliation rules; T001 does not introduce an ID generator or rename algorithm. Persistence/API tasks T010–T014 should accept input at validation boundaries and return normalized `Graph` values. Importer, sync, proposal, and export consumers should carry `schemaVersion` with complete graphs and reuse `GraphSchema` for untrusted input. Refinements enforce rules beyond those expressible in generated JSON Schema.
 
 The task cards and planning contract are controller-owned during this implementation; this document records the shipped interface without editing those files.
+
+## Requirements and acceptance scenarios contract (T003)
+
+`RequirementSchema` validates `{ id, text, nodeIds, edgeIds, constraints, scenarios }`; `Requirement` is its normalized TypeScript output type. `id` is a nonempty opaque identifier, unique within `graph.requirements`. Assign it once and retain it when editing text or links. IDs need not match display text or use a particular format, and requirement IDs have their own namespace separate from node/edge IDs. `text` is a required string. The remaining fields are arrays defaulting to `[]`: `nodeIds` and `edgeIds` contain nonempty IDs; `constraints` and `scenarios` contain prose strings. Empty prose is permitted for drafts. No text is trimmed, split, sorted, or newline-normalized, and array order and repeated scenario text are retained.
+
+Requirements with no item links apply to the project. Link a function requirement using its node ID; the same record can link multiple nodes or relationships. References resolve only within the enclosing graph. `GraphSchema` reports duplicate requirement IDs at `requirements[index].id` and missing items at `requirements[index].nodeIds[index]` or `edgeIds[index]`, identifying the missing ID. Deleting a linked function or edge requires an explicit requirement edit/removal in the same validated graph; references are never silently pruned. Standalone `RequirementSchema` validates record shape, while `GraphSchema` validates referential integrity.
+
+Existing `node.scenarios` remain ordered prose descriptions and need no workflow. Requirement constraints/scenarios likewise make no claim of execution or proof; configured executable checks remain separate in `requiredChecks` and project check definitions. The existing agent instructions explicitly state that tests do not prove every prose requirement.
+
+This is an additive v1 field: legacy graph JSON omitting `requirements` normalizes to `[]` without rewriting files on read. `emptyGraph()` and analyzer graphs supply `requirements: []`; extraction does not invent human requirements. `graphDelta` additionally supplies `changedRequirements` and `deletedRequirements`, keyed by stable requirement ID, for consumers comparing graph content. Complete snapshots retain requirement array order; like existing node/edge deltas, content deltas do not encode collection reordering.
+
+`ProjectStore.updateSpec` accepts requirements via `GraphInput`, validates the complete graph before writing, and preserves them in project JSON and revision history. Reopening a project and reading history use the same schema. `bundleFiles`/`exportBundle` carry the complete graph in `specification.json`, and `ARCHITECTURE.md` includes ordered requirement IDs, prose, graph links, constraints, and scenarios. JSON is the lossless handoff representation; readable Markdown adds presentation around the unchanged prose. Export does not add local storage paths.
+
+T004 consumes the existing function scenarios and linked requirements; T010 consumes the normalized graph through the existing persistence boundary; T065/T068 consume `RequirementSchema`/`GraphSchema` for proposals and portable handoffs; T066 can compare stable requirement IDs. No parallel requirement store, runner, execution status, or editor UI is introduced by T003.
+
+## 2026-10-08 — T003 requirements and acceptance scenarios
+
+Scope: extended `shared/model.ts`, supplied an empty requirement list in `server/analyzer.ts`, included requirements in the existing readable `server/export.ts` handoff, and added model/persistence/export regression tests and this shared interface record. Reused existing graph persistence/history and ZIP packaging. Task documents, original plan, runner and its tests/state/logs, and Git index/configuration remain controller-owned and unchanged.
+
+| T003 requirement/scenario | Evidence |
+| --- | --- |
+| Project and function requirements are representable | Model fixture round-trips an unlinked project requirement and a function requirement linked to a function, entity, and write relationship; edits retain requirement IDs and references |
+| Scenario descriptions are lossless | Model, persistence/history, and ZIP export tests retain multiline strings, CRLF/LF, Unicode, indentation, trailing whitespace/newlines, and array order; existing function scenarios coexist with requirement scenarios |
+| Deleted items cannot leave unnoticed requirement references | Model tests reject missing node/edge links with the exact issue path and missing ID; persistence test deletes a linked function, confirms rejection before project/history writes, then explicitly removes its requirement and successfully saves |
+| Requirements survive editing, persistence, and handoff | Reopened project and separate historical revisions retain old/new requirement text; portable JSON retains complete records and readable instructions include ordered IDs, item links, constraints, and scenarios |
+| Prose is not executable proof | Requirement constraints/scenarios are string arrays with no execution status or inferred pass; the export retains the existing explicit instruction that tests do not prove every prose requirement |
+| Existing callers and legacy data remain usable | Missing requirement arrays/details receive empty defaults; empty and analyzer graphs include the normalized array; content deltas report requirement changes/deletions; full analyzer/sync/review/job regression suite and TypeScript checking pass |
+
+Validation observed:
+
+- Before implementation, `npm test -- tests/model.test.ts tests/store.test.ts tests/export.test.ts`: 16 failures exposed discarded requirements, absent defaults/deltas, and unvalidated links/record shapes; 97 existing tests passed.
+- After implementation, the same focused command: 113 tests passed across 3 files.
+- `npm test`: 124 tests passed across 7 files.
+- `npx tsc --noEmit`: passed, exit 0.
+- `git diff --check`: passed, exit 0.
+- `npm run build`: TypeScript passed; Vite failed because the pre-existing `/src/main.tsx` browser entry point is absent. T003 model/persistence/export acceptance is verified by the tests above; browser-workspace implementation and live-agent smoke tests are outside this task.
+
+Independent review approved with no correctness, scope, or regression findings. The reviewer independently passed all 113 focused tests, TypeScript and whitespace checks, and additional assertions covering blank/repeated scenarios, separate ID namespaces, deleted-edge errors, requirement preservation through layout/check/analysis updates, history/export fidelity, and unchanged files after rejected edits. Review was read-only; no repository files were edited by the reviewer.
 
 ## Stable identity and reconciliation contract (T002)
 
