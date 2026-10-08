@@ -5,6 +5,26 @@ import {unzipSync,strFromU8} from 'fflate';
 import {ProjectStore} from '../server/store';
 import {GraphSchema,NodeSchema} from '../shared/model';
 import {exportBundle} from '../server/export';
+it('exports mixed-detail functions without replacing unknown details or claiming implementation completeness',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-function-export-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Documents'});
+  const detailed={id:'load',kind:'function' as const,name:'load',description:'  Load text\r\n',inputs:'path: string\n',outputs:'Document ✓\n',
+   rules:'Preserve whitespace\n',errors:'NotFound\r\n',scenarios:['Given saved text\nThen read the same text\n']};
+  const project=await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'save',description:'Save text'},detailed],edges:[]});
+  const files=unzipSync(exportBundle(project,'Implement documents',['src/']));
+  const json=strFromU8(files['specification.json']),blueprint=JSON.parse(json),graph=GraphSchema.parse(blueprint.graph);
+  expect(graph.nodes[0]).toMatchObject({id:'save',description:'Save text',provenance:'human'});
+  for(const field of ['inputs','outputs','rules','errors','scenarios'] as const)expect(blueprint.graph.nodes[0]).not.toHaveProperty(field);
+  expect(graph.nodes[1]).toMatchObject(detailed);
+  expect(graph.edges).toEqual([]);
+  expect(blueprint.sourceRevision).toBeNull();
+  const architecture=strFromU8(files['ARCHITECTURE.md']);
+  for(const text of [detailed.description,detailed.inputs,detailed.outputs,detailed.rules,detailed.errors,...detailed.scenarios])expect(architecture).toContain(text);
+  expect(strFromU8(files['AGENT_TASK.md'])).toContain('Missing function details and workflows are unspecified; supplied details and scenarios do not prove implementation completeness.');
+  expect(json).not.toContain(dir);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
 it('exports a portable specification with optional function details and approved scope',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-export-'));
  try{

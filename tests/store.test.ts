@@ -7,6 +7,30 @@ import {Analyzer} from '../server/analyzer';
 import {GraphSchema,NodeSchema,type Analysis} from '../shared/model';
 const analysisMetadata:Omit<Analysis,'graph'>={revision:'source-1',sequence:1,analyzedAt:'2026-10-08T00:00:00Z',status:'current',files:{},durationMs:0,
  quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
+it('saves mixed-detail functions and enriches the same ID while preserving earlier revisions',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-function-details-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Documents'});
+  const detailed={id:'load',kind:'function' as const,name:'load',description:'  Load text\r\n',inputs:'path: string\n',outputs:'Document ✓\n',
+   rules:'Preserve whitespace\n',errors:'NotFound\r\n',scenarios:['Given saved text\nThen read the same text\n']};
+  await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'save',description:'Save text'},detailed],edges:[]});
+  const reopened=await new ProjectStore(dir).get(p.id);
+  expect(reopened.specification.nodes[0]).toMatchObject({id:'save',description:'Save text',provenance:'human'});
+  for(const field of ['inputs','outputs','rules','errors','scenarios'] as const)expect(reopened.specification.nodes[0][field]).toBeUndefined();
+  expect(reopened.specification.nodes[1]).toMatchObject(detailed);
+  expect(reopened.specification.edges).toEqual([]);
+  expect(reopened.analysis).toBeUndefined();
+  const enrichment={inputs:'Document',outputs:'void',rules:'Atomic write',errors:'DiskFull',scenarios:['Reopen saved text']};
+  await store.updateSpec(p.id,1,{...reopened.specification,nodes:[{...reopened.specification.nodes[0],...enrichment},reopened.specification.nodes[1]]});
+  const updated=await new ProjectStore(dir).get(p.id),history=await store.history(p.id);
+  expect(updated.specification.nodes[0]).toMatchObject({id:'save',description:'Save text',...enrichment});
+  expect(updated.specification.nodes[1]).toMatchObject(detailed);
+  expect(updated.analysis).toBeUndefined();
+  expect(history[1].graph.nodes[0].inputs).toBeUndefined();
+  expect(history[1].graph.nodes[1]).toMatchObject(detailed);
+  expect(history[2].graph.nodes[0]).toMatchObject({id:'save',...enrichment});
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
 it('preserves requirements through edits and history and rejects deleted-function references before writing',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-requirements-'));
  try{

@@ -1,6 +1,55 @@
 import {describe,it,expect} from 'vitest';
 import {GraphSchema,NodeSchema,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,type Layout} from '../shared/model';
 describe('program graph',()=>{
+ it('keeps description-only function details unknown without inventing workflow or implementation evidence',()=>{
+  const graph=GraphSchema.parse({nodes:[{id:'save',kind:'function',name:'save',description:'Save a document'}],edges:[]});
+  const restored=GraphSchema.parse(JSON.parse(JSON.stringify(graph)));
+  expect(restored.nodes).toHaveLength(1);
+  expect(restored.edges).toEqual([]);
+  expect(restored.nodes[0]).toMatchObject({id:'save',description:'Save a document',provenance:'human'});
+  for(const field of ['inputs','outputs','rules','errors','scenarios','source','stepType'] as const)
+   expect(restored.nodes[0][field]).toBeUndefined();
+ });
+
+ it('retains every detailed function field losslessly without requiring a workflow',()=>{
+  const detail={description:'  Save a document\r\nKeep Unicode ✓\n',inputs:'document: Document\n  destination: string ',
+   outputs:'Promise<void>\r\n',rules:'Keep original until success\n',errors:'DiskFull\n  PermissionDenied ',
+   scenarios:['Given a document\nWhen saved\nThen reopen it\n','When interrupted\r\nThen retain the original','When interrupted\r\nThen retain the original']};
+  const graph=GraphSchema.parse({nodes:[{id:'save',kind:'function',name:'save',...detail}],edges:[]});
+  const restored=GraphSchema.parse(JSON.parse(JSON.stringify(graph)));
+  expect(restored.nodes[0]).toMatchObject(detail);
+  expect(restored.nodes[0].provenance).toBe('human');
+  expect(restored.nodes[0].source).toBeUndefined();
+  expect(restored.nodes[0].stepType).toBeUndefined();
+  expect(restored.edges).toEqual([]);
+ });
+
+ it('enriches an existing function without changing its identity, requirement links or relationships',()=>{
+  const before=GraphSchema.parse({nodes:[{id:'module',kind:'module',name:'Documents'},
+   {id:'save',kind:'function',name:'save',parentId:'module',description:'Save a document'}],
+   edges:[{id:'owns',source:'module',target:'save',kind:'contains'}],requirements:[{id:'safety',text:'Never lose text',nodeIds:['save']}]});
+  const after=GraphSchema.parse({...before,nodes:before.nodes.map(n=>n.id==='save'?{...n,inputs:'Document',outputs:'void',
+   rules:'Atomic write',errors:'DiskFull',scenarios:['Reopen saved text']}:n)});
+  expect(after.nodes[1]).toMatchObject({id:'save',description:'Save a document',inputs:'Document',outputs:'void',rules:'Atomic write',errors:'DiskFull',scenarios:['Reopen saved text']});
+  expect(after.edges).toEqual(before.edges);
+  expect(after.requirements[0].nodeIds).toEqual(['save']);
+  expect(graphDelta(before,after)).toMatchObject({changedNodes:[{id:'save'}],deletedNodes:[],changedEdges:[],deletedEdges:[],changedRequirements:[]});
+ });
+
+ it('preserves explicit empty detail values from legacy graphs instead of treating them as unspecified',()=>{
+  const graph=GraphSchema.parse({nodes:[{id:'empty',kind:'function',name:'empty',inputs:'',outputs:'',rules:'',errors:'',scenarios:[]}],edges:[]});
+  expect(GraphSchema.parse(JSON.parse(JSON.stringify(graph))).nodes[0]).toMatchObject({inputs:'',outputs:'',rules:'',errors:'',scenarios:[]});
+ });
+
+ it.each([
+  ['description',null],['description',42],['inputs',null],['inputs',[]],['outputs',null],['outputs',42],
+  ['rules',null],['rules',{}],['errors',null],['errors',false],['scenarios',null],['scenarios','Scenario'],['scenarios',[42]],
+ ])('rejects malformed function detail %s: %j',(field,value)=>{
+  const result=GraphSchema.safeParse({nodes:[{id:'save',kind:'function',name:'save',[field]:value}],edges:[]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toContainEqual(expect.objectContaining({path:['nodes',0,field,...(field==='scenarios'&&Array.isArray(value)?[0]:[])]}));
+ });
+
  it('round-trips ordered project and function requirements and multiline scenarios without changing text',()=>{
   const requirements=[
    {id:'project-safety',text:'  Preserve documents.\r\nKeep Unicode: č, ✓\n',nodeIds:[],edgeIds:[],constraints:['  Offline only\nNo network  '],scenarios:['Given a document\nWhen reopened\nThen text is unchanged\n']},

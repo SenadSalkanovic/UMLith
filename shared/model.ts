@@ -11,8 +11,9 @@ export const NodeSchema = z.object({
   parentId: z.string().min(1).optional(), description: z.string().default(''),
   provenance: z.enum(['human','extracted','ai']).default('human'),
   policy: z.enum(policies).default('editable'), contract: z.string().default(''),
-  inputs: z.string().default(''), outputs: z.string().default(''), rules: z.string().default(''),
-  errors: z.string().default(''), scenarios: z.array(z.string()).default([]),
+  // Missing details are unknown, including on source-backed extracted functions.
+  inputs: z.string().optional(), outputs: z.string().optional(), rules: z.string().optional(),
+  errors: z.string().optional(), scenarios: z.array(z.string()).optional(),
   requiredChecks: z.array(z.string()).default([]), instructions: z.string().default(''),
   outputPath: z.string().default(''), source: SourceSchema.optional(),
   fields: z.array(z.object({ name:z.string(), type:z.string(), key:z.string().default(''), optional:z.boolean().default(false), mappedName:z.string().optional() })).default([]),

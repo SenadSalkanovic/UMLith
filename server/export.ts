@@ -13,7 +13,7 @@ export function bundleFiles(project:Project,task:string,scope:string[]){
   n.rules?'Rules: '+n.rules:'',n.errors?'Errors: '+n.errors:'',
   n.instructions?'Care instructions: '+n.instructions:'',
   n.fields.length?'Fields:\n'+n.fields.map(f=>'- '+f.name+': '+f.type+(f.optional?' (optional)':'')+(f.key?' ['+f.key+']':'')).join('\n'):'',
-  n.scenarios.length?'Acceptance scenarios:\n'+n.scenarios.map(s=>'- '+s).join('\n'):'',
+  n.scenarios?.length?'Acceptance scenarios:\n'+n.scenarios.map(s=>'- '+s).join('\n'):'',
   n.requiredChecks.length?'Required checks: '+n.requiredChecks.join(', '):'',
   n.outputPath?'Output boundary: '+n.outputPath:'',
   n.source?'Source binding: '+n.source.path+(n.source.symbol?' :: '+n.source.symbol:''):'',
@@ -33,6 +33,7 @@ export function bundleFiles(project:Project,task:string,scope:string[]){
  'Implement in this workspace. Preserve frozen implementations exactly and frozen interfaces structurally. Follow sensitive-area instructions and acceptance scenarios.',
  'Do not edit the specification, protection baselines, or task scope. If they prevent the task, explain the conflict and stop.',
  'Preserve existing repository instructions. Add tests for required behavior. Do not claim that tests prove every prose requirement.',
+ 'Missing function details and workflows are unspecified; supplied details and scenarios do not prove implementation completeness.',
  'Return a concise implementation summary and any unresolved requirements. Code will be independently analyzed and reviewed before application.',
  ].join('\n\n');
  return {'specification.json':JSON.stringify(blueprint,null,2),'ARCHITECTURE.md':['# '+project.name,'Target: '+project.target,project.description,...sections,...(requirements.length?['## Requirements',...requirements]:[]),'## Relationships',...graph.edges.map(e=>'- '+e.source+' '+e.kind+' '+e.target+(e.label?' ('+e.label+')':''))].join('\n\n'),'AGENT_TASK.md':taskText,'IMPORT_REPORT.json':JSON.stringify(project.analysis?.quality||{message:'No source has been analyzed.'},null,2)};

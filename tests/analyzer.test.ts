@@ -11,6 +11,8 @@ it('extracts source-backed symbols, calls, workflows and Prisma relationships',a
  const place=a.graph.nodes.find(n=>n.name==='placeOrder')!;
  expect(place.kind).toBe('function');expect(place.source?.path).toBe('orders.ts');
  expect(place.contract).toContain('Promise<Order>');
+ expect(place.provenance).toBe('extracted');
+ for(const field of ['inputs','outputs','rules','errors','scenarios'] as const)expect(place[field]).toBeUndefined();
  const stock=a.graph.nodes.find(n=>n.name==='checkStock')!;
  expect(a.graph.edges).toContainEqual(expect.objectContaining({source:place.id,target:stock.id,kind:'calls'}));
  expect(a.graph.nodes.filter(n=>n.parentId===place.id).map(n=>n.stepType)).toContain('condition');

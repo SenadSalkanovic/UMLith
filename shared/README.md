@@ -54,6 +54,37 @@ This is an additive v1 field: legacy graph JSON omitting `requirements` normaliz
 
 T004 consumes the existing function scenarios and linked requirements; T010 consumes the normalized graph through the existing persistence boundary; T065/T068 consume `RequirementSchema`/`GraphSchema` for proposals and portable handoffs; T066 can compare stable requirement IDs. No parallel requirement store, runner, execution status, or editor UI is introduced by T003.
 
+## Description-only and detailed functions contract (T004)
+
+Functions use the existing `NodeSchema` and stable `node.id`. `description` is prose (default `''` for drafts). `inputs`, `outputs`, `rules`, and `errors` are optional prose strings; `scenarios` is an optional ordered array of prose strings. Missing details remain `undefined` in parsed records and absent in JSON, rather than being normalized to empty strings/arrays. Explicit `''` and `[]` remain explicit, including in existing v1 files. Nulls, wrong field types, and non-string scenarios are rejected with field paths. Supplied text, whitespace, newline conventions, Unicode, ordering, and repeated scenarios are preserved.
+
+This replaces the previous empty defaults for these five node fields without changing the v1 input format or rewriting saved files. Existing explicit empty values cannot reveal whether a human supplied them or an older parser inserted them; consumers must not treat them as proof of a known empty contract. Readers must handle omitted fields, using `?? ''` or `?? []` only for display rather than writing those fallbacks back as evidence. Requirement-level constraints/scenarios keep their existing array defaults; they are separate from optional node scenarios.
+
+Both description-only and detailed functions validate without workflow nodes/edges. Existing steps and typed relationships can coexist with either level of detail; workflow semantics belong to T005. Enrich a function by changing its fields while retaining its ID, parent, and references. `graphDelta` then reports a changed node rather than deletion/recreation. Supplying details never generates source bindings, steps, analysis snapshots, or a completion status.
+
+The existing `provenance` and `source` identify human intent, extracted declarations, and AI proposals. An extracted function's source-backed `contract` is separate from unspecified semantic fields: parsing/extraction never fills unknown rules, errors, or scenarios from the presence of a signature or workflow. Source evidence and detail presence do not prove behavior or implementation completeness. Further provenance/evidence validation belongs to T007; this task introduces no competing evidence or execution model.
+
+`ProjectStore.updateSpec`, project reads, and revision history preserve both levels of detail through `GraphSchema`. Portable `specification.json` retains absent fields and all supplied details; `ARCHITECTURE.md` renders supplied prose and safely handles absent node scenarios. Agent instructions explicitly state that missing details/workflows are unspecified and supplied details/scenarios do not prove implementation completeness.
+
+T005 consumes optional function details alongside the existing workflow records; T023–T026 editors must handle omitted prose/scenarios without converting unknown values into facts; T010 persistence and T068 export consume the same validated graph. Task cards and the planning contract remain controller-owned.
+
+## 2026-10-08 — T004 description-only and detailed functions
+
+Scope: removed empty defaults for optional function detail fields in `shared/model.ts`, updated the existing readable export consumer/instructions in `server/export.ts`, added focused model/persistence/export checks and an analyzer regression assertion, and documented the shipped interface here. No new dependencies, alternate function API, completeness flag, runner changes, task-document edits, or Git mutations.
+
+| T004 requirement/scenario | Evidence |
+| --- | --- |
+| Description-only functions validate | Model JSON round-trip retains the description without fabricating detail fields, source evidence, or workflow |
+| Detailed contracts retain every requested field | Model, disk persistence/history, and portable ZIP tests preserve all six fields, including multiline/Unicode prose and ordered scenarios |
+| Optional detail does not imply implementation completeness | Model tests preserve human provenance and absent source/workflow; persistence leaves analysis absent; real analyzer keeps unknown semantics absent despite extracted signatures/workflows; exported instructions state the limit explicitly |
+| Save description-only beside detailed | Persistence test saves both in one new project, reopens it, and checks supplied details and omitted fields; export test verifies the same mixed graph through ZIP handoff |
+| Add detail while retaining identity | Model test preserves ID, parent, relationships, and linked requirements with a changed-node delta; persistence test reopens the enriched function and verifies the prior revision still has unspecified details |
+| Validate supplied details | Model cases reject null/wrong-type prose and malformed scenario arrays with explicit field paths; explicit empty legacy values still round-trip |
+
+Validation observed: the focused run before implementation failed four checks because unknown fields were filled with empty values (133 existing/new checks passed). After implementation, `npm test -- tests/model.test.ts tests/store.test.ts tests/export.test.ts tests/analyzer.test.ts` passed all 137 checks. Full `npm test` passed all 143 checks across seven files; `npx tsc --noEmit` and `git diff --check` passed. `npm run build` passed TypeScript checking but Vite failed on the pre-existing absent `/src/main.tsx`; browser bundling/interaction is not claimed.
+
+Independent read-only review approved all T004 criteria/scenarios with no correctness, regression, scope, or privacy findings. It separately passed 121 model/analyzer checks, actual-store assertions in memory for mixed-detail persistence/reopening/enrichment/history, portable ZIP assertions, TypeScript, and whitespace checks. It confirmed the browser entry point is absent in both HEAD and the working tree, and the staged diff is empty. The reviewer did not repeat the full disk suite; the implementer's full suite above exercised real disk persistence. Browser and live-agent smoke tests were skipped. Task documents, original plan, runner/tests/state/logs, and Git index/configuration remain unchanged.
+
 ## 2026-10-08 — T003 requirements and acceptance scenarios
 
 Scope: extended `shared/model.ts`, supplied an empty requirement list in `server/analyzer.ts`, included requirements in the existing readable `server/export.ts` handoff, and added model/persistence/export regression tests and this shared interface record. Reused existing graph persistence/history and ZIP packaging. Task documents, original plan, runner and its tests/state/logs, and Git index/configuration remain controller-owned and unchanged.
