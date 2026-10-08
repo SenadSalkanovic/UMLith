@@ -1,12 +1,175 @@
 import {it,expect} from 'vitest';
-import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import {ProjectStore} from '../server/store';
 import {Analyzer} from '../server/analyzer';
 import {GraphSchema,NodeSchema,type Analysis} from '../shared/model';
 const analysisMetadata:Omit<Analysis,'graph'>={revision:'source-1',sequence:1,analyzedAt:'2026-10-08T00:00:00Z',status:'current',files:{},durationMs:0,
  quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
+it('creates new and imported projects in the Node/tsx runtime and releases the import worker',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-runtime-import-'));
+ try{
+  const root=join(dir,'existing');await mkdir(root);
+  await writeFile(join(root,'main.ts'),'export function imported() { return 1; }');
+  await promisify(execFile)(process.execPath,['--import','tsx','--input-type=module','-e',`
+   import assert from 'node:assert/strict';
+   const {ProjectStore}=await import('./server/store.ts');
+   const store=new ProjectStore(process.argv[1]);
+   const created=await store.create({name:'New'});
+   assert.equal(created.specRevision,0);
+   assert.equal(created.analysis,undefined);
+   const imported=await store.create({name:'Imported',root:process.argv[2]});
+   assert.equal(imported.specRevision,0);
+   assert.deepEqual(imported.specification,{schemaVersion:1,nodes:[],edges:[],requirements:[]});
+   assert.ok(imported.analysis.graph.nodes.some(n=>n.kind==='function'&&n.name==='imported'));
+   assert.equal(JSON.stringify((await store.get(imported.id)).analysis),JSON.stringify(imported.analysis));
+  `,dir,root],{timeout:10000});
+  const projects=await new ProjectStore(dir).list();
+  expect(projects).toHaveLength(2);
+  const imported=projects.find(p=>p.name==='Imported')!,created=projects.find(p=>p.name==='New')!;
+  for(const p of projects){
+   expect(p.specRevision).toBe(0);
+   expect(p.specification).toEqual({schemaVersion:1,nodes:[],edges:[],requirements:[]});
+  }
+  expect(created.analysis).toBeUndefined();
+  expect(imported.analysis?.graph.nodes).toEqual(expect.arrayContaining([expect.objectContaining({kind:'function',name:'imported'})]));
+  expect(imported.analysis?.files['main.ts'].text).toBe('export function imported() { return 1; }');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('creates new projects with empty intent and imports code only into an unadopted implemented snapshot',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-import-'));
+ try{
+  const store=new ProjectStore(dir),created=await store.create({name:'New tool',target:'Desktop'});
+  expect(created.managed).toBe(true);
+  expect(created.target).toBe('Desktop');
+  expect(created.specRevision).toBe(0);
+  expect(created.specification).toEqual({schemaVersion:1,nodes:[],edges:[],requirements:[]});
+  expect(created.analysis).toBeUndefined();
+  const root=join(dir,'existing');await mkdir(root);
+  await writeFile(join(root,'main.ts'),'export function imported() { return 1; }');
+  const imported=await store.create({name:'Imported tool',target:'Other target',root});
+  expect(imported.managed).toBe(false);
+  expect(imported.target).toBe('Other target');
+  expect(imported.specRevision).toBe(0);
+  expect(imported.specification).toEqual({schemaVersion:1,nodes:[],edges:[],requirements:[]});
+  expect(imported.analysis?.graph.nodes).toEqual(expect.arrayContaining([
+   expect.objectContaining({kind:'function',name:'imported',provenance:'extracted'}),
+  ]));
+  expect(imported.analysis?.files['main.ts'].text).toBe('export function imported() { return 1; }');
+  expect(await readFile(join(root,'main.ts'),'utf8')).toBe('export function imported() { return 1; }');
+  expect(await new ProjectStore(dir).get(imported.id)).toEqual(imported);
+  expect((await store.history(imported.id)).map(r=>({revision:r.revision,graph:r.graph}))).toEqual([
+   {revision:0,graph:{schemaVersion:1,nodes:[],edges:[],requirements:[]}},
+  ]);
+  const adopted=await store.updateSpec(imported.id,0,imported.analysis!.graph);
+  expect(adopted.specRevision).toBe(1);
+  expect(adopted.specification).toEqual(imported.analysis!.graph);
+  expect(adopted.analysis).toEqual(imported.analysis);
+  expect((await store.history(imported.id)).map(r=>r.revision)).toEqual([0,1]);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each([
+ ['invalid syntax','export function broken( {',/invalid TypeScript syntax/i],
+ ['invalid extracted graph',"function getKey(): 'a' { return 'a'; } export interface Foo { [getKey()]: string; }",/invalid calls relationship/i],
+])('surfaces %s during import without publishing an unreadable project or changing source',async(_label,text,error)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-invalid-import-'));
+ try{
+  const root=join(dir,'existing');await mkdir(root);
+  const source=join(root,'main.ts');await writeFile(source,text);
+  const store=new ProjectStore(dir);
+  await expect(store.create({name:'Invalid import',root})).rejects.toThrow(error);
+  expect(await store.list()).toEqual([]);
+  expect(await readFile(source,'utf8')).toBe(text);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('repeated analysis updates leave intended JSON, revision history and protected baselines untouched',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-independent-analysis-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Human intent'});
+  const source={path:'main.ts',symbol:'save',start:0,end:10,line:1,hash:'protected-hash',revision:'protected-source'};
+  await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'save',description:'  Human rule\r\n',
+   policy:'frozen-implementation',source,baseline:{text:'exact text\r\n',source}}],edges:[],
+   requirements:[{id:'save-rule',text:'Keep documents',nodeIds:['save'],scenarios:['Reopen saved text']}]});
+  await store.updateLayout(p.id,{save:{x:23,y:47}});
+  await store.updateChecks(p.id,{verify:{command:'node',args:['--version']}});
+  const file=join(store.projectDir(p.id),'project.json'),before=await readFile(file,'utf8');
+  const intended=(await store.get(p.id)).specification;
+  const history=await store.history(p.id);
+  const revisionFiles=await Promise.all([0,1].map(r=>readFile(join(store.projectDir(p.id),'revisions',r+'.json'),'utf8')));
+  for(const [i,status] of (['current','partial','stale'] as const).entries()){
+   const graph=GraphSchema.parse({nodes:[{id:'save',kind:'function',name:'changed'+i,provenance:'extracted'}],edges:[]});
+   const analysis={...analysisMetadata,revision:'source-'+(i+1),sequence:i+1,status,graph};
+   const updated=await store.updateAnalysis(p.id,analysis);
+   expect(updated.analysis).toEqual(analysis);
+   expect(await readFile(file,'utf8')).toBe(before);
+   expect(updated.specRevision).toBe(1);
+   expect(updated.specification).toEqual(intended);
+   expect(await store.history(p.id)).toEqual(history);
+   expect(await Promise.all([0,1].map(r=>readFile(join(store.projectDir(p.id),'revisions',r+'.json'),'utf8')))).toEqual(revisionFiles);
+   expect((await new ProjectStore(dir).get(p.id)).analysis).toEqual(analysis);
+  }
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('analysis updates preserve legacy intended JSON verbatim and supersede inline analysis without rewriting it',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-legacy-intent-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Legacy'});
+  const legacyGraph={nodes:[{id:'original',kind:'function',name:'Original intent'}],edges:[]};
+  const oldAnalysis={...analysisMetadata,graph:GraphSchema.parse({nodes:[],edges:[]})};
+  const file=join(store.projectDir(p.id),'project.json');
+  const text=JSON.stringify({...p,specification:legacyGraph,analysis:oldAnalysis});
+  await writeFile(file,text);
+  expect((await store.get(p.id)).analysis).toEqual(oldAnalysis);
+  for(const sequence of [2,3]){
+   const analysis={...oldAnalysis,revision:'source-'+sequence,sequence};
+   await store.updateAnalysis(p.id,analysis);
+   expect(await readFile(file,'utf8')).toBe(text);
+   const reopened=await new ProjectStore(dir).get(p.id);
+   expect(reopened.specRevision).toBe(0);
+   expect(reopened.specification.nodes[0].name).toBe('Original intent');
+   expect(reopened.analysis).toEqual(analysis);
+  }
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each(['specification','layout','checks'] as const)('preserves legacy inline analysis when saving %s to separate storage',async(change)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-legacy-analysis-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Legacy'});
+  const analysis={...analysisMetadata,graph:GraphSchema.parse({nodes:[{id:'old',kind:'function',name:'Analyzed'}],edges:[]})};
+  const file=join(store.projectDir(p.id),'project.json');
+  await writeFile(file,JSON.stringify({...p,analysis}));
+  if(change==='specification')await store.updateSpec(p.id,0,{nodes:[],edges:[]});
+  else if(change==='layout')await store.updateLayout(p.id,{old:{x:1,y:2}});
+  else await store.updateChecks(p.id,{verify:{command:'node',args:[]}});
+  expect(JSON.parse(await readFile(file,'utf8')).analysis).toBeUndefined();
+  expect(JSON.parse(await readFile(join(store.projectDir(p.id),'analysis.json'),'utf8'))).toEqual(analysis);
+  expect((await new ProjectStore(dir).get(p.id)).analysis).toEqual(analysis);
+  expect((await store.get(p.id)).specRevision).toBe(change==='specification'?1:0);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each(['unsupported graph','malformed JSON','null snapshot'] as const)('rejects %s in separate analysis storage rather than falling back to obsolete inline evidence',async(invalid)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-invalid-snapshot-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Invalid snapshot'});
+  const analysis={...analysisMetadata,graph:GraphSchema.parse({nodes:[],edges:[]})};
+  await writeFile(join(store.projectDir(p.id),'project.json'),JSON.stringify({...p,analysis}));
+  await writeFile(join(store.projectDir(p.id),'analysis.json'),invalid==='null snapshot'?'null':invalid==='malformed JSON'?'{':
+   JSON.stringify({...analysis,graph:{schemaVersion:2,nodes:[],edges:[]}}));
+  if(invalid==='malformed JSON')await expect(store.get(p.id)).rejects.toBeInstanceOf(SyntaxError);
+  else if(invalid==='null snapshot')await expect(store.get(p.id)).rejects.toThrow();
+  else await expect(store.get(p.id)).rejects.toMatchObject({issues:expect.arrayContaining([expect.objectContaining({path:['schemaVersion']})])});
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
 it('saves mixed-detail functions and enriches the same ID while preserving earlier revisions',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-function-details-'));
  try{

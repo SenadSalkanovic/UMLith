@@ -1,7 +1,8 @@
 import {Worker} from 'node:worker_threads';
 import type {Analysis} from '../shared/model';
 export class AnalysisWorker {
- private worker=new Worker(new URL('./analysis-worker.mjs',import.meta.url));
+ // The worker registers its own loader; parent CLI hooks/flags must not leak in.
+ private worker=new Worker(new URL('./analysis-worker.mjs',import.meta.url),{execArgv:[]});
  private pending=new Map<number,{resolve:(a:Analysis)=>void;reject:(e:Error)=>void}>();
  private next=0;
  constructor(){
