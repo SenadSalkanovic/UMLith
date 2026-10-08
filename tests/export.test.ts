@@ -5,6 +5,22 @@ import {unzipSync,strFromU8} from 'fflate';
 import {ProjectStore} from '../server/store';
 import {GraphSchema,NodeSchema} from '../shared/model';
 import {exportBundle} from '../server/export';
+it('exports sensitive instructions and named required checks without losing their specification',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-sensitive-export-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Sensitive'});
+  const project=await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'Save',policy:'sensitive',
+   instructions:'  Preserve Unicode ✓\r\nNever overwrite a backup\n',requiredChecks:['unit','typecheck']}],edges:[]});
+  const files=unzipSync(exportBundle(project,'Implement saving',['src/']));
+  expect(JSON.parse(strFromU8(files['specification.json'])).graph.nodes[0]).toMatchObject({policy:'sensitive',
+   instructions:'  Preserve Unicode ✓\r\nNever overwrite a backup\n',requiredChecks:['unit','typecheck']});
+  const architecture=strFromU8(files['ARCHITECTURE.md']);
+  expect(architecture).toContain('Policy: sensitive');
+  expect(architecture).toContain('  Preserve Unicode ✓\r\nNever overwrite a backup\n');
+  expect(architecture).toContain('Required checks: unit, typecheck');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
 it('exports mixed-detail functions without replacing unknown details or claiming implementation completeness',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-function-export-'));
  try{

@@ -17,11 +17,21 @@ export const NodeSchema = z.object({
   // Missing details are unknown, including on source-backed extracted functions.
   inputs: z.string().optional(), outputs: z.string().optional(), rules: z.string().optional(),
   errors: z.string().optional(), scenarios: z.array(z.string()).optional(),
-  requiredChecks: z.array(z.string()).default([]), instructions: z.string().default(''),
+  requiredChecks: z.array(z.string().refine(value=>!!value.trim(),{message:'Required check reference must not be blank'})).default([]), instructions: z.string().default(''),
   outputPath: z.string().default(''), source: SourceSchema.optional(),
   fields: z.array(z.object({ name:z.string(), type:z.string(), key:z.string().default(''), optional:z.boolean().default(false), mappedName:z.string().optional() })).default([]),
   stepType: z.enum(['operation','call','condition','loop','try','throw','return','opaque']).optional(),
   baseline: z.object({ text:z.string().optional(), contract:z.string().optional(), source:SourceSchema.optional() }).optional(),
+}).superRefine((node,ctx)=>{
+  if(node.policy==='frozen-implementation') {
+    if(!node.source)ctx.addIssue({code:'custom',path:['source'],message:'Frozen implementation requires a source binding'});
+    if(!node.baseline?.source)ctx.addIssue({code:'custom',path:['baseline','source'],message:'Frozen implementation requires captured source evidence'});
+    if(node.baseline?.text===undefined)ctx.addIssue({code:'custom',path:['baseline','text'],message:'Frozen implementation requires an exact text baseline'});
+  }
+  if(node.policy==='frozen-contract') {
+    if(!node.source && !node.contract.trim())ctx.addIssue({code:'custom',path:['contract'],message:'Frozen contract requires a source binding or an explicit interface'});
+    if(!node.baseline?.contract?.trim())ctx.addIssue({code:'custom',path:['baseline','contract'],message:'Frozen contract requires a declared interface baseline'});
+  }
 });
 export const EdgeSchema = z.object({
   id:z.string().min(1), source:z.string().min(1), target:z.string().min(1),

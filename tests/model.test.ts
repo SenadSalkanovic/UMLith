@@ -1,6 +1,56 @@
 import {describe,it,expect} from 'vitest';
 import {GraphSchema,NodeSchema,SourceSchema,resolveSourceEvidence,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,AnalysisSchema,QualitySchema,DiagnosticSchema,GraphUpdateSchema,applyGraphUpdate,type Layout,type GraphInput} from '../shared/model';
 
+describe('protection policy prerequisites',()=>{
+ const node={id:'run',kind:'function' as const,name:'Run'};
+ const source={path:'run.ts',symbol:'run',start:0,end:3,line:1,hash:'h1',revision:'r1'};
+
+ it('round-trips all four policies with separate exact baseline evidence',()=>{
+  const graph=GraphSchema.parse({nodes:[
+   {...node,id:'editable'},
+   {...node,id:'sensitive',policy:'sensitive',instructions:'  Preserve Unicode ✓\r\n',requiredChecks:['unit','typecheck']},
+   {...node,id:'implementation',policy:'frozen-implementation',source,baseline:{source,text:'run\r\n'}},
+   {...node,id:'contract',policy:'frozen-contract',contract:'run(): number',baseline:{contract:'run(): number'}},
+  ],edges:[]});
+  const restored=GraphSchema.parse(JSON.parse(JSON.stringify(graph)));
+  expect(restored.nodes.map(n=>n.policy)).toEqual(['editable','sensitive','frozen-implementation','frozen-contract']);
+  expect(restored.nodes[1]).toMatchObject({instructions:'  Preserve Unicode ✓\r\n',requiredChecks:['unit','typecheck']});
+  expect(restored.nodes[2].baseline).toEqual({source,text:'run\r\n'});
+  expect(restored.nodes[3].baseline).toEqual({contract:'run(): number'});
+  expect(restored.nodes[3].source).toBeUndefined();
+ });
+
+ it.each([
+  {},{baseline:{source,text:'run'}},{source},{source,baseline:{text:'run'}},{source,baseline:{source}},
+  {source:{...source,hash:' '},baseline:{source,text:'run'}},
+ ])('rejects freezing implementation without valid binding and captured baseline (%j)',fields=>{
+  expect(NodeSchema.safeParse({...node,policy:'frozen-implementation',...fields}).success).toBe(false);
+  expect(GraphSchema.safeParse({nodes:[{...node,policy:'frozen-implementation',...fields}],edges:[]}).success).toBe(false);
+ });
+
+ it('permits an exact empty implementation baseline for an empty bound range',()=>{
+  expect(NodeSchema.safeParse({...node,policy:'frozen-implementation',source:{...source,end:0},
+   baseline:{source:{...source,end:0},text:''}}).success).toBe(true);
+ });
+
+ it.each([
+  {},{source},{contract:' '},{contract:'run(): number'},
+  {contract:'run(): number',baseline:{contract:'\r\n '}},{baseline:{contract:' '}},
+ ])('rejects frozen contracts without a declared interface baseline (%j)',fields=>{
+  expect(NodeSchema.safeParse({...node,policy:'frozen-contract',...fields}).success).toBe(false);
+ });
+
+ it('accepts a captured interface with a binding even without a prose contract',()=>{
+  expect(NodeSchema.safeParse({...node,policy:'frozen-contract',source,baseline:{source,contract:'run(): number'}}).success).toBe(true);
+ });
+
+ it.each(['',' ','\r\n'])('rejects blank required-check references (%j)',id=>{
+  const result=NodeSchema.safeParse({...node,policy:'sensitive',requiredChecks:[id]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues[0].path).toEqual(['requiredChecks',0]);
+ });
+});
+
 describe('analysis snapshots and graph updates',()=>{
  const source={path:'run.ts',start:0,end:3,line:1,hash:'h1',revision:'r1'};
  const graph=GraphSchema.parse({nodes:[{id:'run',kind:'function',name:'Run',source},{id:'work',kind:'function',name:'Work'}],

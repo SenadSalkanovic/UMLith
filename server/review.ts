@@ -3,7 +3,7 @@ import {createTwoFilesPatch} from 'diff';
 import {readFile,writeFile,mkdir,rename,rm,readdir} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {resolveSourceEvidence,type Project,type ProgramNode,type Analysis,type AgentJob,type ValidationReport,type ValidationIssue,type FileChange} from '../shared/model';
+import {NodeSchema,resolveSourceEvidence,type Project,type ProgramNode,type Analysis,type AgentJob,type ValidationReport,type ValidationIssue,type FileChange} from '../shared/model';
 import {Analyzer} from './analyzer';
 import {AppError,atomicJson,captureFiles,hashes,hash,safePath} from './files';
 import {ProjectStore} from './store';
@@ -12,14 +12,23 @@ export function normalizeContract(text:string){
  const tokens:string[]=[];while(scanner.scan()!==ts.SyntaxKind.EndOfFileToken)tokens.push(scanner.getTokenText());return tokens.join('|');
 }
 export function freezeNode(node:ProgramNode,policy:ProgramNode['policy'],analysis?:Analysis):ProgramNode{
- if(policy==='editable'||policy==='sensitive')return {...node,policy,baseline:undefined};
+ if(policy==='editable'||policy==='sensitive')return NodeSchema.parse({...node,policy,baseline:undefined});
  if(policy==='frozen-implementation'){
   const evidence=resolveSourceEvidence(node.source,analysis,analysis?.revision);
   if(evidence.status!=='current')throw new AppError('Freeze implementation requires valid, current source evidence. '+('message' in evidence?evidence.message:'Source binding is stale.'));
-  return {...node,policy,baseline:{source:evidence.source,text:evidence.text}};
+  return NodeSchema.parse({...node,policy,baseline:{source:evidence.source,text:evidence.text}});
  }
- if(!node.contract)throw new AppError('Freeze contract requires an explicit interface.');
- return {...node,policy,baseline:{source:node.source,contract:node.contract}};
+ let contract=node.contract;
+ if(!contract.trim()){
+  const evidence=resolveSourceEvidence(node.source,analysis,analysis?.revision);
+  if(evidence.status!=='current')throw new AppError('Freeze contract requires an explicit interface or valid, current source evidence.');
+  const matches=analysis!.graph.nodes.filter(n=>n.kind===node.kind && n.source?.path===evidence.source.path &&
+   n.source.start===evidence.source.start && n.source.end===evidence.source.end && n.source.symbol===evidence.source.symbol &&
+   n.source.hash===evidence.source.hash && n.source.revision===evidence.source.revision);
+  if(matches.length!==1 || !matches[0].contract.trim())throw new AppError('Freeze contract requires an unambiguous declared interface.');
+  contract=matches[0].contract;
+ }
+ return NodeSchema.parse({...node,policy,baseline:{source:node.source,contract}});
 }
 export function resolveBinding(node:ProgramNode,analysis:Analysis):ProgramNode|undefined {
  if(node.source)return analysis.graph.nodes.find(n=>n.kind===node.kind&&n.source?.path===node.source?.path&&(node.source?.symbol?n.source?.symbol===node.source.symbol:n.kind==='module'));
@@ -80,7 +89,7 @@ export async function validateCandidate(project:Project,job:AgentJob):Promise<Va
    if(node.kind==='function'||node.kind==='class'||node.kind==='interface'||node.kind==='entity'){
     const actual=mapped.get(node.id);
     const relevant=node.source&&changes.some(c=>c.path===node.source?.path)||!node.source;
-    if(relevant&&(!actual||node.contract&&normalizeContract(actual.contract)!==normalizeContract(node.contract)))issues.push({code:'specification',message:!actual?'Required item is missing or has an ambiguous binding: '+node.name:'Declared interface/model differs: '+node.name,nodeId:node.id});
+    if(relevant&&(!actual||node.contract.trim()&&normalizeContract(actual.contract)!==normalizeContract(node.contract)))issues.push({code:'specification',message:!actual?'Required item is missing or has an ambiguous binding: '+node.name:'Declared interface/model differs: '+node.name,nodeId:node.id});
    }
   }
   for(const kind of ['depends-on','calls'] as const){

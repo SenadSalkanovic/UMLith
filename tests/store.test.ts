@@ -6,9 +6,43 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {ProjectStore} from '../server/store';
 import {Analyzer} from '../server/analyzer';
+import {freezeNode} from '../server/review';
 import {GraphSchema,NodeSchema,type Analysis} from '../shared/model';
 const analysisMetadata:Omit<Analysis,'graph'>={revision:'source-1',sequence:1,analyzedAt:'2026-10-08T00:00:00Z',status:'current',files:{},durationMs:0,
  quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
+
+it('retains sensitive specification and both frozen baselines until an explicit specification edit',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-policy-baselines-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Policies'});
+  const source={path:'run.ts',symbol:'run',start:0,end:3,line:1,hash:'old-hash',revision:'source-1'};
+  const node=NodeSchema.parse({id:'run',kind:'function',name:'Run',source,contract:'run(): number'});
+  const old:Analysis={...analysisMetadata,graph:GraphSchema.parse({nodes:[node],edges:[]}),files:{'run.ts':{hash:'old-hash',text:'old'}}};
+  const implementation=freezeNode(node,'frozen-implementation',old);
+  const contract={...freezeNode(node,'frozen-contract'),id:'interface'};
+  const sensitive=NodeSchema.parse({id:'care',kind:'function',name:'Care',policy:'sensitive',
+   instructions:'  Preserve text ✓\r\n',requiredChecks:['unit','typecheck']});
+  await store.updateSpec(p.id,0,{nodes:[implementation,contract,sensitive],edges:[]});
+  const updatedSource={...source,hash:'new-hash',revision:'source-2'};
+  const actual={...node,source:updatedSource,contract:'run(): string'};
+  await store.updateAnalysis(p.id,{...old,revision:'source-2',sequence:2,
+   graph:GraphSchema.parse({nodes:[actual],edges:[]}),files:{'run.ts':{hash:'new-hash',text:'new'}}});
+  const reopened=await new ProjectStore(dir).get(p.id);
+  expect(reopened.specRevision).toBe(1);
+  expect(reopened.specification.nodes[0].baseline).toEqual({source,text:'old'});
+  expect(reopened.specification.nodes[1].baseline).toEqual({source,contract:'run(): number'});
+  expect(reopened.specification.nodes[2]).toMatchObject({policy:'sensitive',instructions:'  Preserve text ✓\r\n',requiredChecks:['unit','typecheck']});
+  expect(reopened.analysis?.graph.nodes[0]).toMatchObject({contract:'run(): string',source:updatedSource});
+  const refrozen=freezeNode(actual,'frozen-implementation',reopened.analysis);
+  const accepted=await store.updateSpec(p.id,1,{...reopened.specification,nodes:[refrozen,contract,sensitive]});
+  expect(accepted.specRevision).toBe(2);
+  expect(accepted.specification.nodes[0].baseline).toEqual({source:updatedSource,text:'new'});
+  const history=await store.history(p.id);
+  expect(history[1].graph.nodes[0].baseline).toEqual({source,text:'old'});
+  expect(history[2].graph.nodes[0].baseline).toEqual({source:updatedSource,text:'new'});
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
 it('creates new and imported projects in the Node/tsx runtime and releases the import worker',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-runtime-import-'));
  try{
