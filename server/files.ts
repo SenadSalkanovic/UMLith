@@ -8,8 +8,10 @@ export const excluded=(name:string)=>name==='.env'||name.startsWith('.env.')||['
 export async function atomicJson(path:string,value:unknown) {
  await mkdir(dirname(path),{recursive:true});
  const temp=path+'.'+randomUUID()+'.tmp';
- await writeFile(temp,JSON.stringify(value,null,2),{mode:0o600});
- await rename(temp,path);
+ try{
+  await writeFile(temp,JSON.stringify(value,null,2),{mode:0o600});
+  await rename(temp,path);
+ }finally{await rm(temp,{force:true}).catch(()=>{});}
 }
 export async function safePath(root:string,path:string,allowMissing=true):Promise<string> {
  if(!path||isAbsolute(path)||path.includes('\0')||path.split(/[\\/]/).some(p=>p==='..')) throw new AppError('Unsafe project path: '+path);

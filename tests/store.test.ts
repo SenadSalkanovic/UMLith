@@ -1,5 +1,5 @@
-import {it,expect} from 'vitest';
-import {mkdtemp,mkdir,readFile,writeFile,rm} from 'node:fs/promises';
+import {it,expect,vi} from 'vitest';
+import {mkdtemp,mkdir,readFile,writeFile,rm,readdir,rename} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFile} from 'node:child_process';
@@ -10,6 +10,130 @@ import {freezeNode} from '../server/review';
 import {GraphSchema,NodeSchema,type Analysis} from '../shared/model';
 const analysisMetadata:Omit<Analysis,'graph'>={revision:'source-1',sequence:1,analyzedAt:'2026-10-08T00:00:00Z',status:'current',files:{},durationMs:0,
  quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
+
+vi.mock('node:fs/promises',async importOriginal=>{
+ const actual=await importOriginal<typeof import('node:fs/promises')>();
+ return {...actual,rename:vi.fn(actual.rename),writeFile:vi.fn(actual.writeFile)};
+});
+
+it.each(['history write','history rename','project rename'] as const)('recovers committed intent and immutable history after a failed %s',async(stage)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-failed-spec-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Recoverable'});
+  await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'save',description:'Keep text ✓\r\n'}],edges:[]});
+  const base=store.projectDir(p.id),before=await readFile(join(base,'project.json'),'utf8');
+  const committed=await Promise.all([0,1].map(r=>readFile(join(base,'revisions',r+'.json'),'utf8')));
+  const failure=Object.assign(new Error('Injected disk failure'),{code:'ENOSPC'});
+  if(stage==='history write'){
+   const actual=vi.mocked(writeFile).getMockImplementation()!;
+   vi.mocked(writeFile).mockImplementationOnce(async(path)=>{await actual(path,'{partial');throw failure;});
+  }
+  else{
+   const actual=vi.mocked(rename).getMockImplementation()!;
+   vi.mocked(rename).mockImplementation(async(from,to)=>{
+    if(String(to)===(stage==='history rename'?join(base,'revisions','2.json'):join(base,'project.json')))throw failure;
+    return actual(from,to);
+   });
+  }
+  await expect(store.updateSpec(p.id,1,{nodes:[{id:'failed',kind:'function',name:'Uncommitted'}],edges:[]})).rejects.toThrow('Injected disk failure');
+  const actual=await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(rename).mockImplementation(actual.rename);
+  vi.mocked(writeFile).mockImplementation(actual.writeFile);
+  expect(await readFile(join(base,'project.json'),'utf8')).toBe(before);
+  const restarted=new ProjectStore(dir);
+  expect((await restarted.get(p.id)).specification.nodes[0]).toMatchObject({id:'save',description:'Keep text ✓\r\n'});
+  expect((await restarted.history(p.id)).map(r=>r.revision)).toEqual([0,1]);
+  for(const subdir of [base,join(base,'revisions')])expect((await readdir(subdir)).filter(f=>f.endsWith('.tmp'))).toEqual([]);
+  await restarted.updateSpec(p.id,1,{nodes:[{id:'retry',kind:'function',name:'Accepted retry'}],edges:[]});
+  expect((await restarted.history(p.id)).map(r=>r.revision)).toEqual([0,1,2]);
+  expect((await restarted.history(p.id))[2].graph.nodes[0].id).toBe('retry');
+  for(const [i,text] of committed.entries())expect(await readFile(join(base,'revisions',i+'.json'),'utf8')).toBe(text);
+ }finally{
+  const actual=await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(rename).mockImplementation(actual.rename);vi.mocked(writeFile).mockImplementation(actual.writeFile);
+  await rm(dir,{recursive:true,force:true});
+ }
+});
+
+it('ignores interrupted uncommitted records and temporary files on restart and safely retries',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-interrupted-spec-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Interrupted'}),base=store.projectDir(p.id);
+  await writeFile(join(base,'revisions','1.json'),'{uncommitted');
+  await writeFile(join(base,'project.json.interrupted.tmp'),'{partial');
+  const restarted=new ProjectStore(dir);
+  expect((await restarted.get(p.id)).specRevision).toBe(0);
+  expect((await restarted.history(p.id)).map(r=>r.revision)).toEqual([0]);
+  await restarted.updateSpec(p.id,0,{nodes:[],edges:[]});
+  expect((await restarted.history(p.id)).map(r=>r.revision)).toEqual([0,1]);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each(['project','history'] as const)('reports the corrupt %s JSON record explicitly',async(record)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-corrupt-spec-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Corrupt'}),base=store.projectDir(p.id);
+  await writeFile(join(base,record==='project'?'project.json':'revisions/0.json'),'{broken');
+  await expect(record==='project'?store.get(p.id):store.history(p.id)).rejects.toThrow(record==='project'?/invalid JSON.*project.json/i:/invalid JSON.*0.json/i);
+  if(record==='project')await expect(store.list()).rejects.toThrow(/invalid JSON.*project.json/i);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('does not publish a new project if its initial history cannot be saved',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-failed-create-'));
+ try{
+  const store=new ProjectStore(dir),actual=vi.mocked(rename).getMockImplementation()!;
+  vi.mocked(rename).mockImplementation(async(from,to)=>{
+   if(String(to).endsWith('/revisions/0.json'))throw new Error('Injected initial history failure');
+   return actual(from,to);
+  });
+  await expect(store.create({name:'Uncommitted project'})).rejects.toThrow('Injected initial history failure');
+  expect(await new ProjectStore(dir).list()).toEqual([]);
+ }finally{
+  const actual=await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(rename).mockImplementation(actual.rename);
+  await rm(dir,{recursive:true,force:true});
+ }
+});
+
+it.each(['missing revision','wrong filename','duplicate revision filename'] as const)('reports %s rather than returning incomplete or ambiguous history',async(problem)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-incomplete-history-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'History validation'}),base=join(store.projectDir(p.id),'revisions');
+  await store.updateSpec(p.id,0,{nodes:[],edges:[]});
+  if(problem==='missing revision')await rm(join(base,'0.json'));
+  else await writeFile(join(base,problem==='wrong filename'?'bad.json':'00.json'),await readFile(join(base,'0.json')));
+  await expect(new ProjectStore(dir).history(p.id)).rejects.toThrow(/specification history/i);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each([
+ ['unsupported record version',{schemaVersion:2}],
+ ['negative revision',{revision:-1}],
+ ['wrong revision',{revision:7}],
+ ['invalid timestamp',{createdAt:'yesterday'}],
+ ['missing graph',{graph:null}],
+])('rejects history with %s',async(_label,change)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-invalid-history-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Invalid history'}),file=join(store.projectDir(p.id),'revisions','0.json');
+  const record=JSON.parse(await readFile(file,'utf8'));
+  await writeFile(file,JSON.stringify({...record,...change}));
+  await expect(store.history(p.id)).rejects.toThrow();
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each([-1,1.5,'1',null,Number.MAX_SAFE_INTEGER+1])('rejects a corrupt current specification revision %s before it can overwrite history',async(specRevision)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-invalid-revision-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Invalid revision'}),file=join(store.projectDir(p.id),'project.json');
+  await writeFile(file,JSON.stringify({...p,specRevision}));
+  const before=await readFile(join(store.projectDir(p.id),'revisions','0.json'),'utf8');
+  await expect(store.get(p.id)).rejects.toThrow();
+  await expect(store.updateSpec(p.id,specRevision as number,{nodes:[],edges:[]})).rejects.toThrow();
+  expect(await readFile(join(store.projectDir(p.id),'revisions','0.json'),'utf8')).toBe(before);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
 
 it('retains sensitive specification and both frozen baselines until an explicit specification edit',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-policy-baselines-'));
@@ -220,6 +344,10 @@ it('saves mixed-detail functions and enriches the same ID while preserving earli
   const enrichment={inputs:'Document',outputs:'void',rules:'Atomic write',errors:'DiskFull',scenarios:['Reopen saved text']};
   await store.updateSpec(p.id,1,{...reopened.specification,nodes:[{...reopened.specification.nodes[0],...enrichment},reopened.specification.nodes[1]]});
   const updated=await new ProjectStore(dir).get(p.id),history=await store.history(p.id);
+  expect(history.map(r=>({schemaVersion:r.schemaVersion,revision:r.revision}))).toEqual([
+   {schemaVersion:1,revision:0},{schemaVersion:1,revision:1},{schemaVersion:1,revision:2},
+  ]);
+  for(const revision of [0,1,2])expect(JSON.parse(await readFile(join(store.projectDir(p.id),'revisions',revision+'.json'),'utf8'))).toMatchObject({schemaVersion:1,revision});
   expect(updated.specification.nodes[0]).toMatchObject({id:'save',description:'Save text',...enrichment});
   expect(updated.specification.nodes[1]).toMatchObject(detailed);
   expect(updated.analysis).toBeUndefined();
