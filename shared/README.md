@@ -40,6 +40,22 @@ T002–T009 consume the normalized graph and existing node/edge records. T002 ow
 
 The task cards and planning contract are controller-owned during this implementation; this document records the shipped interface without editing those files.
 
+## Stable identity and reconciliation contract (T002)
+
+`createNodeId(): string` allocates an opaque UUID using platform `crypto.randomUUID`, available in the supported Node runtime and the local browser's secure context. Call it once when creating a human node, then persist the ID. Never regenerate an existing ID when editing a name, description, parent, contract, workflow, or source binding. Nodes with identical display names receive independent IDs. Existing nonempty IDs remain valid: this is an allocation rule for new nodes, not a UUID-only schema or a migration of saved graphs. AI proposals must likewise preserve IDs for edits to existing nodes.
+
+Layout is a separate `Layout` record indexed by node ID. Moving a node changes only its layout entry; renaming changes only graph content. Selection and edge endpoints continue to reference the persisted ID. `graphDelta` therefore reports a rename as a changed node rather than a deletion/addition, and layout-only changes produce no graph delta. A relationship's label is display text; editing it or an endpoint's display name does not allocate a new edge ID. Allocate an ID once for a new relationship and retain it while that relationship persists.
+
+`sourceIdentityKey(node: Pick<ProgramNode, 'kind' | 'source'>): string | undefined` supplies a **candidate reconciliation key**, separate from `node.id`. Within a single project's captured source, named declarations use the JSON tuple `[source.path, node.kind, source.symbol]`; modules use `[source.path, 'module', null]`. Tuple encoding keeps separator-containing paths and symbols distinct. `source.symbol` must be the qualified declaration identity from the analyzer (for example `Order.save`), rather than a UI label or an unqualified member name. Paths use the captured project's canonical relative spelling; the helper does not guess path aliases, change case, or resolve files. Reconcile within one project and snapshot lineage, not across projects based on matching tuples.
+
+Keys exclude node IDs, display names, layout, parent IDs, source offsets/lines, hashes, and analysis revisions. Editing text before a declaration or changing its body therefore does not change its key. Changing the actual declaration's symbol, path, or kind does change its key. Missing source/path or a missing/empty declaration symbol returns `undefined`; systems and workflow steps also return `undefined`, since their evidence does not supply a reliable declaration key. Do not substitute display names or source offsets for unavailable keys. A human source-bound node can use the same helper to identify candidate implemented declarations without changing its human ID or specification.
+
+Importer and synchronization consumers must group candidates by key in **both** snapshots before reusing an old ID. Reuse requires exactly one compatible logical declaration on each side. Duplicate keys are possible (overloads, merged declarations, or distinct declarations with identical qualified spelling); equal keys alone are not proof. An importer may group overloads/merged declarations only when compiler evidence establishes a single logical symbol. Never use first-match order, nearest offsets, or policy to break ties. Missing or ambiguous identity evidence requires explicit source-binding review, especially for sensitive/frozen nodes. An ambiguous rename or move must not inherit a candidate's ID, layout, selection, source binding, or protected baseline arbitrarily. Clear rename/move matches require scoped declaration evidence beyond the exact key; the matching algorithm and review records belong to T034/T056, with layout/selection integration in T057. Retain prior evidence and baselines pending review; synchronization cannot rewrite human intent or reset protection.
+
+`validRelationship(kind: ProgramEdge['kind'], source: ProgramNode['kind'], target: ProgramNode['kind']): boolean` exposes the existing endpoint-kind rules in the table above for editors and importers. `GraphSchema` uses this same predicate for relationship and parent validation and remains the authoritative graph boundary: the predicate alone does not check IDs, references, or cycles. In particular, `next`, `true`, and `false` connect steps only; branch relationships between ER entities are rejected. This export does not change the v1 endpoint rules.
+
+T018/T020/T022 consume persisted human IDs and `createNodeId` for creation; T034/T056 consume `sourceIdentityKey` and the uniqueness/review rules; T053/T057/T066 consume stable IDs for deltas, view state, and proposal comparison. No graph fields, schema versions, existing IDs, or persistence signatures change in T002. Later task cards remain controller-owned.
+
 ## 2026-10-08 — T001 shared program graph
 
 The shared model acceptance criteria and concrete graph scenarios are verified. The graph has a v1 schema marker, normalized legacy input, typed relationships, unique IDs, endpoint/parent checks, and containment-cycle detection. Architecture, ER, and workflows use the same node/edge collections. The shipped interface and dependent-task input/output expectations are documented in [Shared program graph contract](#shared-program-graph-contract).
@@ -70,3 +86,27 @@ Prior independent review findings addressed: child-kind containment checks now a
 The continuation's independent review also reproduced a P1 regression: the analyzer can emit an invalid calls edge from an interface with a computed property, and unchecked analysis persistence would make subsequent project reads fail. `updateAnalysis` now validates before saving. A real-analyzer regression test first failed because the invalid write succeeded, then passed after the fix, confirming unchanged persisted bytes, readable prior evidence, and successful recovery after source correction.
 
 Independent re-review approved that fix with no remaining findings and separately ran `npm test -- tests/store.test.ts`: 7 tests passed. The full suite and TypeScript check above were rerun after the fix. Browser/live-agent checks remain limited as noted above.
+
+## 2026-10-08 — T002 stable identity and relationship semantics
+
+Scope: `shared/model.ts`, `tests/model.test.ts`, and this shared contract. Added explicit ID allocation and source candidate-key exports and exposed the existing relationship validator; retained the graph shape, persisted IDs, and endpoint rules. Task cards, original plan, runner and its tests/state/logs, and Git index/configuration remain unchanged.
+
+| T002 requirement/scenario | Evidence |
+| --- | --- |
+| Human node rename and layout movement retain identity | Model test creates a human function, renames and repositions it, round-trips the graph, and verifies unchanged ID, selection reference, edge endpoint, and changed-node delta with no deletions |
+| Human ID allocation is independent of display names | Two identically named human functions receive distinct IDs and validate together |
+| Invalid relationship combinations are rejected | Existing accepted/rejected endpoint tests remain; new `true` and `false` branch tests reject unrelated entities via the public predicate and the graph boundary |
+| Importer/synchronization can consume identity rules | Typed `sourceIdentityKey` tests cover stable keys across label/offset/content/revision edits; different paths, kinds, and qualified symbols; delimiter safety; modules; and unavailable evidence. The contract above defines uniqueness and binding-review requirements for consumers |
+
+Validation observed:
+
+- Before implementation, `npm test -- tests/model.test.ts`: 7 new tests failed because the required exports were absent; 83 existing tests passed.
+- After implementation, `npm test -- tests/model.test.ts`: all 90 model tests passed.
+- `npm test`: all 109 tests passed across 7 files, including analyzer, persistence, sync, review, export, and fake-agent tests.
+- `npx tsc --noEmit`: passed, exit 0.
+- `git diff --check HEAD`: passed, exit 0.
+- `npm run build`: TypeScript passed; Vite failed because `/src/main.tsx` is absent, the pre-existing browser-entry blocker recorded for T001. No browser bundle or browser interaction is claimed.
+
+Independent read-only review approved T002 with no findings and verified every acceptance criterion and concrete scenario against the implementation, tests, and contract. The reviewer independently ran `npm test -- tests/model.test.ts` (90 passed) and `git diff --check HEAD` (passed). Full-suite and TypeScript evidence above came from the implementer's runs; the reviewer did not repeat them.
+
+Limits: full source rename/move reconciliation and its review UI are later T034/T056/T057 work. This task defines their reusable keys and mandatory review semantics, without claiming that the current analyzer already implements those later tasks. Live-agent and browser smoke tests were not run.

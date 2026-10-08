@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {GraphSchema,NodeSchema,graphDelta,emptyGraph} from '../shared/model';
+import {GraphSchema,NodeSchema,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,type Layout} from '../shared/model';
 describe('program graph',()=>{
  it('rejects cycles, duplicates and dangling relationships',()=>{
   const a=NodeSchema.parse({id:'a',kind:'module',name:'A',parentId:'b'});
@@ -12,6 +12,79 @@ describe('program graph',()=>{
   const a=NodeSchema.parse({id:'a',kind:'function',name:'Old'});
   const b=NodeSchema.parse({id:'b',kind:'function',name:'Removed'});
   expect(graphDelta({...emptyGraph(),nodes:[a,b]},{...emptyGraph(),nodes:[{...a,name:'New'}]})).toMatchObject({changedNodes:[{id:'a',name:'New'}],deletedNodes:['b']});
+ });
+
+ it('allocates distinct identities for human functions with identical names',()=>{
+  const graph=GraphSchema.parse({nodes:[
+   {id:createNodeId(),kind:'function',name:'save'},
+   {id:createNodeId(),kind:'function',name:'save'},
+  ],edges:[]});
+  expect(graph.nodes[0].id).not.toBe(graph.nodes[1].id);
+  expect(graph.nodes.map(n=>n.provenance)).toEqual(['human','human']);
+ });
+
+ it('retains a human function identity and references after rename and reposition',()=>{
+  const id=createNodeId();
+  const before=GraphSchema.parse({nodes:[
+   {id:'module',kind:'module',name:'Orders'},
+   {id,kind:'function',name:'save',parentId:'module'},
+  ],edges:[{id:'owns',kind:'contains',source:'module',target:id}]});
+  const selectedId=id;
+  const layout:Layout={[id]:{x:10,y:20}};
+  const renamed=GraphSchema.parse({...before,nodes:before.nodes.map(n=>n.id===id?{...n,name:'saveOrder'}:n)});
+  layout[id]={x:300,y:150};
+  const restored=GraphSchema.parse(JSON.parse(JSON.stringify(renamed)));
+  expect(restored.nodes.find(n=>n.id===selectedId)).toMatchObject({id,name:'saveOrder',parentId:'module'});
+  expect(restored.edges[0]).toMatchObject({id:'owns',target:id});
+  expect(layout[selectedId]).toEqual({x:300,y:150});
+  expect(graphDelta(before,restored)).toMatchObject({changedNodes:[{id,name:'saveOrder'}],deletedNodes:[],changedEdges:[],deletedEdges:[]});
+  expect(graphDelta(renamed,restored).changedNodes).toEqual([]);
+ });
+
+ it('keys extracted declarations by source scope without using labels, offsets or content revisions',()=>{
+  const original=NodeSchema.parse({id:'original',kind:'function',name:'Save order',provenance:'extracted',
+   source:{path:'orders.ts',symbol:'Order.save',start:10,end:100,line:2,hash:'before',revision:'r1'}});
+  const edited=NodeSchema.parse({...original,id:'fresh',name:'New display label',parentId:'new-parent',
+   source:{...original.source!,start:50,end:200,line:7,hash:'after',revision:'r2'}});
+  expect(sourceIdentityKey(original)).toBe('["orders.ts","function","Order.save"]');
+  expect(sourceIdentityKey(edited)).toBe('["orders.ts","function","Order.save"]');
+  expect(edited.id).toBe('fresh');
+  for(const node of [
+   {...original,kind:'class' as const},
+   {...original,source:{...original.source!,path:'archive/orders.ts'}},
+   {...original,source:{...original.source!,symbol:'Other.save'}},
+  ])expect(sourceIdentityKey(node)).not.toBe(sourceIdentityKey(original));
+ });
+
+ it('uses a path-only source scope for modules and does not guess missing declaration evidence',()=>{
+  const source={path:'orders.ts',start:0,end:100,line:1,hash:'content',revision:'r1'};
+  expect(sourceIdentityKey({kind:'module',source})).toBe('["orders.ts","module",null]');
+  expect(sourceIdentityKey({kind:'module',source:{...source,symbol:'display'}})).toBe('["orders.ts","module",null]');
+  expect(sourceIdentityKey({kind:'function',source})).toBeUndefined();
+  expect(sourceIdentityKey({kind:'function',source:{...source,symbol:''}})).toBeUndefined();
+  expect(sourceIdentityKey({kind:'function',source:{...source,path:'',symbol:'save'}})).toBeUndefined();
+  expect(sourceIdentityKey({kind:'function'})).toBeUndefined();
+  expect(sourceIdentityKey({kind:'step',source:{...source,symbol:'save'}})).toBeUndefined();
+  expect(sourceIdentityKey({kind:'system',source:{...source,symbol:'project'}})).toBeUndefined();
+ });
+
+ it('keeps delimiter-containing source scopes distinct',()=>{
+  const source={path:'a:function:b',symbol:'c',start:0,end:1,line:1,hash:'h',revision:'r'};
+  const first=sourceIdentityKey({kind:'function',source});
+  const second=sourceIdentityKey({kind:'function',source:{...source,path:'a',symbol:'b:function:c'}});
+  expect(first).toBe('["a:function:b","function","c"]');
+  expect(second).toBe('["a","function","b:function:c"]');
+  expect(first).not.toBe(second);
+ });
+
+ it.each(['true','false'] as const)('rejects a %s workflow branch between unrelated entities',kind=>{
+  expect(validRelationship(kind,'entity','entity')).toBe(false);
+  const result=GraphSchema.safeParse({nodes:[
+   {id:'order',kind:'entity',name:'Order'},
+   {id:'user',kind:'entity',name:'User'},
+  ],edges:[{id:'branch',source:'order',target:'user',kind}]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toContainEqual(expect.objectContaining({path:['edges',0,'kind']}));
  });
 
  it('round-trips architecture, ER and workflow entities in one versioned graph',()=>{

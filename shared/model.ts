@@ -25,7 +25,7 @@ export const EdgeSchema = z.object({
   label:z.string().default(''), provenance:z.enum(['human','extracted','ai']).default('human'),
   uncertain:z.boolean().default(false),
 });
-function validRelationship(kind:ProgramEdge['kind'],source:ProgramNode['kind'],target:ProgramNode['kind']) {
+export function validRelationship(kind:ProgramEdge['kind'],source:ProgramNode['kind'],target:ProgramNode['kind']) {
   switch(kind) {
     case 'depends-on': return source!=='step' && target!=='step';
     // The same containment rules apply to edges and parentId; see shared/README.md.
@@ -103,6 +103,15 @@ export type ProgramEdge=z.infer<typeof EdgeSchema>;
 export type Graph=z.infer<typeof GraphSchema>;
 export type GraphInput=z.input<typeof GraphSchema>;
 export type Source=z.infer<typeof SourceSchema>;
+export const createNodeId=():string=>globalThis.crypto.randomUUID();
+// A candidate match key, never an ID: duplicate keys require binding review.
+export function sourceIdentityKey(node:Pick<ProgramNode,'kind'|'source'>):string|undefined {
+  const source=node.source;
+  if(!source?.path || node.kind==='system' || node.kind==='step')return undefined;
+  if(node.kind==='module')return JSON.stringify([source.path,node.kind,null]);
+  if(!source.symbol)return undefined;
+  return JSON.stringify([source.path,node.kind,source.symbol]);
+}
 export type Diagnostic={severity:'error'|'warning'|'info'; message:string; path?:string; line?:number; code?:string};
 export type Quality={
   eligibleFiles:number; analyzedFiles:number; unresolvedReferences:number; unsupportedConstructs:number; inferredItems:number;
