@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {ProjectStore} from '../server/store';
+import {AppError} from '../server/files';
 import {Analyzer} from '../server/analyzer';
 import {freezeNode} from '../server/review';
 import {GraphSchema,NodeSchema,type Analysis} from '../shared/model';
@@ -14,6 +15,78 @@ const analysisMetadata:Omit<Analysis,'graph'>={revision:'source-1',sequence:1,an
 vi.mock('node:fs/promises',async importOriginal=>{
  const actual=await importOriginal<typeof import('node:fs/promises')>();
  return {...actual,rename:vi.fn(actual.rename),writeFile:vi.fn(actual.writeFile)};
+});
+
+it('accepts only one racing specification edit and provides conflict details for reload and retry',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-spec-race-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Concurrent edits'});
+  const initial=await readFile(join(store.projectDir(p.id),'revisions','0.json'),'utf8');
+  const edits=['First intent','Second intent'].map(name=>({nodes:[{id:'save',kind:'function' as const,name}],edges:[]}));
+  const results=await Promise.allSettled(edits.map(graph=>store.updateSpec(p.id,0,graph)));
+  expect(results.map(result=>result.status)).toEqual(['fulfilled','rejected']);
+  const conflict=(results[1] as PromiseRejectedResult).reason;
+  expect(conflict).toBeInstanceOf(AppError);
+  expect(conflict).toMatchObject({statusCode:409,projectId:p.id,expectedRevision:0,currentRevision:1});
+  expect(conflict.message).toMatch(/reload/i);
+  const reloaded=await new ProjectStore(dir).get(conflict.projectId);
+  expect(reloaded.specRevision).toBe(conflict.currentRevision);
+  expect(reloaded.specification.nodes[0].name).toBe('First intent');
+  expect((await store.history(p.id)).map(r=>({revision:r.revision,names:r.graph.nodes.map(n=>n.name)}))).toEqual([
+   {revision:0,names:[]},{revision:1,names:['First intent']},
+  ]);
+  expect(await readFile(join(store.projectDir(p.id),'revisions','0.json'),'utf8')).toBe(initial);
+  expect((await readdir(join(store.projectDir(p.id),'revisions'))).sort()).toEqual(['0.json','1.json']);
+  const retried=await store.updateSpec(conflict.projectId,reloaded.specRevision,edits[1]);
+  expect(retried.specRevision).toBe(2);
+  expect(retried.specification.nodes[0].name).toBe('Second intent');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each([undefined,null,'0',false,-1,0.5,NaN,Infinity,Number.MAX_SAFE_INTEGER+1])('rejects invalid expected revision %s without writing',async(expected)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-expected-revision-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Revision validation'});
+  const base=store.projectDir(p.id),before=await readFile(join(base,'project.json'),'utf8');
+  const initial=await readFile(join(base,'revisions','0.json'),'utf8');
+  await expect(store.updateSpec(p.id,expected as number,{nodes:[],edges:[]})).rejects.toMatchObject({statusCode:400});
+  expect(await readFile(join(base,'project.json'),'utf8')).toBe(before);
+  expect(await readFile(join(base,'revisions','0.json'),'utf8')).toBe(initial);
+  expect(await readdir(join(base,'revisions'))).toEqual(['0.json']);
+  expect((await store.updateSpec(p.id,0,{nodes:[],edges:[]})).specRevision).toBe(1);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each([
+ ['specification','layout','analysis'],['specification','analysis','layout'],
+ ['layout','specification','analysis'],['layout','analysis','specification'],
+ ['analysis','specification','layout'],['analysis','layout','specification'],
+] as const)('preserves concurrent mutations queued as %s, %s, %s',async(...order)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-mixed-race-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Independent state'});
+  await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'Old intent'}],edges:[]});
+  await store.updateAnalysis(p.id,{...analysisMetadata,graph:GraphSchema.parse({nodes:[{id:'save',kind:'function',name:'Old implementation'}],edges:[]})});
+  const base=store.projectDir(p.id),committed=await Promise.all([0,1].map(r=>readFile(join(base,'revisions',r+'.json'),'utf8')));
+  const layout={save:{x:23,y:47}};
+  const analysis={...analysisMetadata,sequence:2,revision:'source-2',graph:GraphSchema.parse({nodes:[{id:'save',kind:'function',name:'New implementation'}],edges:[]})};
+  const mutations={
+   specification:()=>store.updateSpec(p.id,1,{nodes:[{id:'save',kind:'function',name:'New human intent'}],edges:[]}),
+   layout:()=>store.updateLayout(p.id,layout),
+   analysis:()=>store.updateAnalysis(p.id,analysis),
+  };
+  await Promise.all(order.map(key=>mutations[key]()));
+  const reopened=await new ProjectStore(dir).get(p.id);
+  expect(reopened.specRevision).toBe(2);
+  expect(reopened.specification.nodes[0].name).toBe('New human intent');
+  expect(reopened.layout).toEqual(layout);
+  expect(reopened.analysis).toEqual(analysis);
+  expect(JSON.parse(await readFile(join(base,'project.json'),'utf8'))).toMatchObject({specRevision:2,specification:{nodes:[{name:'New human intent'}]},layout});
+  expect((await store.history(p.id)).map(r=>({revision:r.revision,names:r.graph.nodes.map(n=>n.name)}))).toEqual([
+   {revision:0,names:[]},{revision:1,names:['Old intent']},{revision:2,names:['New human intent']},
+  ]);
+  expect(await Promise.all([0,1].map(r=>readFile(join(base,'revisions',r+'.json'),'utf8')))).toEqual(committed);
+ }finally{await rm(dir,{recursive:true,force:true});}
 });
 
 it.each(['history write','history rename','project rename'] as const)('recovers committed intent and immutable history after a failed %s',async(stage)=>{

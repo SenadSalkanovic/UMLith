@@ -6,6 +6,11 @@ import {GraphSchema,emptyGraph,type Project,type GraphInput,type Layout,type Ana
 import {AppError,atomicJson} from './files';
 import {AnalysisWorker} from './worker';
 const RevisionSchema=z.int().nonnegative();
+export class SpecificationConflictError extends AppError {
+ constructor(public projectId:string,public expectedRevision:number,public currentRevision:number){
+  super(`Specification changed (expected ${expectedRevision}, current ${currentRevision}). Reload project ${projectId} and review your edit.`,409);
+ }
+}
 const ProjectRecordSchema=z.object({
  id:z.string().regex(/^[a-zA-Z0-9-]+$/),name:z.string(),description:z.string(),target:z.string(),root:z.string(),
  managed:z.boolean(),createdAt:z.iso.datetime({offset:true}),specRevision:RevisionSchema,
@@ -74,9 +79,10 @@ export class ProjectStore {
   await atomicJson(join(this.projectDir(project.id),'project.json'),specification);
  }
  async updateSpec(id:string,expected:number,graph:GraphInput):Promise<Project>{
+  if(!RevisionSchema.safeParse(expected).success)throw new AppError('Expected specification revision must be a nonnegative safe integer.');
   return this.transaction(id,async()=>{
    const project=await this.get(id);
-   if(project.specRevision!==expected)throw new AppError('Specification changed. Reload and review your edit.',409);
+   if(project.specRevision!==expected)throw new SpecificationConflictError(id,expected,project.specRevision);
    const parsed=GraphSchema.parse(graph);
    project.specification=parsed;project.specRevision=RevisionSchema.parse(project.specRevision+1);
    await atomicJson(join(this.projectDir(id),'revisions',project.specRevision+'.json'),{schemaVersion:1,revision:project.specRevision,createdAt:new Date().toISOString(),graph:parsed});
