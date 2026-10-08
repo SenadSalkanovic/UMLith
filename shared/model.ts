@@ -2,14 +2,17 @@ import { z } from 'zod';
 export const nodeKinds = ['system','module','class','interface','function','entity','enum','step'] as const;
 export const GRAPH_SCHEMA_VERSION = 1;
 export const policies = ['editable','sensitive','frozen-implementation','frozen-contract'] as const;
+export const ProvenanceSchema = z.enum(['human','extracted','ai']);
 export const SourceSchema = z.object({
-  path: z.string(), symbol: z.string().optional(), start: z.number(), end: z.number(),
-  line: z.number(), hash: z.string(), revision: z.string(),
-});
+  path: z.string().refine(value=>!!value.trim()), symbol: z.string().optional(),
+  start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),
+  line: z.number().int().min(1), hash: z.string().refine(value=>!!value.trim()),
+  revision: z.string().refine(value=>!!value.trim()),
+}).refine(source=>source.end>=source.start,{path:['end'],message:'Source range ends before it starts'});
 export const NodeSchema = z.object({
   id: z.string().min(1), kind: z.enum(nodeKinds), name: z.string().min(1),
   parentId: z.string().min(1).optional(), description: z.string().default(''),
-  provenance: z.enum(['human','extracted','ai']).default('human'),
+  provenance: ProvenanceSchema.default('human'),
   policy: z.enum(policies).default('editable'), contract: z.string().default(''),
   // Missing details are unknown, including on source-backed extracted functions.
   inputs: z.string().optional(), outputs: z.string().optional(), rules: z.string().optional(),
@@ -23,9 +26,10 @@ export const NodeSchema = z.object({
 export const EdgeSchema = z.object({
   id:z.string().min(1), source:z.string().min(1), target:z.string().min(1),
   kind:z.enum(['depends-on','calls','contains','inherits','implements','relates-to','next','true','false','exception','reads','writes']),
-  label:z.string().default(''), provenance:z.enum(['human','extracted','ai']).default('human'),
-  uncertain:z.boolean().default(false),
-});
+  label:z.string().default(''), provenance:ProvenanceSchema.default('human'),
+  uncertain:z.boolean().optional(),
+}).transform(edge=>({...edge,uncertain:edge.uncertain??edge.provenance==='ai'}))
+  .refine(edge=>edge.provenance!=='ai'||edge.uncertain,{path:['uncertain'],message:'AI-inferred relationships must remain uncertain'});
 export const RequirementSchema = z.object({
   id:z.string().min(1), text:z.string(),
   nodeIds:z.array(z.string().min(1)).default([]), edgeIds:z.array(z.string().min(1)).default([]),
@@ -130,10 +134,7 @@ export const GraphSchema = z.object({
     if(parents.get(n.id)!.size!==1)ctx.addIssue({code:'custom',path:['nodes',i,'parentId'],message:'Workflow steps require exactly one containment parent'});
     if(!owners.has(n.id))ctx.addIssue({code:'custom',path:['nodes',i,'parentId'],message:'Workflow steps require an owning function'});
     if(n.stepType==='opaque') {
-      const s=n.source;
-      if(!s || !s.path.trim() || !s.hash.trim() || !s.revision.trim() ||
-        !Number.isSafeInteger(s.start) || s.start<0 || !Number.isSafeInteger(s.end) || s.end<s.start ||
-        !Number.isSafeInteger(s.line) || s.line<1)
+      if(!n.source)
         ctx.addIssue({code:'custom',path:['nodes',i,'source'],message:'Opaque steps require source evidence with a path, range, line, content hash and analysis revision'});
     }
   });
@@ -161,6 +162,25 @@ export type Requirement=z.infer<typeof RequirementSchema>;
 export type Graph=z.infer<typeof GraphSchema>;
 export type GraphInput=z.input<typeof GraphSchema>;
 export type Source=z.infer<typeof SourceSchema>;
+export type SourceEvidence=
+  | {status:'current'|'stale';source:Source;text:string}
+  | {status:'invalid'|'unavailable';message:string};
+// Captures supply trusted hashes; never slice newer content using an older binding.
+export function resolveSourceEvidence(source:Source|undefined,capture:Pick<Analysis,'revision'|'status'|'files'>|undefined,currentRevision?:string):SourceEvidence {
+  if(!source)return {status:'unavailable',message:'No source binding is available'};
+  const parsed=SourceSchema.safeParse(source);
+  if(!parsed.success)return {status:'invalid',message:parsed.error.message};
+  if(!capture || capture.revision!==source.revision)
+    return {status:'unavailable',message:'Captured source revision is unavailable: '+source.revision};
+  const file=Object.hasOwn(capture.files,source.path)?capture.files[source.path]:undefined;
+  if(!file)return {status:'unavailable',message:'Captured source file is unavailable: '+source.path};
+  if(file.hash!==source.hash)return {status:'invalid',message:'Source content hash does not match the captured file'};
+  if(source.end>file.text.length)return {status:'invalid',message:'Source range exceeds the captured content'};
+  if(source.line!==file.text.slice(0,source.start).split('\n').length)
+    return {status:'invalid',message:'Source line does not match the captured range'};
+  const status=source.revision===currentRevision && (capture.status==='current'||capture.status==='partial')?'current':'stale';
+  return {status,source:parsed.data,text:file.text.slice(source.start,source.end)};
+}
 export const createNodeId=():string=>globalThis.crypto.randomUUID();
 // A candidate match key, never an ID: duplicate keys require binding review.
 export function sourceIdentityKey(node:Pick<ProgramNode,'kind'|'source'>):string|undefined {

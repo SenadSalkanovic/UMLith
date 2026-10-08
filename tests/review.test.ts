@@ -4,9 +4,28 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {ProjectStore} from '../server/store';
 import {Analyzer} from '../server/analyzer';
-import {validateCandidate,applyReviewed,freezeNode} from '../server/review';
+import {validateCandidate,applyReviewed,freezeNode,protectionIssues} from '../server/review';
 import {captureFiles,hashes,safePath} from '../server/files';
-import type {AgentJob} from '../shared/model';
+import {NodeSchema,emptyGraph,type AgentJob,type Analysis,type Project} from '../shared/model';
+
+it('rejects invalid or unavailable evidence before freezing or verifying protected source',()=>{
+ const source={path:'run.ts',start:0,end:3,line:1,hash:'h',revision:'r1'};
+ const node=NodeSchema.parse({id:'run',kind:'function',name:'Run',source});
+ const analysis:Analysis={revision:'r1',sequence:1,analyzedAt:'',status:'current',graph:{...emptyGraph(),nodes:[node]},
+  files:{'run.ts':{hash:'h',text:'run'}},durationMs:0,
+  quality:{eligibleFiles:1,analyzedFiles:1,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
+ const frozen=freezeNode(node,'frozen-implementation',analysis);
+ const project={specification:{...emptyGraph(),nodes:[frozen]}} as Project;
+ for(const candidate of [
+  {...analysis,revision:'r2'}, {...analysis,status:'stale' as const}, {...analysis,status:'updating' as const},
+  {...analysis,files:{}}, {...analysis,files:{'run.ts':{hash:'other',text:'run'}}},
+  {...analysis,graph:{...analysis.graph,nodes:[{...node,source:{...source,end:4}}]}},
+ ]) {
+  const actual=candidate.graph.nodes[0];
+  expect(()=>freezeNode(actual,'frozen-implementation',candidate)).toThrow();
+  expect(protectionIssues(project,candidate)).toContainEqual(expect.objectContaining({code:'binding',nodeId:'run'}));
+ }
+});
 async function setup(){
  const dir=await mkdtemp(join(tmpdir(),'architect-review-'));const store=new ProjectStore(dir);
  const p=await store.create({name:'Protected'});

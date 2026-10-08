@@ -3,7 +3,7 @@ import {createTwoFilesPatch} from 'diff';
 import {readFile,writeFile,mkdir,rename,rm,readdir} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {type Project,type ProgramNode,type Analysis,type AgentJob,type ValidationReport,type ValidationIssue,type FileChange} from '../shared/model';
+import {resolveSourceEvidence,type Project,type ProgramNode,type Analysis,type AgentJob,type ValidationReport,type ValidationIssue,type FileChange} from '../shared/model';
 import {Analyzer} from './analyzer';
 import {AppError,atomicJson,captureFiles,hashes,hash,safePath} from './files';
 import {ProjectStore} from './store';
@@ -14,10 +14,9 @@ export function normalizeContract(text:string){
 export function freezeNode(node:ProgramNode,policy:ProgramNode['policy'],analysis?:Analysis):ProgramNode{
  if(policy==='editable'||policy==='sensitive')return {...node,policy,baseline:undefined};
  if(policy==='frozen-implementation'){
-  if(!node.source||!analysis?.files[node.source.path]||analysis.status==='stale')throw new AppError('Freeze implementation requires valid, existing source evidence.');
-  const file=analysis.files[node.source.path];
-  if(file.hash!==node.source.hash)throw new AppError('Source binding is stale. Rescan and review the binding.');
-  return {...node,policy,baseline:{source:node.source,text:file.text.slice(node.source.start,node.source.end)}};
+  const evidence=resolveSourceEvidence(node.source,analysis,analysis?.revision);
+  if(evidence.status!=='current')throw new AppError('Freeze implementation requires valid, current source evidence. '+('message' in evidence?evidence.message:'Source binding is stale.'));
+  return {...node,policy,baseline:{source:evidence.source,text:evidence.text}};
  }
  if(!node.contract)throw new AppError('Freeze contract requires an explicit interface.');
  return {...node,policy,baseline:{source:node.source,contract:node.contract}};
@@ -33,10 +32,13 @@ export function protectionIssues(project:Project,analysis:Analysis):ValidationIs
   if(node.policy!=='frozen-implementation'&&node.policy!=='frozen-contract')continue;
   const actual=resolveBinding(node,analysis);
   if(!actual?.source){issues.push({code:'binding',message:'Protected item cannot be resolved: '+node.name,nodeId:node.id});continue;}
+  const evidence=resolveSourceEvidence(actual.source,analysis,analysis.revision);
+  if(evidence.status!=='current'){
+   issues.push({code:'binding',message:'Protected source evidence is '+evidence.status+': '+('message' in evidence?evidence.message:node.name),nodeId:node.id,path:actual.source.path});continue;
+  }
   if(node.policy==='frozen-implementation'){
    if(node.baseline?.text===undefined){issues.push({code:'baseline',message:'Missing implementation baseline: '+node.name,nodeId:node.id});continue;}
-   const text=analysis.files[actual.source.path]?.text.slice(actual.source.start,actual.source.end);
-   if(text!==node.baseline.text)issues.push({code:'frozen-implementation',message:'Frozen implementation changed: '+node.name,nodeId:node.id,path:actual.source.path});
+   if(evidence.text!==node.baseline.text)issues.push({code:'frozen-implementation',message:'Frozen implementation changed: '+node.name,nodeId:node.id,path:actual.source.path});
   }else{
    const expected=node.baseline?.contract||node.contract;
    if(!expected||normalizeContract(actual.contract)!==normalizeContract(expected))issues.push({code:'frozen-contract',message:'Frozen interface changed: '+node.name,nodeId:node.id,path:actual.source.path});

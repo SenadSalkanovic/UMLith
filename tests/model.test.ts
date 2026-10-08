@@ -1,5 +1,58 @@
 import {describe,it,expect} from 'vitest';
-import {GraphSchema,NodeSchema,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,type Layout,type GraphInput} from '../shared/model';
+import {GraphSchema,NodeSchema,SourceSchema,resolveSourceEvidence,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,type Layout,type GraphInput} from '../shared/model';
+
+describe('source evidence and provenance',()=>{
+ const source={path:'run.ts',symbol:'run',start:3,end:5,line:2,hash:'captured-hash',revision:'r1'};
+ const capture={revision:'r1',status:'current' as const,files:{'run.ts':{hash:'captured-hash',text:'a\r\n😀z'}}};
+
+ it.each([
+  ['start',-1],['start',0.5],['end',2],['end',4.5],['end',Number.MAX_SAFE_INTEGER+1],
+  ['line',0],['line',1.5],['path',' '],['hash',''],['revision',' '],
+ ] as const)('rejects invalid evidence %s=%j for every node and baseline',(field,value)=>{
+  const invalid={...source,[field]:value};
+  expect(SourceSchema.safeParse(invalid).success).toBe(false);
+  for(const binding of [{source:invalid},{baseline:{source:invalid}}]) {
+   const result=GraphSchema.safeParse({nodes:[{id:'run',kind:'function',name:'Run',...binding}],edges:[]});
+   expect(result.success).toBe(false);
+   if(!result.success)expect(result.error.issues[0].path).toContain('source');
+  }
+ });
+
+ it('consumes exact UTF-16 offsets, including empty EOF ranges',()=>{
+  expect(resolveSourceEvidence(source,capture,'r1')).toEqual({status:'current',source,text:'😀'});
+  expect(resolveSourceEvidence({...source,start:6,end:6},capture,'r1')).toMatchObject({status:'current',text:''});
+ });
+
+ it('retains the original revision and text when displaying historical evidence',()=>{
+  const restored=NodeSchema.parse(JSON.parse(JSON.stringify({id:'run',kind:'function',name:'Run',provenance:'extracted',source})));
+  expect(resolveSourceEvidence(restored.source,capture,'r2')).toEqual({status:'stale',source,text:'😀'});
+  expect(restored.source?.revision).toBe('r1');
+  expect(resolveSourceEvidence(source,capture)).toMatchObject({status:'stale'});
+  expect(resolveSourceEvidence(source,{...capture,status:'stale'},'r1')).toMatchObject({status:'stale'});
+  expect(resolveSourceEvidence(source,{...capture,status:'updating'},'r1')).toMatchObject({status:'stale'});
+ });
+
+ it.each([
+  [undefined,capture,'unavailable'],[source,undefined,'unavailable'],
+  [source,{...capture,files:{}},'unavailable'],[source,{...capture,revision:'r2'},'unavailable'],
+  [{...source,hash:'other-hash'},capture,'invalid'],[{...source,end:7},capture,'invalid'],
+  [{...source,start:-1},capture,'invalid'],[{...source,end:2},capture,'invalid'],
+  [{...source,line:1},capture,'invalid'],
+ ] as const)('surfaces invalid or unavailable bindings without returning misleading source text (%j)',(binding,snapshot,status)=>{
+  const result=resolveSourceEvidence(binding,snapshot,'r1');
+  expect(result).toMatchObject({status,message:expect.any(String)});
+  expect(result).not.toHaveProperty('text');
+ });
+
+ it('preserves human, compiler-extracted and AI-inferred provenance even with identical source bindings',()=>{
+  const graph=GraphSchema.parse({nodes:['human','extracted','ai'].map(provenance=>({id:provenance,kind:'function',name:provenance,provenance,source})),
+   edges:[{id:'guess',source:'ai',target:'extracted',kind:'calls',provenance:'ai'}]});
+  const restored=GraphSchema.parse(JSON.parse(JSON.stringify(graph)));
+  expect(restored.nodes.map(n=>n.provenance)).toEqual(['human','extracted','ai']);
+  expect(restored.edges[0]).toMatchObject({provenance:'ai',uncertain:true});
+  expect(GraphSchema.safeParse({...graph,edges:[{...graph.edges[0],uncertain:false}]}).success).toBe(false);
+ });
+});
 
 describe('optional function control flow',()=>{
  const evidence={path:'src/run.ts',start:10,end:40,line:2,hash:'content-hash',revision:'source-1'};
