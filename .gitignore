@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.workspace-data/
+.superpowers/
+test-results/
+*.log
+.env
+/docs
+package-lock.json
