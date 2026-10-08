@@ -25,7 +25,7 @@ The following are the permitted source/target combinations. All other combinatio
 | `inherits` | interface | interface, class |
 | `implements` | class | interface, class |
 | `relates-to` | entity | entity |
-| `next`, `true`, `false` | step | step |
+| `next`, `true`, `false`, `exception` | step | step |
 | `reads`, `writes` | function, step | entity |
 
 Entities and enums cannot be containers. A node's `parentId` applies exactly the same rule as a `contains` edge from parent to child. TypeScript permits a class to implement another class's instance interface; interface inheritance also permits class targets. Class inheritance targets a class even when its name is merged with an interface declaration.
@@ -67,6 +67,33 @@ The existing `provenance` and `source` identify human intent, extracted declarat
 `ProjectStore.updateSpec`, project reads, and revision history preserve both levels of detail through `GraphSchema`. Portable `specification.json` retains absent fields and all supplied details; `ARCHITECTURE.md` renders supplied prose and safely handles absent node scenarios. Agent instructions explicitly state that missing details/workflows are unspecified and supplied details/scenarios do not prove implementation completeness.
 
 T005 consumes optional function details alongside the existing workflow records; T023–T026 editors must handle omitted prose/scenarios without converting unknown values into facts; T010 persistence and T068 export consume the same validated graph. Task cards and the planning contract remain controller-owned.
+
+## Optional function control flow (T005)
+
+Workflows remain optional. A function with no steps or flow edges is valid, regardless of its contract detail. Workflow records use the existing stable node/edge IDs; no workflow object, completeness flag, or execution result is generated. `NodeSchema` and `EdgeSchema` validate record shapes; `GraphSchema` additionally enforces the following workflow semantics.
+
+Every `step` has an explicit `stepType`: `operation`, `call`, `condition`, `loop`, `try`, `throw`, `return`, or `opaque`. Other node kinds cannot have a `stepType`. Each step has exactly one distinct containment parent, a function or another step, using `parentId`, a `contains` edge, or both for the same relationship. Follow this nesting to the nearest owning function. Orphans, multiple parents (including conflicting nesting within one function), and containment cycles are rejected. Nested function declarations own their own workflows; ownership does not pass through a nested function to its outer function.
+
+| Step or relationship | Meaning |
+| --- | --- |
+| `operation` | A described action |
+| `call` / `calls` | A call-site step; the existing `calls` relationship identifies a function or constructor target when known |
+| `condition` / `true`, `false` | A decision with optional true/false destinations |
+| `loop` / `true`, `false` | A loop decision; true enters the body, false exits; body flow can return to the loop |
+| `try` | A protected block whose steps can be nested inside it |
+| `throw` | An exceptional exit; an `exception` edge can route it to a handler |
+| `return` | A function exit; no ordinary continuation |
+| `opaque` | Unsupported logic retained with source evidence rather than reconstructed execution claims |
+| `next` | Ordinary flow between steps |
+| `exception` | Exceptional flow to a handler step, with an optional descriptive label; it may originate from a potentially throwing step or a try block |
+
+`next`, `true`, `false`, and the additive v1 `exception` relationship connect steps in the same owning function, including across nested blocks. A boolean branch must originate at a `condition` or `loop`, with at most one edge for each boolean outcome. Missing branches are permitted for partial workflows; validation does not claim completeness. `return` and `throw` cannot have a `next` edge. Exceptional flow is separate from ordinary continuation. Calls may target another function without transferring ownership. Flow cycles, including loop back-edges and self-loops, are legitimate; only containment participates in containment-cycle rejection.
+
+Opaque steps require `source` with a nonblank path, content hash, and analysis revision, safe integer offsets satisfying `0 <= start <= end`, and a positive safe integer line. The evidence survives JSON round-trips with its original provenance; it is not proof that unsupported execution paths were understood. Validation of other source/provenance records and verification against captured files belong to T007 and importer tasks.
+
+Errors identify `nodes[index].stepType`, `nodes[index].parentId`, `nodes[index].source`, or the relevant `edges[index].kind`/`target`. Existing valid analyzer workflows already supply kinds, ownership, and opaque evidence. Legacy malformed workflows lacking these semantics are rejected explicitly, without assigning owners or inventing evidence. `validRelationship` continues to check endpoint kinds only; editors, persistence, proposals, and importers must use `GraphSchema` for complete graph validation.
+
+T010 persistence and T068 export retain the same graph records. T023 workflow editors and T037/T038 importer consumers use the step kinds, nesting, branch, and exception semantics above; partial analysis must retain opaque evidence. The implementation and required concrete scenarios are covered in `tests/model.test.ts`; task cards and the original plan remain controller-owned.
 
 ## 2026-10-08 — T004 description-only and detailed functions
 

@@ -22,7 +22,7 @@ export const NodeSchema = z.object({
 });
 export const EdgeSchema = z.object({
   id:z.string().min(1), source:z.string().min(1), target:z.string().min(1),
-  kind:z.enum(['depends-on','calls','contains','inherits','implements','relates-to','next','true','false','reads','writes']),
+  kind:z.enum(['depends-on','calls','contains','inherits','implements','relates-to','next','true','false','exception','reads','writes']),
   label:z.string().default(''), provenance:z.enum(['human','extracted','ai']).default('human'),
   uncertain:z.boolean().default(false),
 });
@@ -48,7 +48,7 @@ export function validRelationship(kind:ProgramEdge['kind'],source:ProgramNode['k
     case 'inherits': return (source==='class' && target==='class') || (source==='interface' && ['interface','class'].includes(target));
     case 'implements': return source==='class' && ['interface','class'].includes(target);
     case 'relates-to': return source==='entity' && target==='entity';
-    case 'next': case 'true': case 'false': return source==='step' && target==='step';
+    case 'next': case 'true': case 'false': case 'exception': return source==='step' && target==='step';
     case 'reads': case 'writes': return ['function','step'].includes(source) && target==='entity';
   }
 }
@@ -63,10 +63,12 @@ export const GraphSchema = z.object({
     nodes.set(n.id,n);
   });
   const children=new Map(Array.from(nodes.keys(),id=>[id,new Set<string>()]));
+  const parents=new Map(Array.from(nodes.keys(),id=>[id,new Set<string>()]));
   const incoming=new Map(Array.from(nodes.keys(),id=>[id,0]));
   const contain=(parent:string,child:string)=>{
     if(!children.get(parent)!.has(child)) {
       children.get(parent)!.add(child);
+      parents.get(child)!.add(parent);
       incoming.set(child,incoming.get(child)!+1);
     }
   };
@@ -105,15 +107,53 @@ export const GraphSchema = z.object({
   });
   // Only containment participates; calls and workflow loops can legitimately cycle.
   const pending=Array.from(incoming).filter(([,count])=>count===0).map(([id])=>id);
+  const owners=new Map<string,string>();
   let visited=0;
   while(pending.length) {
     const id=pending.pop()!;visited++;
     for(const child of children.get(id)!) {
+      if(nodes.get(child)!.kind==='step') {
+        const owner=nodes.get(id)!.kind==='function'?id:owners.get(id);
+        if(owner)owners.set(child,owner);
+      }
       const count=incoming.get(child)!-1;incoming.set(child,count);
       if(count===0)pending.push(child);
     }
   }
   if(visited!==nodes.size) ctx.addIssue({code:'custom',path:['nodes'],message:'Containment cycle involving: '+Array.from(incoming).filter(([,count])=>count>0).map(([id])=>id).join(', ')});
+  graph.nodes.forEach((n,i)=>{
+    if(n.kind!=='step') {
+      if(n.stepType!==undefined)ctx.addIssue({code:'custom',path:['nodes',i,'stepType'],message:'Only workflow steps have a step type'});
+      return;
+    }
+    if(n.stepType===undefined)ctx.addIssue({code:'custom',path:['nodes',i,'stepType'],message:'Workflow steps require an explicit step type'});
+    if(parents.get(n.id)!.size!==1)ctx.addIssue({code:'custom',path:['nodes',i,'parentId'],message:'Workflow steps require exactly one containment parent'});
+    if(!owners.has(n.id))ctx.addIssue({code:'custom',path:['nodes',i,'parentId'],message:'Workflow steps require an owning function'});
+    if(n.stepType==='opaque') {
+      const s=n.source;
+      if(!s || !s.path.trim() || !s.hash.trim() || !s.revision.trim() ||
+        !Number.isSafeInteger(s.start) || s.start<0 || !Number.isSafeInteger(s.end) || s.end<s.start ||
+        !Number.isSafeInteger(s.line) || s.line<1)
+        ctx.addIssue({code:'custom',path:['nodes',i,'source'],message:'Opaque steps require source evidence with a path, range, line, content hash and analysis revision'});
+    }
+  });
+  const branches=new Map<string,Set<string>>();
+  graph.edges.forEach((e,i)=>{
+    if(!['next','true','false','exception'].includes(e.kind))return;
+    const source=nodes.get(e.source),target=nodes.get(e.target);
+    if(source?.kind!=='step' || target?.kind!=='step')return;
+    if(!owners.has(source.id) || owners.get(source.id)!==owners.get(target.id))
+      ctx.addIssue({code:'custom',path:['edges',i,'target'],message:'Workflow flow must stay within the same owning function'});
+    if(e.kind==='true' || e.kind==='false') {
+      if(source.stepType!=='condition' && source.stepType!=='loop')
+        ctx.addIssue({code:'custom',path:['edges',i,'kind'],message:'A branch must originate at a condition or loop'});
+      const kinds=branches.get(source.id)??new Set<string>();
+      if(kinds.has(e.kind))ctx.addIssue({code:'custom',path:['edges',i,'kind'],message:'Duplicate '+e.kind+' branch for step: '+source.id});
+      kinds.add(e.kind);branches.set(source.id,kinds);
+    }
+    if(e.kind==='next' && (source.stepType==='return' || source.stepType==='throw'))
+      ctx.addIssue({code:'custom',path:['edges',i,'kind'],message:'Return and throw steps cannot continue with next'});
+  });
 });
 export type ProgramNode=z.infer<typeof NodeSchema>;
 export type ProgramEdge=z.infer<typeof EdgeSchema>;

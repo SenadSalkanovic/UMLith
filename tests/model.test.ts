@@ -1,5 +1,158 @@
 import {describe,it,expect} from 'vitest';
-import {GraphSchema,NodeSchema,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,type Layout} from '../shared/model';
+import {GraphSchema,NodeSchema,graphDelta,emptyGraph,createNodeId,sourceIdentityKey,validRelationship,type Layout,type GraphInput} from '../shared/model';
+
+describe('optional function control flow',()=>{
+ const evidence={path:'src/run.ts',start:10,end:40,line:2,hash:'content-hash',revision:'source-1'};
+ const loop:GraphInput={nodes:[
+  {id:'run',kind:'function',name:'Run'},
+  {id:'callee',kind:'function',name:'Work'},
+  {id:'loop',kind:'step',name:'For each item',parentId:'run',stepType:'loop'},
+  {id:'condition',kind:'step',name:'Item is ready',parentId:'loop',stepType:'condition'},
+  {id:'call',kind:'step',name:'Work on item',parentId:'condition',stepType:'call'},
+  {id:'return',kind:'step',name:'Done',parentId:'run',stepType:'return'},
+ ],edges:[
+  {id:'body',source:'loop',target:'condition',kind:'true'},
+  {id:'ready',source:'condition',target:'call',kind:'true'},
+  {id:'skip',source:'condition',target:'loop',kind:'false'},
+  {id:'repeat',source:'call',target:'loop',kind:'next'},
+  {id:'done',source:'loop',target:'return',kind:'false'},
+  {id:'invoke',source:'call',target:'callee',kind:'calls'},
+ ]};
+
+ it('round-trips a nested loop, condition and call with branch cycles and a callable target',()=>{
+  const restored=GraphSchema.parse(JSON.parse(JSON.stringify(GraphSchema.parse(loop))));
+  expect(restored.nodes.map(n=>[n.id,n.parentId,n.stepType])).toEqual([
+   ['run',undefined,undefined],['callee',undefined,undefined],['loop','run','loop'],
+   ['condition','loop','condition'],['call','condition','call'],['return','run','return'],
+  ]);
+  expect(restored.edges.map(e=>[e.source,e.target,e.kind])).toEqual([
+   ['loop','condition','true'],['condition','call','true'],['condition','loop','false'],
+   ['call','loop','next'],['loop','return','false'],['call','callee','calls'],
+  ]);
+ });
+
+ it('represents try, throw, handled return and source-backed opaque logic without inventing execution evidence',()=>{
+  const input:GraphInput={nodes:[
+   {id:'run',kind:'function',name:'Run'},
+   {id:'try',kind:'step',name:'Try work',parentId:'run',stepType:'try'},
+   {id:'opaque',kind:'step',name:'Unsupported block',parentId:'try',stepType:'opaque',provenance:'extracted',source:evidence},
+   {id:'throw',kind:'step',name:'Throw failure',parentId:'try',stepType:'throw'},
+   {id:'handler',kind:'step',name:'Handle failure',parentId:'run',stepType:'operation'},
+   {id:'return',kind:'step',name:'Return recovery',parentId:'run',stepType:'return'},
+  ],edges:[
+   {id:'start',source:'try',target:'opaque',kind:'next'},
+   {id:'fail',source:'opaque',target:'throw',kind:'next'},
+   {id:'caught',source:'throw',target:'handler',kind:'exception',label:'Failure'},
+   {id:'recover',source:'handler',target:'return',kind:'next'},
+  ]};
+  const restored=GraphSchema.parse(JSON.parse(JSON.stringify(GraphSchema.parse(input))));
+  expect(restored.nodes.map(n=>n.stepType)).toEqual([undefined,'try','opaque','throw','operation','return']);
+  expect(restored.nodes[2]).toMatchObject({provenance:'extracted',source:evidence});
+  expect(restored.edges[2]).toMatchObject({source:'throw',target:'handler',kind:'exception',label:'Failure'});
+  expect(restored.nodes[0].source).toBeUndefined();
+  expect(restored.nodes[0].scenarios).toBeUndefined();
+ });
+
+ it('derives nesting and function ownership from mixed containment representations in any node order',()=>{
+  const input:GraphInput={nodes:[
+   {id:'work',kind:'step',name:'Work',parentId:'loop',stepType:'operation'},
+   {id:'loop',kind:'step',name:'Loop',stepType:'loop'},
+   {id:'run',kind:'function',name:'Run',parentId:'outer'},
+   {id:'outer',kind:'function',name:'Outer'},
+  ],edges:[
+   {id:'owns',source:'run',target:'loop',kind:'contains'},
+   {id:'nested',source:'loop',target:'work',kind:'contains'},
+   {id:'body',source:'loop',target:'work',kind:'true'},
+   {id:'repeat',source:'work',target:'loop',kind:'next'},
+  ]};
+  expect(GraphSchema.safeParse(input).success).toBe(true);
+ });
+
+ it.each(['next','true','false','exception'] as const)('rejects %s between different owning functions',kind=>{
+  const result=GraphSchema.safeParse({nodes:[
+   {id:'f',kind:'function',name:'F'}, {id:'g',kind:'function',name:'G'},
+   {id:'a',kind:'step',name:'A',parentId:'f',stepType:'condition'},
+   {id:'b',kind:'step',name:'B',parentId:'g',stepType:'operation'},
+  ],edges:[{id:'flow',source:'a',target:'b',kind}]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toContainEqual(expect.objectContaining({path:['edges',0,'target'],message:expect.stringMatching(/same owning function/i)}));
+ });
+
+ it('keeps nested functions in separate workflows',()=>{
+  expect(GraphSchema.safeParse({...loop,nodes:loop.nodes.map(n=>n.id==='callee'?{...n,parentId:'run'}:n).concat([
+   {id:'inner',kind:'step',name:'Inner work',parentId:'callee',stepType:'operation'},
+  ]),edges:[{id:'cross',source:'call',target:'inner',kind:'next'}]}).success).toBe(false);
+ });
+
+ it('allows a self-loop and a partial workflow beside a description-only function',()=>{
+  const graph=GraphSchema.parse({...loop,nodes:loop.nodes.concat([
+   {id:'draft',kind:'function',name:'Draft',description:'Specify this later'},
+  ]),edges:[{id:'repeat',source:'loop',target:'loop',kind:'true'}]});
+  expect(graph.edges).toHaveLength(1);
+  expect(graph.nodes.at(-1)).toMatchObject({id:'draft',description:'Specify this later'});
+  expect(graph.nodes.at(-1)?.stepType).toBeUndefined();
+ });
+
+ it.each(['true','false'] as const)('rejects a %s branch from a non-decision step',kind=>{
+  const result=GraphSchema.safeParse({...loop,edges:[{id:'branch',source:'call',target:'return',kind}]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toContainEqual(expect.objectContaining({path:['edges',0,'kind'],message:expect.stringMatching(/condition or loop/i)}));
+ });
+
+ it.each(['true','false'] as const)('rejects competing %s branch destinations',kind=>{
+  const result=GraphSchema.safeParse({...loop,edges:[
+   {id:'first',source:'condition',target:'call',kind},
+   {id:'second',source:'condition',target:'return',kind},
+  ]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toContainEqual(expect.objectContaining({path:['edges',1,'kind'],message:expect.stringMatching(/duplicate.*branch/i)}));
+ });
+
+ it.each(['return','throw'] as const)('rejects normal continuation after %s',stepType=>{
+  expect(GraphSchema.safeParse({...loop,nodes:loop.nodes.map(n=>n.id==='call'?{...n,stepType}:n),
+   edges:[{id:'continue',source:'call',target:'return',kind:'next'}]}).success).toBe(false);
+ });
+
+ it('rejects missing step kinds and step kinds on declarations',()=>{
+  const result=GraphSchema.safeParse({nodes:[{id:'f',kind:'function',name:'F',stepType:'call'},
+   {id:'s',kind:'step',name:'S',parentId:'f'}],edges:[]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toEqual(expect.arrayContaining([
+   expect.objectContaining({path:['nodes',0,'stepType']}),expect.objectContaining({path:['nodes',1,'stepType']}),
+  ]));
+ });
+
+ it('rejects orphan steps and nested steps with no function ancestor',()=>{
+  const result=GraphSchema.safeParse({nodes:[{id:'s',kind:'step',name:'S',stepType:'loop'},
+   {id:'nested',kind:'step',name:'Nested',parentId:'s',stepType:'operation'}],edges:[]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toEqual(expect.arrayContaining([
+   expect.objectContaining({path:['nodes',0,'parentId']}),expect.objectContaining({path:['nodes',1,'parentId']}),
+  ]));
+ });
+
+ it.each(['different function','different nesting'] as const)('rejects multiple containment parents: %s',variant=>{
+  const result=GraphSchema.safeParse({...loop,edges:[...loop.edges,{id:'other-parent',source:variant==='different function'?'callee':'loop',target:'call',kind:'contains'}]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toContainEqual(expect.objectContaining({path:['nodes',4,'parentId'],message:expect.stringMatching(/one containment parent/i)}));
+ });
+
+ it.each([
+  undefined,{...evidence,path:''},{...evidence,hash:''},{...evidence,revision:''},
+  {...evidence,start:-1},{...evidence,start:1.5},{...evidence,end:9},{...evidence,end:40.5},{...evidence,line:0},
+ ] as const)('rejects opaque steps without usable source evidence (%j)',source=>{
+  const result=GraphSchema.safeParse({nodes:[{id:'f',kind:'function',name:'F'},
+   {id:'s',kind:'step',name:'Unsupported',parentId:'f',stepType:'opaque',source}],edges:[]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues.some(issue=>issue.path[0]==='nodes'&&issue.path[1]===1&&issue.path[2]==='source')).toBe(true);
+ });
+
+ it('still rejects mixed containment cycles inside a function workflow',()=>{
+  const result=GraphSchema.safeParse({...loop,edges:[...loop.edges,{id:'cycle',source:'call',target:'loop',kind:'contains'}]});
+  expect(result.success).toBe(false);
+  if(!result.success)expect(result.error.issues).toContainEqual(expect.objectContaining({message:expect.stringMatching(/containment cycle/i)}));
+ });
+});
 describe('program graph',()=>{
  it('keeps description-only function details unknown without inventing workflow or implementation evidence',()=>{
   const graph=GraphSchema.parse({nodes:[{id:'save',kind:'function',name:'save',description:'Save a document'}],edges:[]});
@@ -257,10 +410,12 @@ describe('program graph',()=>{
   ['system','step',false],['module','step',false],['class','step',false],['interface','step',false],
   ['entity','function',false],['enum','enum',false],
  ] as const)('validates containment from %s to %s as %s for both representations',(sourceKind,targetKind,valid)=>{
-  const parent={id:'parent',kind:sourceKind,name:'Parent'},child={id:'child',kind:targetKind,name:'Child'};
+  const owner={id:'owner',kind:'function' as const,name:'Owner'};
+  const parent={id:'parent',kind:sourceKind,name:'Parent',...(sourceKind==='step'?{stepType:'operation' as const,parentId:'owner'}:{})};
+  const child={id:'child',kind:targetKind,name:'Child',...(targetKind==='step'?{stepType:'operation' as const}:{})};
   for(const [input,path] of [
-   [{nodes:[parent,{...child,parentId:'parent'}],edges:[]},['nodes',1,'parentId']],
-   [{nodes:[parent,child],edges:[{id:'contains',source:'parent',target:'child',kind:'contains'}]},['edges',0,'kind']],
+   [{nodes:[parent,{...child,parentId:'parent'},owner],edges:[]},['nodes',1,'parentId']],
+   [{nodes:[parent,child,owner],edges:[{id:'contains',source:'parent',target:'child',kind:'contains'}]},['edges',0,'kind']],
   ] as const){
    const result=GraphSchema.safeParse(input);
    expect(result.success).toBe(valid);
@@ -284,17 +439,21 @@ describe('program graph',()=>{
   ['depends-on','module','module'],['contains','module','function'],['inherits','class','class'],
   ['inherits','interface','interface'],['inherits','interface','class'],['implements','class','interface'],['implements','class','class'],['calls','function','function'],
   ['calls','module','class'],['calls','step','function'],['relates-to','entity','entity'],
-  ['next','step','step'],['true','step','step'],['false','step','step'],
+  ['next','step','step'],['true','step','step'],['false','step','step'],['exception','step','step'],
   ['reads','function','entity'],['writes','step','entity'],
  ] as const)('accepts %s from %s to %s',(kind,sourceKind,targetKind)=>{
-  expect(GraphSchema.safeParse({nodes:[{id:'a',kind:sourceKind,name:'A'},{id:'b',kind:targetKind,name:'B'}],edges:[{id:'e',source:'a',target:'b',kind}]}).success).toBe(true);
+  expect(GraphSchema.safeParse({nodes:[
+   {id:'a',kind:sourceKind,name:'A',...(sourceKind==='step'?{parentId:'owner',stepType:kind==='true'||kind==='false'?'condition':'operation'}:{})},
+   {id:'b',kind:targetKind,name:'B',...(targetKind==='step'?{parentId:'owner',stepType:'operation'}:{})},
+   {id:'owner',kind:'function',name:'Owner'},
+  ],edges:[{id:'e',source:'a',target:'b',kind}]}).success).toBe(true);
  });
 
  it.each([
   ['depends-on','step','entity'],['contains','entity','function'],['inherits','function','entity'],
   ['inherits','class','interface'],['implements','interface','class'],['calls','entity','module'],
   ['relates-to','function','entity'],['next','function','step'],['true','entity','entity'],
-  ['false','step','entity'],['reads','entity','function'],['writes','function','module'],
+  ['false','step','entity'],['exception','function','step'],['reads','entity','function'],['writes','function','module'],
  ] as const)('rejects %s from %s to %s',(kind,sourceKind,targetKind)=>{
   const result=GraphSchema.safeParse({nodes:[{id:'a',kind:sourceKind,name:'A'},{id:'b',kind:targetKind,name:'B'}],edges:[{id:'e',source:'a',target:'b',kind}]});
   expect(result.success).toBe(false);
