@@ -7,3 +7,10 @@ test-results/
 .env
 /docs
 package-lock.json
+/.codex-task-loop/
+__pycache__/
+.env.*
+*.pem
+*.key
+auth.json
+credentials.json

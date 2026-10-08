@@ -1,0 +1,335 @@
+"""Exercise the runner with real temporary Git repositories and a fake CLI."""
+import importlib.util
+import json
+import os
+import signal
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'codex-task-loop.py'
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location('task_loop', SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+FAKE_CODEX = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+prompt = sys.stdin.read()
+root = pathlib.Path.cwd()
+mode = os.environ.get('FAKE_MODE', 'approve')
+assert args[:3] == ['--ask-for-approval', 'never', 'exec']
+assert '--json' in args and '--output-schema' in args and args[-1] == '-'
+assert args[args.index('--cd') + 1] == str(root)
+calls = root / '.codex-task-loop' / 'fake-calls.json'
+history = json.loads(calls.read_text()) if calls.exists() else []
+role = 'review' if args[args.index('--sandbox') + 1] == 'read-only' else 'implement'
+history.append(role)
+calls.write_text(json.dumps(history))
+print(json.dumps({'type': 'thread.started', 'thread_id': 'test-session'}))
+if mode == 'quota' and len(history) == 1:
+    (root / 'partial.txt').write_text('partial work\n')
+    print(json.dumps({'type': 'turn.failed', 'error': {'message': 'Usage limit reached. Try again in 0 seconds.', 'retry_after_seconds': 0}}))
+    sys.exit(1)
+if mode == 'auth':
+    print(json.dumps({'type': 'turn.failed', 'error': {'message': 'Authentication failed: sign in required'}}))
+    sys.exit(1)
+if mode == 'quota-review' and role == 'review' and history.count('review') == 1:
+    print(json.dumps({'type': 'turn.failed', 'error': {'message': 'rate_limit_exceeded', 'retry_after_seconds': 0}}))
+    sys.exit(1)
+if role == 'implement':
+    task = prompt.split('CURRENT TASK: ')[1].split()[0]
+    (root / (task + '.txt')).write_text('implemented\n')
+    if mode == 'secret':
+        (root / 'auth.json').write_text('{}')
+    if mode == 'empty':
+        (root / (task + '.txt')).unlink()
+    if mode == 'expose-docs':
+        (root / '.gitignore').write_text('/.codex-task-loop/\n')
+    result = {'status': 'completed', 'summary': 'Task implemented', 'checks': ['fixture check passed']}
+else:
+    result = {'decision': 'approve', 'summary': 'Reviewed actual diff', 'findings': []}
+    if mode == 'reject' or (mode == 'fix' and history.count('review') == 1):
+        result = {'decision': 'request_changes', 'summary': 'Fix required', 'findings': ['Missing edge case']}
+    if mode == 'mutating-review':
+        (root / 'review-tamper.txt').write_text('unreviewed change')
+    if mode == 'malformed':
+        result = {'decision': 'approve'}
+out = pathlib.Path(args[args.index('--output-last-message') + 1])
+out.write_text(json.dumps(result))
+print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'output_tokens': 1}}))
+if mode == 'lingering':
+    import subprocess
+    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+'''
+
+
+class TaskLoopTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.runner = load_runner()
+        self.git('init', '-q')
+        self.git('config', 'user.name', 'Fixture User')
+        self.git('config', 'user.email', 'fixture@example.invalid')
+        (self.repo / '.gitignore').write_text('/docs/\n/.codex-task-loop/\n')
+        (self.repo / 'base.txt').write_text('baseline\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'baseline')
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.tasks = self.repo / 'docs/tasks/architecture-workspace'
+        for name in ['ORIGINAL-PLAN.md', 'CONTRACT.md', 'DECISIONS.md', 'REQUIREMENTS.md', 'README.md']:
+            self.tasks.mkdir(parents=True, exist_ok=True)
+            (self.tasks / name).write_text('# Local plan\n')
+        self.card('T001', 1)
+        self.card('T002', 1, 'T001')
+        self.card('T003', 8)
+        self.cli = self.repo / '.git' / 'fake-codex'
+        self.cli.write_text(FAKE_CODEX)
+        self.cli.chmod(0o700)
+        # This scanner reads actual staged snapshot files. The real scanner is
+        # separately exercised against this project's index before any commit.
+        self.scanner = self.repo / '.git' / 'fake-scanner'
+        self.scanner.write_text('#!/usr/bin/env python3\nimport json, pathlib, sys\np=pathlib.Path(sys.argv[-1])\nresults={} if not (p/"auth.json").exists() else {"auth.json":[{"type":"Secret Keyword", "line_number":1}]}\nprint(json.dumps({"results":results}))\n')
+        self.scanner.chmod(0o700)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        return subprocess.check_output(['git', *args], cwd=self.repo, text=True)
+
+    def card(self, task, phase, dependency=None):
+        directory = self.tasks / f'{phase:02}-phase'
+        directory.mkdir(exist_ok=True)
+        dependency_text = f'- [{dependency} — prerequisite](../01-phase/{dependency}-fixture.md)' if dependency else '- None'
+        (directory / f'{task}-fixture.md').write_text(f'# {task}: Fixture\n\n**Status:** Not assessed\n**Phase:** {phase} — Fixture\n\n## Dependencies\n\n{dependency_text}\n\n## Acceptance criteria\n\n- [ ] Implement the fixture.\n')
+
+    def run_loop(self, mode='approve', max_tasks=0, check=None, rounds=3):
+        args = self.runner.parse_args(['--repo', str(self.repo), '--codex', str(self.cli),
+                                      '--secret-command', str(self.scanner), '--check', check or 'true',
+                                      '--max-tasks', str(max_tasks), '--max-fix-rounds', str(rounds),
+                                      '--quota-wait', '0.001'])
+        old = os.environ.get('FAKE_MODE')
+        os.environ['FAKE_MODE'] = mode
+        try:
+            return self.runner.run(args)
+        finally:
+            if old is None:
+                os.environ.pop('FAKE_MODE', None)
+            else:
+                os.environ['FAKE_MODE'] = old
+
+    def test_ordered_local_commits_skip_deferred_and_restart_without_duplicates(self):
+        self.assertEqual(self.run_loop(), 0)
+        self.assertEqual(self.git('rev-list', '--count', 'HEAD').strip(), '3')
+        self.assertIn('UMLith-Task: T001', self.git('log', '--format=%B'))
+        self.assertIn('UMLith-Task: T002', self.git('log', '--format=%B'))
+        self.assertFalse((self.repo / 'T003.txt').exists())
+        self.assertEqual(self.git('status', '--porcelain').strip(), '')
+        self.assertEqual(self.run_loop(), 0)
+        self.assertEqual(self.git('rev-list', '--count', 'HEAD').strip(), '3')
+        self.assertNotIn('docs/', self.git('ls-files'))
+
+    def test_quota_wait_preserves_partial_files_and_retries_same_task(self):
+        self.assertEqual(self.run_loop('quota', max_tasks=1), 0)
+        self.assertEqual((self.repo / 'partial.txt').read_text(), 'partial work\n')
+        self.assertEqual(json.loads((self.repo / '.codex-task-loop/fake-calls.json').read_text()), ['implement', 'implement', 'review'])
+
+    def test_quota_during_review_retries_review_without_reimplementing(self):
+        self.assertEqual(self.run_loop('quota-review', max_tasks=1), 0)
+        self.assertEqual(json.loads((self.repo / '.codex-task-loop/fake-calls.json').read_text()), ['implement', 'review', 'review'])
+
+    def test_local_completion_does_not_push_to_configured_origin(self):
+        remote = self.repo / '.git' / 'remote.git'
+        subprocess.check_call(['git', 'init', '--bare', '-q', str(remote)])
+        self.git('remote', 'add', 'origin', str(remote))
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.assertEqual(self.run_loop(max_tasks=1), 0)
+        remote_head = subprocess.check_output(['git', '--git-dir', str(remote), 'rev-parse', 'main'], text=True).strip()
+        self.assertEqual(remote_head, self.base)
+
+    def test_scanner_reads_staged_content_even_when_worktree_hides_it(self):
+        (self.repo / 'auth.json').write_text('{}')
+        self.git('add', 'auth.json')
+        (self.repo / 'auth.json').unlink()
+        with self.assertRaises(self.runner.LoopError):
+            self.runner.scan_staged(self.repo, str(self.scanner))
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+
+    def test_pending_failure_can_resume_without_skipping_task(self):
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop('reject', max_tasks=1, rounds=1)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+        self.assertEqual(self.run_loop('approve', max_tasks=1), 0)
+        self.assertIn('UMLith-Task: T001', self.git('log', '-1', '--format=%B'))
+
+    def test_resume_rejects_changed_specification_and_changed_head(self):
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop('reject', max_tasks=1, rounds=1)
+        original = (self.tasks / 'ORIGINAL-PLAN.md').read_text()
+        (self.tasks / 'ORIGINAL-PLAN.md').write_text('changed requirements')
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop(max_tasks=1)
+
+        (self.tasks / 'ORIGINAL-PLAN.md').write_text(original)
+        self.git('commit', '--allow-empty', '-qm', 'external commit')
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop(max_tasks=1)
+
+    def test_post_review_file_cannot_enter_commit(self):
+        original = self.runner.atomic_json
+        def interrupted_state_write(path, value):
+            original(path, value)
+            if path.name == 'state.json' and value.get('review', {}).get('decision') == 'approve':
+                (self.repo / 'unreviewed.txt').write_text('external edit after approval')
+        with patch.object(self.runner, 'atomic_json', interrupted_state_write):
+            with self.assertRaises(self.runner.LoopError):
+                self.run_loop(max_tasks=1)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+
+    def test_index_race_after_staging_cannot_replace_reviewed_tree(self):
+        original = self.runner.git
+        injected = False
+        def racing_index(repo, *args, **kwargs):
+            nonlocal injected
+            result = original(repo, *args, **kwargs)
+            if args == ('diff', '--exit-code') and not injected:
+                injected = True
+                (self.repo / 'unreviewed.txt').write_text('unreviewed staged addition')
+                self.git('add', 'unreviewed.txt')
+            return result
+        with patch.object(self.runner, 'git', racing_index):
+            with self.assertRaises(self.runner.LoopError):
+                self.run_loop(max_tasks=1)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+
+    def test_normal_cli_exit_cleans_descendants_holding_stdout(self):
+        args = [sys.executable, str(SCRIPT), '--repo', str(self.repo), '--codex', str(self.cli),
+                '--secret-command', str(self.scanner), '--check', 'true', '--max-tasks', '1']
+        child = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, env={**os.environ, 'FAKE_MODE':'lingering'}, start_new_session=True)
+        try:
+            stdout, stderr = child.communicate(timeout=5)
+            self.assertEqual(child.returncode, 0, stderr)
+            self.assertIn('committed locally', stdout)
+        finally:
+            if child.poll() is None:
+                os.kill(child.pid, signal.SIGTERM)
+                child.communicate(timeout=5)
+
+    def test_removing_local_plan_ignore_rule_blocks_commit(self):
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop('expose-docs', max_tasks=1)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+        self.assertNotIn('docs/', self.git('ls-files'))
+
+    def test_custom_commit_hook_requires_manual_handling_without_commit(self):
+        hook = self.repo / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nprintf extra > hook-change.txt\ngit add hook-change.txt\n')
+        hook.chmod(0o700)
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop(max_tasks=1)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+        self.assertFalse((self.repo / 'hook-change.txt').exists())
+
+    def test_quota_delay_uses_metadata_from_multiple_error_events(self):
+        events = '\n'.join([json.dumps({'type':'error', 'message':'usage_limit_reached', 'retry_after_seconds':3}),
+                            json.dumps({'type':'turn.failed', 'error':{'message':'usage_limit_reached'}})])
+        self.assertEqual(self.runner.quota_delay(events, 900), 3)
+
+    def test_cleanup_kills_descendant_even_after_leader_exits(self):
+        leader_code = "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c',\"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); time.sleep(60)\"],stdout=subprocess.PIPE,text=True); p.stdout.readline(); print(p.pid,flush=True); time.sleep(60)"
+        leader = subprocess.Popen([sys.executable, '-c', leader_code], stdout=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            descendant = int(leader.stdout.readline())
+            self.runner.stop_child(leader)
+            for _ in range(100):
+                state = Path(f'/proc/{descendant}/stat')
+                if not state.exists() or state.read_text().split()[2] == 'Z':
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail('Descendant survived process-group cleanup')
+        finally:
+            self.runner.stop_child(leader)
+            leader.stdout.close()
+
+    def test_malformed_review_value_is_controlled_failure(self):
+        with self.assertRaises(self.runner.LoopError):
+            self.runner.validate_result({'decision':[], 'summary':'Invalid', 'findings':[]}, review=True)
+
+    def test_auth_error_stops_instead_of_waiting_or_committing(self):
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop('auth')
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+
+    def test_review_findings_are_fixed_and_reviewed_before_commit(self):
+        self.assertEqual(self.run_loop('fix', max_tasks=1), 0)
+        self.assertEqual(json.loads((self.repo / '.codex-task-loop/fake-calls.json').read_text()), ['implement', 'review', 'implement', 'review'])
+
+    def test_failed_check_rejected_review_and_malformed_review_cannot_commit(self):
+        for mode, check in [('approve', 'false'), ('reject', 'true'), ('malformed', 'true')]:
+            with self.subTest(mode=mode):
+                with self.assertRaises(self.runner.LoopError):
+                    self.run_loop(mode, max_tasks=1, check=check, rounds=1)
+                self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+                self.git('reset', '--mixed', 'HEAD')
+                for p in self.repo.glob('T*.txt'):
+                    p.unlink()
+                state = self.repo / '.codex-task-loop/state.json'
+                state.unlink(missing_ok=True)
+
+    def test_already_implemented_task_can_be_verified_with_an_empty_completion_commit(self):
+        self.assertEqual(self.run_loop('empty', max_tasks=1), 0)
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}'), self.git('rev-parse', f'{self.base}^{{tree}}'))
+        self.assertIn('UMLith-Task: T001', self.git('log', '-1', '--format=%B'))
+        self.assertIn('- [x] Implement the fixture.', (self.tasks / '01-phase/T001-fixture.md').read_text())
+
+    def test_secret_file_blocks_commit_without_discarding_candidate(self):
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop('secret', max_tasks=1)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+        self.assertTrue((self.repo / 'auth.json').exists())
+
+    def test_read_only_reviewer_mutation_invalidates_approval(self):
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop('mutating-review', max_tasks=1)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+
+    def test_unrelated_dirty_worktree_cannot_be_adopted(self):
+        (self.repo / 'base.txt').write_text('someone else edited this')
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop(max_tasks=1)
+        self.assertFalse((self.repo / '.codex-task-loop/fake-calls.json').exists())
+
+    def test_missing_dependency_and_duplicate_task_ids_are_rejected(self):
+        self.card('T000', 1, 'T099')
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop(max_tasks=1)
+        (self.tasks / '01-phase/T000-fixture.md').unlink()
+        duplicate = self.tasks / '02-phase'
+        duplicate.mkdir()
+        (duplicate / 'T001-duplicate.md').write_text('# T001: Duplicate\n**Phase:** 2 — Fixture\n')
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop(max_tasks=1)
+
+    def test_quota_classifier_ignores_context_window_and_successful_token_usage(self):
+        self.assertIsNone(self.runner.quota_delay('context window exceeded', 900))
+        self.assertIsNone(self.runner.quota_delay('tokens used: 5000', 900))
+        self.assertEqual(self.runner.quota_delay('Usage limit reached. Try again in 2 hours 5 minutes.', 900), 7500)
+        self.assertEqual(self.runner.quota_delay('rate_limit_exceeded', 900), 900)
+        self.assertEqual(self.runner.quota_delay(json.dumps({'message':'usage_limit_reached', 'retry_after_seconds':123}), 900), 123)
+
+
+if __name__ == '__main__':
+    unittest.main()
