@@ -1,5 +1,6 @@
 import { z } from 'zod';
 export const nodeKinds = ['system','module','class','interface','function','entity','enum','step'] as const;
+export const GRAPH_SCHEMA_VERSION = 1;
 export const policies = ['editable','sensitive','frozen-implementation','frozen-contract'] as const;
 export const SourceSchema = z.object({
   path: z.string(), symbol: z.string().optional(), start: z.number(), end: z.number(),
@@ -7,7 +8,7 @@ export const SourceSchema = z.object({
 });
 export const NodeSchema = z.object({
   id: z.string().min(1), kind: z.enum(nodeKinds), name: z.string().min(1),
-  parentId: z.string().optional(), description: z.string().default(''),
+  parentId: z.string().min(1).optional(), description: z.string().default(''),
   provenance: z.enum(['human','extracted','ai']).default('human'),
   policy: z.enum(policies).default('editable'), contract: z.string().default(''),
   inputs: z.string().default(''), outputs: z.string().default(''), rules: z.string().default(''),
@@ -19,33 +20,88 @@ export const NodeSchema = z.object({
   baseline: z.object({ text:z.string().optional(), contract:z.string().optional(), source:SourceSchema.optional() }).optional(),
 });
 export const EdgeSchema = z.object({
-  id:z.string(), source:z.string(), target:z.string(),
+  id:z.string().min(1), source:z.string().min(1), target:z.string().min(1),
   kind:z.enum(['depends-on','calls','contains','inherits','implements','relates-to','next','true','false','reads','writes']),
   label:z.string().default(''), provenance:z.enum(['human','extracted','ai']).default('human'),
   uncertain:z.boolean().default(false),
 });
-export const GraphSchema = z.object({ nodes:z.array(NodeSchema), edges:z.array(EdgeSchema) }).superRefine((graph,ctx)=>{
-  const ids = new Set<string>();
-  for(const n of graph.nodes) {
-    if(ids.has(n.id)) ctx.addIssue({code:'custom',message:'Duplicate node ID: '+n.id});
-    ids.add(n.id);
+function validRelationship(kind:ProgramEdge['kind'],source:ProgramNode['kind'],target:ProgramNode['kind']) {
+  switch(kind) {
+    case 'depends-on': return source!=='step' && target!=='step';
+    // The same containment rules apply to edges and parentId; see shared/README.md.
+    case 'contains':
+      switch(source) {
+        case 'system': return target!=='step';
+        case 'module': return ['module','class','interface','function','entity','enum'].includes(target);
+        case 'class': case 'interface': return ['class','interface','function','enum'].includes(target);
+        case 'function': return ['class','interface','function','enum','step'].includes(target);
+        case 'step': return target==='step';
+        default: return false;
+      }
+    case 'calls': return ['system','module','class','function','step'].includes(source) && ['function','class'].includes(target);
+    case 'inherits': return (source==='class' && target==='class') || (source==='interface' && ['interface','class'].includes(target));
+    case 'implements': return source==='class' && ['interface','class'].includes(target);
+    case 'relates-to': return source==='entity' && target==='entity';
+    case 'next': case 'true': case 'false': return source==='step' && target==='step';
+    case 'reads': case 'writes': return ['function','step'].includes(source) && target==='entity';
   }
+}
+export const GraphSchema = z.object({
+  // Existing unversioned graphs are v1; an explicit version must match exactly.
+  schemaVersion:z.literal(GRAPH_SCHEMA_VERSION).default(GRAPH_SCHEMA_VERSION),
+  nodes:z.array(NodeSchema), edges:z.array(EdgeSchema),
+}).superRefine((graph,ctx)=>{
+  const nodes=new Map<string,ProgramNode>();
+  graph.nodes.forEach((n,i)=>{
+    if(nodes.has(n.id)) ctx.addIssue({code:'custom',path:['nodes',i,'id'],message:'Duplicate node ID: '+n.id});
+    nodes.set(n.id,n);
+  });
+  const children=new Map(Array.from(nodes.keys(),id=>[id,new Set<string>()]));
+  const incoming=new Map(Array.from(nodes.keys(),id=>[id,0]));
+  const contain=(parent:string,child:string)=>{
+    if(!children.get(parent)!.has(child)) {
+      children.get(parent)!.add(child);
+      incoming.set(child,incoming.get(child)!+1);
+    }
+  };
+  graph.nodes.forEach((n,i)=>{
+    if(n.parentId!==undefined) {
+      const parent=nodes.get(n.parentId);
+      if(!parent) ctx.addIssue({code:'custom',path:['nodes',i,'parentId'],message:'Missing parent: '+n.parentId});
+      else {
+        if(!validRelationship('contains',parent.kind,n.kind)) ctx.addIssue({code:'custom',path:['nodes',i,'parentId'],message:'Invalid contains relationship: '+parent.kind+' → '+n.kind});
+        contain(n.parentId,n.id);
+      }
+    }
+  });
   const edgeIds=new Set<string>();
-  for(const n of graph.nodes) if(n.parentId && !ids.has(n.parentId)) ctx.addIssue({code:'custom',message:'Missing parent: '+n.parentId});
-  for(const e of graph.edges) {
-    if(!ids.has(e.source)||!ids.has(e.target)) ctx.addIssue({code:'custom',message:'Missing edge endpoint'});
-    if(edgeIds.has(e.id)) ctx.addIssue({code:'custom',message:'Duplicate edge ID'});
+  graph.edges.forEach((e,i)=>{
+    if(edgeIds.has(e.id)) ctx.addIssue({code:'custom',path:['edges',i,'id'],message:'Duplicate edge ID: '+e.id});
     edgeIds.add(e.id);
+    const source=nodes.get(e.source),target=nodes.get(e.target);
+    if(!source) ctx.addIssue({code:'custom',path:['edges',i,'source'],message:'Missing edge endpoint: '+e.source});
+    if(!target) ctx.addIssue({code:'custom',path:['edges',i,'target'],message:'Missing edge endpoint: '+e.target});
+    if(source && target) {
+      if(!validRelationship(e.kind,source.kind,target.kind)) ctx.addIssue({code:'custom',path:['edges',i,'kind'],message:'Invalid '+e.kind+' relationship: '+source.kind+' → '+target.kind});
+      if(e.kind==='contains') contain(e.source,e.target);
+    }
+  });
+  // Only containment participates; calls and workflow loops can legitimately cycle.
+  const pending=Array.from(incoming).filter(([,count])=>count===0).map(([id])=>id);
+  let visited=0;
+  while(pending.length) {
+    const id=pending.pop()!;visited++;
+    for(const child of children.get(id)!) {
+      const count=incoming.get(child)!-1;incoming.set(child,count);
+      if(count===0)pending.push(child);
+    }
   }
-  const parents=new Map(graph.nodes.map(n=>[n.id,n.parentId]));
-  for(const n of graph.nodes) {
-    const seen=new Set<string>(); let current:string|undefined=n.id;
-    while(current) { if(seen.has(current)){ctx.addIssue({code:'custom',message:'Parent cycle'});break;} seen.add(current); current=parents.get(current); }
-  }
+  if(visited!==nodes.size) ctx.addIssue({code:'custom',path:['nodes'],message:'Containment cycle involving: '+Array.from(incoming).filter(([,count])=>count>0).map(([id])=>id).join(', ')});
 });
 export type ProgramNode=z.infer<typeof NodeSchema>;
 export type ProgramEdge=z.infer<typeof EdgeSchema>;
 export type Graph=z.infer<typeof GraphSchema>;
+export type GraphInput=z.input<typeof GraphSchema>;
 export type Source=z.infer<typeof SourceSchema>;
 export type Diagnostic={severity:'error'|'warning'|'info'; message:string; path?:string; line?:number; code?:string};
 export type Quality={
@@ -74,7 +130,7 @@ export type AgentJob={
   workspace:string;events:{time:string;message:string}[];report?:ValidationReport;
   proposal?:DesignProposal;preview?:Analysis;error?:string;
 };
-export const emptyGraph=():Graph=>({nodes:[],edges:[]});
+export const emptyGraph=():Graph=>({schemaVersion:GRAPH_SCHEMA_VERSION,nodes:[],edges:[]});
 export function graphDelta(before:Graph,after:Graph) {
   const oldNodes=new Map(before.nodes.map(n=>[n.id,n]));
   const oldEdges=new Map(before.edges.map(e=>[e.id,e]));

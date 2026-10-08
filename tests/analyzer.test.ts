@@ -1,10 +1,13 @@
 import {it,expect} from 'vitest';
 import {Analyzer} from '../server/analyzer';
+import {GraphSchema} from '../shared/model';
 import {mkdtemp,writeFile,cp,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 it('extracts source-backed symbols, calls, workflows and Prisma relationships',async()=>{
  const a=await new Analyzer().analyze(resolve('examples/shop'));
+ expect(a.graph.schemaVersion).toBe(1);
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
  const place=a.graph.nodes.find(n=>n.name==='placeOrder')!;
  expect(place.kind).toBe('function');expect(place.source?.path).toBe('orders.ts');
  expect(place.contract).toContain('Promise<Order>');
@@ -42,5 +45,29 @@ it('reports incomplete imports instead of hiding unresolved dependencies',async(
   const a=await new Analyzer().analyze(dir);
   expect(a.status).toBe('partial');expect(a.quality.diagnostics.length).toBeGreaterThan(0);
   expect(a.graph.nodes.some(n=>n.name==='run')).toBe(true);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+it('accepts the extracted relationship when a TypeScript class implements another class',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-class-contract-'));
+ try{
+  await writeFile(join(dir,'point.ts'),'export class Point { x=0; y=0; } export class Point3d implements Point { x=0; y=0; z=0; }');
+  const a=await new Analyzer().analyze(dir);
+  const point=a.graph.nodes.find(n=>n.name==='Point')!;
+  const point3d=a.graph.nodes.find(n=>n.name==='Point3d')!;
+  expect(a.quality.diagnostics).toEqual([]);
+  expect(a.graph.edges).toContainEqual(expect.objectContaining({source:point3d.id,target:point.id,kind:'implements'}));
+  expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+it('binds class inheritance to the class when its name is merged with an interface',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-merged-class-'));
+ try{
+  await writeFile(join(dir,'base.ts'),'export interface Base { value:number; } export class Base { value=1; } export class Child extends Base {}');
+  const a=await new Analyzer().analyze(dir);
+  const base=a.graph.nodes.find(n=>n.name==='Base'&&n.kind==='class')!;
+  const child=a.graph.nodes.find(n=>n.name==='Child')!;
+  expect(a.quality.diagnostics).toEqual([]);
+  expect(a.graph.edges).toContainEqual(expect.objectContaining({source:child.id,target:base.id,kind:'inherits'}));
+  expect(GraphSchema.safeParse(a.graph).success).toBe(true);
  }finally{await rm(dir,{recursive:true,force:true});}
 });

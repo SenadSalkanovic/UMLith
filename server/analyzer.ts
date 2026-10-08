@@ -2,7 +2,7 @@ import ts from 'typescript';
 import {getSchema,PrismaParser,VisitorClassFactory,type Field,type Model} from '@mrleebo/prisma-ast';
 import {resolve,relative,basename,dirname} from 'node:path';
 import {performance} from 'node:perf_hooks';
-import {NodeSchema,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge} from '../shared/model';
+import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge} from '../shared/model';
 import {captureFiles,hash,AppError} from './files';
 const idFor=(key:string)=>hash(key).slice(0,24);
 const normalize=(value:string)=>value.replace(/\s+/g,' ').trim();
@@ -139,7 +139,8 @@ export class Analyzer {
     if(ts.isClassDeclaration(n)&&n.heritageClauses)for(const clause of n.heritageClauses)for(const t of clause.types){
      let sym=checker.getSymbolAtLocation(t.expression);
      if(sym&&(sym.flags&ts.SymbolFlags.Alias))sym=checker.getAliasedSymbol(sym);
-     const decl=sym?.declarations?.[0];const target=decl&&(declarations.get(decl)||declarationKeys.get(makeKey(decl)));
+     const decl=clause.token===ts.SyntaxKind.ExtendsKeyword?(sym?.valueDeclaration||sym?.declarations?.[0]):sym?.declarations?.[0];
+     const target=decl&&(declarations.get(decl)||declarationKeys.get(makeKey(decl)));
      if(target)addEdge(owner,target,clause.token===ts.SyntaxKind.ExtendsKeyword?'inherits':'implements');
     }
     ts.forEachChild(n,c=>walk(c,owner));
@@ -230,7 +231,7 @@ export class Analyzer {
    }catch(error){diagnostics.push({severity:'error',message:'Prisma parse failed: '+(error as Error).message,path});}
   }
   const dedup=Array.from(new Map(diagnostics.map(d=>[JSON.stringify(d),d])).values());
-  const graph:Graph={nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id))};
+  const graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id))};
   return {revision,sequence:++this.sequence,analyzedAt:new Date().toISOString(),status:dedup.some(d=>d.severity!=='info')?'partial':'current',graph,files,durationMs:performance.now()-start,quality:{eligibleFiles:eligible.length,analyzedFiles:analyzed,unresolvedReferences:unresolved,unsupportedConstructs:unsupported,inferredItems:0,prismaValidation:eligible.some(p=>p.endsWith('.prisma'))?'unavailable':'not-applicable',diagnostics:dedup}};
  }
 }

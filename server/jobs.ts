@@ -96,7 +96,7 @@ export class JobService extends EventEmitter {
     onProcess:child=>{active.child=child;},
     onOutput:text=>this.event(job,text),
    });
-   if(job.status==='cancelled')return;
+   if(active.job.status==='cancelled')return;
    if(result.code!==0)throw new Error('Agent exited with status '+result.code+'. '+result.output.slice(-3000));
    clearTimeout(previewTimer);await watcher.close();
    if(job.kind==='design'){
