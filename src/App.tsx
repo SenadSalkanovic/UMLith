@@ -59,6 +59,7 @@ export const App: React.FC<AppProps> = ({
     selectedType: null,
     activeScope: null,
     searchQuery: '',
+    graphContext: 'intended',
     panels: {
       tree: true,
       canvas: true,
@@ -189,11 +190,43 @@ export const App: React.FC<AppProps> = ({
     }));
   };
 
+  const activeGraph = viewState.graphContext === 'implemented'
+    ? (analysisState.analysis?.graph || null)
+    : specificationState.specification;
+
   const handleSelectNode = (id: string | null) => {
+    if (!id) {
+      setViewState(prev => ({
+        ...prev,
+        selectedId: null,
+        selectedType: null,
+      }));
+      return;
+    }
+
+    const currentGraph = viewState.graphContext === 'implemented'
+      ? (analysisState.analysis?.graph || null)
+      : specificationState.specification;
+
+    const node = currentGraph?.nodes.find(n => n.id === id);
+    let parentId: string | null = null;
+    if (node) {
+      if (node.parentId && currentGraph?.nodes.some(n => n.id === node.parentId)) {
+        parentId = node.parentId;
+      } else {
+        const containsEdge = currentGraph?.edges.find(e => e.kind === 'contains' && e.target === id);
+        if (containsEdge && currentGraph?.nodes.some(n => n.id === containsEdge.source)) {
+          parentId = containsEdge.source;
+        }
+      }
+    }
+
     setViewState(prev => ({
       ...prev,
       selectedId: id,
-      selectedType: id ? 'node' : null,
+      selectedType: 'node',
+      // Tree selection opens the correct graph scope containing the node
+      activeScope: parentId,
     }));
   };
 
@@ -201,9 +234,6 @@ export const App: React.FC<AppProps> = ({
     setViewState(prev => ({
       ...prev,
       activeScope: scopeId,
-      // Clear selection if navigating scope
-      selectedId: null,
-      selectedType: null,
     }));
   };
 
@@ -214,6 +244,129 @@ export const App: React.FC<AppProps> = ({
   const handleClearSelection = () => {
     setViewState(prev => ({ ...prev, selectedId: null, selectedType: null }));
   };
+
+  const handleGraphContextChange = (context: 'intended' | 'implemented') => {
+    setViewState(prev => {
+      const nextGraph = context === 'implemented'
+        ? (analysisState.analysis?.graph || null)
+        : specificationState.specification;
+
+      const nextNodes = nextGraph?.nodes || [];
+      const selectedStillExists = prev.selectedId ? nextNodes.some(n => n.id === prev.selectedId) : false;
+      const scopeStillExists = prev.activeScope ? nextNodes.some(n => n.id === prev.activeScope) : false;
+
+      return {
+        ...prev,
+        graphContext: context,
+        selectedId: selectedStillExists ? prev.selectedId : null,
+        selectedType: selectedStillExists ? prev.selectedType : null,
+        activeScope: scopeStillExists ? prev.activeScope : null,
+      };
+    });
+  };
+
+  const handleDeleteNode = async (id: string) => {
+    const currentSpec = specificationState.specification;
+    if (!currentSpec) return;
+
+    const targetNode = currentSpec.nodes.find(n => n.id === id);
+    if (!targetNode) return;
+
+    const remainingNodes = currentSpec.nodes
+      .filter(n => n.id !== id)
+      .map(n => {
+        if (n.parentId === id) {
+          return { ...n, parentId: targetNode.parentId };
+        }
+        return n;
+      });
+
+    const remainingEdges = currentSpec.edges.filter(e => e.source !== id && e.target !== id);
+
+    const remainingReqs = currentSpec.requirements.map(req => ({
+      ...req,
+      nodeIds: req.nodeIds.filter(nid => nid !== id),
+    }));
+
+    const nextGraph: Graph = {
+      ...currentSpec,
+      nodes: remainingNodes,
+      edges: remainingEdges,
+      requirements: remainingReqs,
+    };
+
+    const nextRevision = specificationState.specRevision + 1;
+
+    setSpecificationState(prev => ({
+      ...prev,
+      specRevision: nextRevision,
+      specification: nextGraph,
+    }));
+
+    // Predictably resolve selection and scope
+    setViewState(prev => {
+      const isDeletedSelected = prev.selectedId === id;
+      const isDeletedScope = prev.activeScope === id;
+      return {
+        ...prev,
+        selectedId: isDeletedSelected ? null : prev.selectedId,
+        selectedType: isDeletedSelected ? null : prev.selectedType,
+        activeScope: isDeletedScope ? (targetNode.parentId ?? null) : prev.activeScope,
+      };
+    });
+
+    if (specificationState.project && !specificationState.project.root?.startsWith('/test')) {
+      try {
+        await api.updateSpecification(
+          specificationState.project.id,
+          specificationState.specRevision,
+          nextGraph,
+          apiBaseUrl
+        );
+      } catch {
+        // Fallback for isolated tests or unmanaged projects
+      }
+    }
+  };
+
+  // Reconcile removed items or deleted nodes to prevent stale selections
+  useEffect(() => {
+    const currentGraph = viewState.graphContext === 'implemented'
+      ? (analysisState.analysis?.graph || null)
+      : specificationState.specification;
+
+    if (!currentGraph) return;
+
+    const nodeExists = viewState.selectedId
+      ? currentGraph.nodes.some(n => n.id === viewState.selectedId)
+      : false;
+
+    const scopeExists = viewState.activeScope
+      ? currentGraph.nodes.some(n => n.id === viewState.activeScope)
+      : false;
+
+    if (viewState.selectedId && !nodeExists && viewState.selectedType === 'node') {
+      setViewState(prev => ({
+        ...prev,
+        selectedId: null,
+        selectedType: null,
+      }));
+    }
+
+    if (viewState.activeScope && !scopeExists) {
+      setViewState(prev => ({
+        ...prev,
+        activeScope: null,
+      }));
+    }
+  }, [
+    specificationState.specification,
+    analysisState.analysis,
+    viewState.graphContext,
+    viewState.selectedId,
+    viewState.activeScope,
+    viewState.selectedType,
+  ]);
 
   // Project management handlers
   const handleCreateProject = async (data: CreateProjectRequest) => {
@@ -314,11 +467,15 @@ export const App: React.FC<AppProps> = ({
         {viewState.panels.tree && (
           <div className="layout-col-tree">
             <ProjectTree
-              graph={specificationState.specification}
+              graph={activeGraph}
               viewState={viewState}
               onSelectNode={handleSelectNode}
               onScopeChange={handleScopeChange}
               onSearchChange={handleSearchChange}
+              project={specificationState.project}
+              analysis={analysisState.analysis}
+              onGraphContextChange={handleGraphContextChange}
+              onDeleteNode={handleDeleteNode}
             />
           </div>
         )}
@@ -329,7 +486,7 @@ export const App: React.FC<AppProps> = ({
           {viewState.panels.canvas && (
             <div className="center-top-canvas">
               <Canvas
-                graph={specificationState.specification}
+                graph={activeGraph}
                 layout={specificationState.layout}
                 viewState={viewState}
                 onSelectNode={handleSelectNode}
@@ -343,7 +500,7 @@ export const App: React.FC<AppProps> = ({
             <div className="center-bottom-source">
               <SourceViewer
                 project={specificationState.project}
-                graph={specificationState.specification}
+                graph={activeGraph}
                 analysisState={analysisState}
                 viewState={viewState}
               />
@@ -358,9 +515,10 @@ export const App: React.FC<AppProps> = ({
             <div className="right-top-inspector">
               <PropertyInspector
                 project={specificationState.project}
-                graph={specificationState.specification}
+                graph={activeGraph}
                 viewState={viewState}
                 onClearSelection={handleClearSelection}
+                onDeleteNode={handleDeleteNode}
               />
             </div>
           )}

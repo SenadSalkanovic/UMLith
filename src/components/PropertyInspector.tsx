@@ -1,13 +1,14 @@
 import React from 'react';
 import type { Graph, ProgramNode, ProgramEdge, Project } from '../../shared/model';
 import type { ViewState } from '../types';
-import { Sliders, Shield, Tag, FileText, CheckCircle2, AlertCircle, Info } from 'lucide-react';
+import { Sliders, Shield, Tag, FileText, CheckCircle2, AlertCircle, Info, Trash2 } from 'lucide-react';
 
 interface PropertyInspectorProps {
   project: Project | null;
   graph: Graph | null;
   viewState: ViewState;
   onClearSelection: () => void;
+  onDeleteNode?: (id: string) => void;
 }
 
 export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
@@ -15,6 +16,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   graph,
   viewState,
   onClearSelection,
+  onDeleteNode,
 }) => {
   const selectedNode = viewState.selectedId
     ? graph?.nodes.find(n => n.id === viewState.selectedId) || null
@@ -51,8 +53,23 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
         {selectedNode ? (
           <div className="inspector-details" data-testid="node-inspector">
             <div className="inspector-section">
-              <span className="section-label">Selected Node</span>
-              <h3 className="item-title" title={selectedNode.name}>{selectedNode.name}</h3>
+              <div className="inspector-title-row">
+                <div>
+                  <span className="section-label">Selected Node</span>
+                  <h3 className="item-title" title={selectedNode.name}>{selectedNode.name}</h3>
+                </div>
+                {onDeleteNode && (
+                  <button
+                    className="btn btn-xs btn-outline-danger"
+                    onClick={() => onDeleteNode(selectedNode.id)}
+                    title={`Delete ${selectedNode.name}`}
+                    data-testid="inspector-delete-node"
+                  >
+                    <Trash2 size={12} />
+                    <span>Delete</span>
+                  </button>
+                )}
+              </div>
               <div className="badge-row">
                 <span className="kind-badge">{selectedNode.kind}</span>
                 <span className={`policy-badge policy-${selectedNode.policy}`}>

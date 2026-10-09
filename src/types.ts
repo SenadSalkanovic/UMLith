@@ -7,6 +7,7 @@ export interface ViewState {
   selectedType: 'node' | 'edge' | 'project' | null;
   activeScope: string | null; // null represents root/global scope, otherwise node.id of container
   searchQuery: string;
+  graphContext?: 'intended' | 'implemented';
   panels: {
     tree: boolean;
     canvas: boolean;

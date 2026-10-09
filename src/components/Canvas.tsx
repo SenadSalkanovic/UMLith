@@ -31,17 +31,34 @@ const FlowCanvasInternal: React.FC<CanvasProps> = ({
   const allNodes = useMemo(() => graph?.nodes || [], [graph]);
   const allEdges = useMemo(() => graph?.edges || [], [graph]);
 
+  const nodeParentMap = useMemo(() => {
+    const map = new Map<string, string | undefined>();
+    const nodeIds = new Set(allNodes.map(n => n.id));
+    allNodes.forEach(n => {
+      if (n.parentId && nodeIds.has(n.parentId)) {
+        map.set(n.id, n.parentId);
+      } else {
+        const containsEdge = allEdges.find(e => e.kind === 'contains' && e.target === n.id);
+        if (containsEdge && nodeIds.has(containsEdge.source)) {
+          map.set(n.id, containsEdge.source);
+        } else {
+          map.set(n.id, undefined);
+        }
+      }
+    });
+    return map;
+  }, [allNodes, allEdges]);
+
   // Determine current scoped nodes
   const scopedNodes = useMemo(() => {
     if (viewState.activeScope === null) {
-      // Root scope: nodes with no parentId
-      const top = allNodes.filter(n => !n.parentId);
-      // If none have no parentId, fallback to all nodes
+      // Root scope: nodes with no parent
+      const top = allNodes.filter(n => !nodeParentMap.get(n.id));
       return top.length > 0 ? top : allNodes;
     }
     // Child nodes of activeScope
-    return allNodes.filter(n => n.parentId === viewState.activeScope);
-  }, [allNodes, viewState.activeScope]);
+    return allNodes.filter(n => nodeParentMap.get(n.id) === viewState.activeScope);
+  }, [allNodes, viewState.activeScope, nodeParentMap]);
 
   const scopedNodeIds = useMemo(() => new Set(scopedNodes.map(n => n.id)), [scopedNodes]);
 
