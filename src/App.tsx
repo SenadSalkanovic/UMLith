@@ -14,6 +14,7 @@ import { ErrorView } from './components/ErrorView';
 import { ProjectModal } from './components/ProjectModal';
 import { ArchitectureEditor } from './components/ArchitectureEditor';
 import { ErEditor } from './components/ErEditor';
+import { FunctionEditor } from './components/FunctionEditor';
 import { Loader2 } from 'lucide-react';
 
 export interface AppProps {
@@ -47,6 +48,11 @@ export const App: React.FC<AppProps> = ({
   const [isErEditorOpen, setIsErEditorOpen] = useState<boolean>(false);
   const [erEditorTab, setErEditorTab] = useState<'entities' | 'fields' | 'enums' | 'relationships'>('entities');
   const [erEditorNodeId, setErEditorNodeId] = useState<string | null>(null);
+
+  // Function Editor Modal State
+  const [isFunctionEditorOpen, setIsFunctionEditorOpen] = useState<boolean>(false);
+  const [functionEditorTab, setFunctionEditorTab] = useState<'details' | 'contract' | 'scenarios' | 'add'>('details');
+  const [functionEditorNodeId, setFunctionEditorNodeId] = useState<string | null>(null);
 
   // 3. Specification State (Persistent & Versioned Intent)
   const [specificationState, setSpecificationState] = useState<SpecificationState>(() => ({
@@ -295,6 +301,15 @@ export const App: React.FC<AppProps> = ({
     setIsErEditorOpen(true);
   };
 
+  const handleOpenFunctionEditor = (
+    tab: 'details' | 'contract' | 'scenarios' | 'add' = 'details',
+    nodeId: string | null = null
+  ) => {
+    setFunctionEditorTab(tab);
+    setFunctionEditorNodeId(nodeId || viewState.selectedId);
+    setIsFunctionEditorOpen(true);
+  };
+
   const handleEditNode = (nodeId: string) => {
     const currentSpec = specificationState.specification;
     const target = currentSpec?.nodes.find(n => n.id === nodeId);
@@ -302,6 +317,8 @@ export const App: React.FC<AppProps> = ({
       handleOpenErEditor('fields', nodeId);
     } else if (target?.kind === 'enum') {
       handleOpenErEditor('enums', nodeId);
+    } else if (target?.kind === 'function') {
+      handleOpenFunctionEditor('details', nodeId);
     } else {
       handleOpenArchitectureEditor('edit', nodeId);
     }
@@ -600,6 +617,7 @@ export const App: React.FC<AppProps> = ({
         }}
         onOpenArchitectureEditor={() => handleOpenArchitectureEditor('add')}
         onOpenErEditor={() => handleOpenErEditor('entities')}
+        onOpenFunctionEditor={() => handleOpenFunctionEditor('details')}
       />
 
       <main className="workspace-main" data-testid="workspace-main">
@@ -638,6 +656,7 @@ export const App: React.FC<AppProps> = ({
                 apiBaseUrl={apiBaseUrl}
                 onOpenArchitectureEditor={() => handleOpenArchitectureEditor('add')}
                 onOpenErEditor={() => handleOpenErEditor('entities')}
+                onOpenFunctionEditor={() => handleOpenFunctionEditor('details')}
               />
             </div>
           )}
@@ -668,6 +687,7 @@ export const App: React.FC<AppProps> = ({
                 onDeleteNode={handleDeleteNode}
                 onEditNode={handleEditNode}
                 onEditErNode={id => handleOpenErEditor('fields', id)}
+                onEditFunctionNode={id => handleOpenFunctionEditor('details', id)}
               />
             </div>
           )}
@@ -716,6 +736,18 @@ export const App: React.FC<AppProps> = ({
         selectedNodeId={erEditorNodeId || viewState.selectedId}
         onSelectNode={handleSelectNode}
         initialTab={erEditorTab}
+        mode="modal"
+      />
+
+      <FunctionEditor
+        isOpen={isFunctionEditorOpen}
+        onClose={() => setIsFunctionEditorOpen(false)}
+        project={specificationState.project}
+        graph={specificationState.specification}
+        onUpdateSpecification={handleUpdateSpecification}
+        selectedNodeId={functionEditorNodeId || viewState.selectedId}
+        onSelectNode={handleSelectNode}
+        initialTab={functionEditorTab}
         mode="modal"
       />
     </div>

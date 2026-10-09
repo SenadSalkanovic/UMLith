@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Project } from '../../shared/model';
 import type { SyncStatus, ViewState } from '../types';
-import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database } from 'lucide-react';
+import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database, Terminal } from 'lucide-react';
 
 interface HeaderProps {
   project: Project | null;
@@ -12,6 +12,7 @@ interface HeaderProps {
   onOpenProjectPicker: () => void;
   onOpenArchitectureEditor?: () => void;
   onOpenErEditor?: () => void;
+  onOpenFunctionEditor?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -23,6 +24,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenProjectPicker,
   onOpenArchitectureEditor,
   onOpenErEditor,
+  onOpenFunctionEditor,
 }) => {
   const getStatusBadge = () => {
     switch (syncStatus) {
@@ -107,6 +109,18 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Database size={16} />
             <span>ER Schema</span>
+          </button>
+        )}
+
+        {onOpenFunctionEditor && (
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenFunctionEditor}
+            title="Open Function Specifications & Contracts Editor"
+            data-testid="header-open-functions"
+          >
+            <Terminal size={16} />
+            <span>Functions</span>
           </button>
         )}
 

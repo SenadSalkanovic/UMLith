@@ -28,6 +28,7 @@ import {
   Maximize2,
   HelpCircle,
   Database,
+  Terminal,
 } from 'lucide-react';
 import * as api from '../api';
 
@@ -45,6 +46,7 @@ export interface GraphCanvasProps {
   readOnly?: boolean;
   onOpenArchitectureEditor?: () => void;
   onOpenErEditor?: () => void;
+  onOpenFunctionEditor?: () => void;
 }
 
 export function getValidRelationshipKinds(
@@ -182,6 +184,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
   readOnly = false,
   onOpenArchitectureEditor,
   onOpenErEditor,
+  onOpenFunctionEditor,
 }) => {
   const allNodes = useMemo(() => graph?.nodes || [], [graph]);
   const allEdges = useMemo(() => graph?.edges || [], [graph]);
@@ -621,6 +624,18 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
             >
               <Database size={12} />
               <span>ER Schema</span>
+            </button>
+          )}
+
+          {!readOnly && onOpenFunctionEditor && (
+            <button
+              className="btn btn-xs btn-outline"
+              onClick={onOpenFunctionEditor}
+              title="Open Function Specifications & Contracts Editor"
+              data-testid="canvas-open-function-btn"
+            >
+              <Terminal size={12} />
+              <span>Functions</span>
             </button>
           )}
 

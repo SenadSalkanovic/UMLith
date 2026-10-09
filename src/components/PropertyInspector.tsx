@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Graph, ProgramNode, ProgramEdge, Project } from '../../shared/model';
 import type { ViewState } from '../types';
-import { Sliders, Shield, Tag, FileText, CheckCircle2, AlertCircle, Info, Trash2, Edit3, Database } from 'lucide-react';
+import { Sliders, Shield, Tag, FileText, CheckCircle2, AlertCircle, Info, Trash2, Edit3, Database, Terminal } from 'lucide-react';
 
 interface PropertyInspectorProps {
   project: Project | null;
@@ -11,6 +11,7 @@ interface PropertyInspectorProps {
   onDeleteNode?: (id: string) => void;
   onEditNode?: (id: string) => void;
   onEditErNode?: (id: string) => void;
+  onEditFunctionNode?: (id: string) => void;
 }
 
 export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
@@ -21,6 +22,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   onDeleteNode,
   onEditNode,
   onEditErNode,
+  onEditFunctionNode,
 }) => {
   const selectedNode = viewState.selectedId
     ? graph?.nodes.find(n => n.id === viewState.selectedId) || null
@@ -72,6 +74,16 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                     >
                       <Database size={12} />
                       <span>Edit ER</span>
+                    </button>
+                  ) : selectedNode.kind === 'function' && onEditFunctionNode ? (
+                    <button
+                      className="btn btn-xs btn-outline"
+                      onClick={() => onEditFunctionNode(selectedNode.id)}
+                      title={`Edit function contract for ${selectedNode.name}`}
+                      data-testid="inspector-edit-function-node"
+                    >
+                      <Terminal size={12} />
+                      <span>Edit Function</span>
                     </button>
                   ) : onEditNode ? (
                     <button
@@ -167,28 +179,28 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             {selectedNode.inputs && (
               <div className="inspector-field">
                 <label>Inputs</label>
-                <p>{selectedNode.inputs}</p>
+                <p className="item-desc multiline-text">{selectedNode.inputs}</p>
               </div>
             )}
 
             {selectedNode.outputs && (
               <div className="inspector-field">
                 <label>Outputs</label>
-                <p>{selectedNode.outputs}</p>
+                <p className="item-desc multiline-text">{selectedNode.outputs}</p>
               </div>
             )}
 
             {selectedNode.rules && (
               <div className="inspector-field">
                 <label>Rules</label>
-                <p>{selectedNode.rules}</p>
+                <p className="item-desc multiline-text">{selectedNode.rules}</p>
               </div>
             )}
 
             {selectedNode.errors && (
               <div className="inspector-field">
                 <label>Errors</label>
-                <p>{selectedNode.errors}</p>
+                <p className="item-desc multiline-text">{selectedNode.errors}</p>
               </div>
             )}
 
@@ -197,7 +209,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                 <label>Scenarios ({selectedNode.scenarios.length})</label>
                 <ul className="scenario-list">
                   {selectedNode.scenarios.map((sc, i) => (
-                    <li key={i}>{sc}</li>
+                    <li key={i} className="multiline-text">{sc}</li>
                   ))}
                 </ul>
               </div>
