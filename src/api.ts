@@ -179,3 +179,22 @@ export async function getChecks(
 ): Promise<Record<string, { command: string; args: string[] }>> {
   return request<Record<string, { command: string; args: string[] }>>(`/projects/${id}/checks`, { method: 'GET' }, baseUrl);
 }
+
+export interface ProjectFileResponse {
+  path: string;
+  text: string;
+  hash: string;
+  revision?: string;
+  captured?: boolean;
+}
+
+export async function getProjectFile(
+  id: string,
+  path: string,
+  revision?: string,
+  baseUrl?: string
+): Promise<ProjectFileResponse> {
+  const query = new URLSearchParams({ path });
+  if (revision) query.set('revision', revision);
+  return request<ProjectFileResponse>(`/projects/${id}/files?${query.toString()}`, { method: 'GET' }, baseUrl);
+}

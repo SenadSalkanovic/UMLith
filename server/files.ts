@@ -6,6 +6,11 @@ export class AppError extends Error {constructor(message:string,public statusCod
 export const hash=(data:string|Buffer)=>createHash('sha256').update(data).digest('hex');
 export const ignoredDirs=new Set(['node_modules','.git','dist','build','coverage','.next','.superpowers','.workspace-data','.impeccable','_architect']);
 export const excluded=(name:string)=>name==='.env'||name.startsWith('.env.')||['.codex','.claude','.ssh','.aws','.npmrc','.pypirc','auth.json','credentials.json'].includes(name)||name.endsWith('.pem')||name.endsWith('.key');
+export function isPathExcluded(path:string):boolean {
+ if(!path) return false;
+ const parts=path.replace(/\\/g,'/').split('/').filter(Boolean);
+ return parts.some(part=>excluded(part)||ignoredDirs.has(part));
+}
 export async function atomicJson(path:string,value:unknown) {
  await mkdir(dirname(path),{recursive:true});
  const temp=path+'.'+randomUUID()+'.tmp';

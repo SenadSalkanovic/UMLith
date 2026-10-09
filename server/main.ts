@@ -1,12 +1,12 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { stat } from 'node:fs/promises';
+import { stat, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ZodError } from 'zod';
 import { ProjectStore, SpecificationConflictError } from './store';
-import { AppError } from './files';
+import { AppError, safePath, hash, isPathExcluded } from './files';
 import {
   CreateProjectRequestSchema,
   UpdateSpecificationRequestSchema,
@@ -228,7 +228,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
 
     if (error instanceof AppError) {
       const statusCode = error.statusCode;
-      const errorTitle = statusCode === 404 ? 'Not Found' : statusCode === 409 ? 'Conflict' : 'Bad Request';
+      const errorTitle = statusCode === 404 ? 'Not Found' : statusCode === 409 ? 'Conflict' : statusCode === 403 ? 'Forbidden' : 'Bad Request';
       return reply.status(statusCode).send({
         error: errorTitle,
         message: error.message,
@@ -384,6 +384,75 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     const project = await store.get(id);
     return reply.send(project.checks);
   });
+
+  // Project files and source inspection endpoints (T025)
+  const getFileHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const query = request.query as { path?: string; revision?: string } | undefined;
+    const wildcard = (request.params as any)['*'];
+    const filePath = wildcard || query?.path;
+    if (!filePath || typeof filePath !== 'string' || !filePath.trim()) {
+      throw new AppError('File path is required', 400);
+    }
+
+    if (isPathExcluded(filePath)) {
+      throw new AppError(`Access to excluded or sensitive file is not permitted: ${filePath}`, 403);
+    }
+
+    const project = await store.get(id);
+
+    // If an analysis revision is explicitly specified, check if captured content is available
+    if (query?.revision && project.analysis && project.analysis.revision === query.revision) {
+      const captured = project.analysis.files[filePath];
+      if (captured) {
+        return reply.send({
+          path: filePath,
+          text: captured.text,
+          hash: captured.hash,
+          revision: query.revision,
+          captured: true,
+        });
+      }
+    }
+
+    // Obey root-boundary file access policy using safePath
+    try {
+      const validatedPath = await safePath(project.root, filePath, false);
+      const relFromRoot = relative(project.root, validatedPath);
+      if (isPathExcluded(relFromRoot)) {
+        throw new AppError(`Access to excluded or sensitive file is not permitted: ${filePath}`, 403);
+      }
+      const fileStat = await stat(validatedPath);
+      if (!fileStat.isFile()) {
+        throw new AppError(`Not a regular project file: ${filePath}`, 400);
+      }
+      const maxSizeBytes = 20 * 1024 * 1024;
+      if (fileStat.size > maxSizeBytes) {
+        throw new AppError(`File exceeds 20 MB: ${filePath}`, 400);
+      }
+      const text = await readFile(validatedPath, 'utf8');
+      if (Buffer.byteLength(text) > maxSizeBytes) {
+        throw new AppError(`File exceeds 20 MB: ${filePath}`, 400);
+      }
+      const fileHash = hash(text);
+      return reply.send({
+        path: filePath,
+        text,
+        hash: fileHash,
+        captured: false,
+      });
+    } catch (err: any) {
+      if (err instanceof AppError) throw err;
+      if (err?.code === 'ENOENT') {
+        throw new AppError(`File not found: ${filePath}`, 404);
+      }
+      throw err;
+    }
+  };
+
+  app.get('/api/projects/:id/files', getFileHandler);
+  app.get('/api/projects/:id/files/*', getFileHandler);
+  app.get('/api/projects/:id/source', getFileHandler);
 
   // Event streams (SSE)
   const createSseHandler = (forProject: boolean) => {

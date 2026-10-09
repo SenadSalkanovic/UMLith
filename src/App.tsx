@@ -700,6 +700,7 @@ export const App: React.FC<AppProps> = ({
                 graph={activeGraph}
                 analysisState={analysisState}
                 viewState={viewState}
+                apiBaseUrl={apiBaseUrl}
               />
             </div>
           )}
