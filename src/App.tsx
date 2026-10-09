@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import type { Project, Graph } from '../shared/model';
+import type { Project, Graph, Layout } from '../shared/model';
 import type { CreateProjectRequest } from '../shared/api';
 import type { ViewState, SpecificationState, AnalysisState, WorkspaceError, SyncStatus } from './types';
 import * as api from './api';
@@ -329,7 +329,91 @@ export const App: React.FC<AppProps> = ({
     }
   };
 
-  // Reconcile removed items or deleted nodes to prevent stale selections
+  const handleSelectEdge = (id: string | null) => {
+    setViewState(prev => ({
+      ...prev,
+      selectedId: id,
+      selectedType: id ? 'edge' : null,
+    }));
+  };
+
+  const handleLayoutChange = async (updatedLayout: Layout, scopeId?: string | null) => {
+    // 1. Immediately update view/spec state layout without touching specification or specRevision
+    setSpecificationState(prev => {
+      const nextLayout = { ...prev.layout, ...updatedLayout };
+      const nextScopedLayouts = scopeId
+        ? {
+            ...prev.project?.scopedLayouts,
+            [scopeId]: {
+              ...(prev.project?.scopedLayouts?.[scopeId] || {}),
+              ...updatedLayout,
+            },
+          }
+        : prev.project?.scopedLayouts;
+
+      return {
+        ...prev,
+        layout: nextLayout,
+        project: prev.project
+          ? {
+              ...prev.project,
+              layout: nextLayout,
+              scopedLayouts: nextScopedLayouts,
+            }
+          : null,
+      };
+    });
+
+    // 2. Persist to server via layout API
+    if (specificationState.project && !specificationState.project.root?.startsWith('/test')) {
+      try {
+        await api.updateLayout(
+          specificationState.project.id,
+          updatedLayout,
+          scopeId || undefined,
+          apiBaseUrl
+        );
+      } catch (err) {
+        console.error('Failed to persist layout change:', err);
+      }
+    }
+  };
+
+  const handleUpdateSpecification = async (nextGraph: Graph) => {
+    const nextRevision = specificationState.specRevision + 1;
+
+    // Persist to server
+    if (specificationState.project && !specificationState.project.root?.startsWith('/test')) {
+      const updatedProject = await api.updateSpecification(
+        specificationState.project.id,
+        specificationState.specRevision,
+        nextGraph,
+        apiBaseUrl
+      );
+      setSpecificationState(prev => ({
+        ...prev,
+        specRevision: updatedProject.specRevision,
+        specification: updatedProject.specification,
+        project: updatedProject,
+      }));
+    } else {
+      // Local fallback for in-memory or isolated test projects
+      setSpecificationState(prev => ({
+        ...prev,
+        specRevision: nextRevision,
+        specification: nextGraph,
+        project: prev.project
+          ? {
+              ...prev.project,
+              specRevision: nextRevision,
+              specification: nextGraph,
+            }
+          : null,
+      }));
+    }
+  };
+
+  // Reconcile removed items or deleted nodes/edges to prevent stale selections
   useEffect(() => {
     const currentGraph = viewState.graphContext === 'implemented'
       ? (analysisState.analysis?.graph || null)
@@ -341,11 +425,23 @@ export const App: React.FC<AppProps> = ({
       ? currentGraph.nodes.some(n => n.id === viewState.selectedId)
       : false;
 
+    const edgeExists = viewState.selectedId
+      ? currentGraph.edges.some(e => e.id === viewState.selectedId)
+      : false;
+
     const scopeExists = viewState.activeScope
       ? currentGraph.nodes.some(n => n.id === viewState.activeScope)
       : false;
 
     if (viewState.selectedId && !nodeExists && viewState.selectedType === 'node') {
+      setViewState(prev => ({
+        ...prev,
+        selectedId: null,
+        selectedType: null,
+      }));
+    }
+
+    if (viewState.selectedId && !edgeExists && viewState.selectedType === 'edge') {
       setViewState(prev => ({
         ...prev,
         selectedId: null,
@@ -490,7 +586,12 @@ export const App: React.FC<AppProps> = ({
                 layout={specificationState.layout}
                 viewState={viewState}
                 onSelectNode={handleSelectNode}
+                onSelectEdge={handleSelectEdge}
                 onScopeChange={handleScopeChange}
+                onLayoutChange={handleLayoutChange}
+                onUpdateSpecification={handleUpdateSpecification}
+                projectId={specificationState.project?.id}
+                apiBaseUrl={apiBaseUrl}
               />
             </div>
           )}

@@ -537,6 +537,109 @@ button {
 .custom-flow-node.kind-enum { border-top: 3px solid #f472b6; }
 .custom-flow-node.kind-step { border-top: 3px solid #fb923c; }
 
+.flow-node-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.flow-node-badge {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+.flow-node-badge.flow-node-step {
+  background: rgba(251, 146, 60, 0.2);
+  color: #fb923c;
+}
+.flow-node-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.flow-node-footer {
+  margin-top: 6px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Canvas Header Actions & Selected Edge Bar */
+.canvas-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.canvas-selected-edge-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+}
+.edge-info-badge {
+  color: var(--accent-blue);
+  font-weight: 500;
+}
+
+/* Canvas Error Banner */
+.canvas-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(248, 113, 113, 0.15);
+  border-bottom: 1px solid rgba(248, 113, 113, 0.3);
+  color: var(--accent-red);
+  padding: 6px 12px;
+  font-size: 12px;
+}
+.canvas-error-banner .error-icon {
+  flex-shrink: 0;
+}
+.canvas-error-banner .error-text {
+  flex: 1;
+}
+.btn-dismiss-error {
+  color: var(--accent-red);
+}
+.btn-dismiss-error:hover {
+  background: rgba(248, 113, 113, 0.2);
+}
+
+/* Canvas Edge Editor Form */
+.canvas-edge-editor {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  padding: 10px 14px;
+}
+.editor-form-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.editor-form-row .form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.editor-form-row .form-group label {
+  font-weight: 500;
+}
+.editor-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+
 /* Property Inspector */
 .inspector-details {
   display: flex;
