@@ -1,0 +1,392 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import type { Project, Graph } from '../shared/model';
+import type { CreateProjectRequest } from '../shared/api';
+import type { ViewState, SpecificationState, AnalysisState, WorkspaceError, SyncStatus } from './types';
+import * as api from './api';
+import { Header } from './components/Header';
+import { ProjectTree } from './components/ProjectTree';
+import { Canvas } from './components/Canvas';
+import { PropertyInspector } from './components/PropertyInspector';
+import { SourceViewer } from './components/SourceViewer';
+import { ReviewPanel } from './components/ReviewPanel';
+import { EmptyWorkspace } from './components/EmptyWorkspace';
+import { ErrorView } from './components/ErrorView';
+import { ProjectModal } from './components/ProjectModal';
+import { Loader2 } from 'lucide-react';
+
+export interface AppProps {
+  initialProject?: Project;
+  initialProjects?: Project[];
+  apiBaseUrl?: string;
+  autoLoad?: boolean;
+}
+
+export const App: React.FC<AppProps> = ({
+  initialProject,
+  initialProjects,
+  apiBaseUrl,
+  autoLoad = true,
+}) => {
+  // 1. Loading & Error States
+  const [isLoading, setIsLoading] = useState<boolean>(!initialProject && autoLoad);
+  const [error, setError] = useState<WorkspaceError | null>(null);
+
+  // 2. Available Projects List & Modal State
+  const [availableProjects, setAvailableProjects] = useState<Project[]>(initialProjects || []);
+  const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
+  const [modalTab, setModalTab] = useState<'list' | 'create'>('list');
+
+  // 3. Specification State (Persistent & Versioned Intent)
+  const [specificationState, setSpecificationState] = useState<SpecificationState>(() => ({
+    project: initialProject || null,
+    specRevision: initialProject?.specRevision ?? 0,
+    specification: initialProject?.specification || null,
+    layout: initialProject?.layout || {},
+  }));
+
+  // 4. Analysis State (Compiler Findings & Sync Diagnostics)
+  const [analysisState, setAnalysisState] = useState<AnalysisState>(() => {
+    return {
+      analysis: initialProject?.analysis || null,
+      status: initialProject?.analysis?.status || 'current',
+      lastChecked: initialProject ? Date.now() : null,
+    };
+  });
+
+  // 5. View State (UI-only, strictly decoupled from Spec and Analysis)
+  const [viewState, setViewState] = useState<ViewState>({
+    selectedId: null,
+    selectedType: null,
+    activeScope: null,
+    searchQuery: '',
+    panels: {
+      tree: true,
+      canvas: true,
+      inspector: true,
+      source: true,
+      review: true,
+    },
+  });
+
+  // Load project by ID
+  const loadProjectById = useCallback(async (id: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const proj = await api.getProject(id, apiBaseUrl);
+      setSpecificationState({
+        project: proj,
+        specRevision: proj.specRevision,
+        specification: proj.specification,
+        layout: proj.layout || {},
+      });
+
+      setAnalysisState({
+        analysis: proj.analysis || null,
+        status: proj.analysis?.status || 'current',
+        lastChecked: Date.now(),
+      });
+
+      // Reset selection and scope for newly loaded project
+      setViewState(prev => ({
+        ...prev,
+        selectedId: null,
+        selectedType: null,
+        activeScope: null,
+        searchQuery: '',
+      }));
+    } catch (err: any) {
+      const actionableSteps = err instanceof api.ApiConnectionError && err.actionableSteps
+        ? err.actionableSteps
+        : [
+            'Verify that the local architecture workspace service is running (`npm start` or `npm run dev`).',
+            'Check that the service is listening on loopback at http://127.0.0.1:4317.',
+          ];
+
+      setError({
+        title: 'Unable to Load Project',
+        message: err?.message || 'Failed to fetch project details from local service.',
+        actionableSteps,
+        statusCode: err?.statusCode,
+        isConnectionError: true,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [apiBaseUrl]);
+
+  // Initial load: fetch projects and determine initial active project
+  const initializeWorkspace = useCallback(async () => {
+    if (initialProject) {
+      setIsLoading(false);
+      return;
+    }
+    if (!autoLoad) {
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    try {
+      const list = await api.getProjects(apiBaseUrl);
+      setAvailableProjects(list);
+
+      // Check if URL has ?project=<id>
+      let targetId: string | null = null;
+      if (typeof window !== 'undefined' && window.location) {
+        const urlParams = new URLSearchParams(window.location.search);
+        targetId = urlParams.get('project');
+      }
+
+      if (targetId) {
+        await loadProjectById(targetId);
+      } else if (list.length > 0) {
+        // Automatically load the first available project
+        await loadProjectById(list[0].id);
+      } else {
+        // No projects exist yet -> Empty workspace state
+        setSpecificationState({
+          project: null,
+          specRevision: 0,
+          specification: null,
+          layout: {},
+        });
+      }
+    } catch (err: any) {
+      const actionableSteps = err instanceof api.ApiConnectionError && err.actionableSteps
+        ? err.actionableSteps
+        : [
+            'Verify that the local architecture workspace service is running (`npm start` or `npm run dev`).',
+            'Check that the service is listening on loopback at http://127.0.0.1:4317.',
+            'Ensure your browser is connecting from an allowed origin (http://127.0.0.1:5173).',
+          ];
+
+      setError({
+        title: 'Service Connection Error',
+        message: err?.message || 'Could not connect to the local architecture workspace backend.',
+        actionableSteps,
+        statusCode: err?.statusCode,
+        isConnectionError: true,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [apiBaseUrl, autoLoad, initialProject, loadProjectById]);
+
+  useEffect(() => {
+    initializeWorkspace();
+  }, [initializeWorkspace]);
+
+  // View state handlers (Pure view operations - do not mutate specification!)
+  const handleTogglePanel = (panel: keyof ViewState['panels']) => {
+    setViewState(prev => ({
+      ...prev,
+      panels: {
+        ...prev.panels,
+        [panel]: !prev.panels[panel],
+      },
+    }));
+  };
+
+  const handleSelectNode = (id: string | null) => {
+    setViewState(prev => ({
+      ...prev,
+      selectedId: id,
+      selectedType: id ? 'node' : null,
+    }));
+  };
+
+  const handleScopeChange = (scopeId: string | null) => {
+    setViewState(prev => ({
+      ...prev,
+      activeScope: scopeId,
+      // Clear selection if navigating scope
+      selectedId: null,
+      selectedType: null,
+    }));
+  };
+
+  const handleSearchChange = (query: string) => {
+    setViewState(prev => ({ ...prev, searchQuery: query }));
+  };
+
+  const handleClearSelection = () => {
+    setViewState(prev => ({ ...prev, selectedId: null, selectedType: null }));
+  };
+
+  // Project management handlers
+  const handleCreateProject = async (data: CreateProjectRequest) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const created = await api.createProject(data, apiBaseUrl);
+      setAvailableProjects(prev => [...prev, created]);
+      setSpecificationState({
+        project: created,
+        specRevision: created.specRevision,
+        specification: created.specification,
+        layout: created.layout || {},
+      });
+      setAnalysisState({
+        analysis: created.analysis || null,
+        status: 'current',
+        lastChecked: Date.now(),
+      });
+      setViewState(prev => ({
+        ...prev,
+        selectedId: null,
+        selectedType: null,
+        activeScope: null,
+      }));
+    } catch (err: any) {
+      setError({
+        title: 'Failed to Create Project',
+        message: err?.message || 'Project creation request rejected by service.',
+        actionableSteps: [
+          'Ensure the project name is non-empty.',
+          'If specifying an existing directory root, verify the path exists and is a directory.',
+          'Check server permissions for the workspace data directory.',
+        ],
+        statusCode: err?.statusCode,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Render Loading State
+  if (isLoading) {
+    return (
+      <div className="workspace-loading" data-testid="loading-state">
+        <Loader2 className="spinner" size={36} />
+        <h2>Loading Architecture Workspace…</h2>
+        <p>Connecting to local loopback service at 127.0.0.1:4317</p>
+      </div>
+    );
+  }
+
+  // Render Actionable Error State
+  if (error) {
+    return (
+      <ErrorView
+        error={error}
+        onRetry={initializeWorkspace}
+        onBackToEmpty={() => {
+          setError(null);
+          setSpecificationState({ project: null, specRevision: 0, specification: null, layout: {} });
+        }}
+      />
+    );
+  }
+
+  // Render Empty Workspace State (No project open)
+  if (!specificationState.project) {
+    return (
+      <EmptyWorkspace
+        availableProjects={availableProjects}
+        onSelectProject={loadProjectById}
+        onCreateProject={handleCreateProject}
+      />
+    );
+  }
+
+  // Render Populated Workspace Shell
+  return (
+    <div className="workspace-shell" data-testid="workspace-shell">
+      <Header
+        project={specificationState.project}
+        syncStatus={analysisState.status}
+        viewState={viewState}
+        onTogglePanel={handleTogglePanel}
+        onOpenNewProject={() => {
+          setModalTab('create');
+          setIsModalOpen(true);
+        }}
+        onOpenProjectPicker={() => {
+          setModalTab('list');
+          setIsModalOpen(true);
+        }}
+      />
+
+      <main className="workspace-main" data-testid="workspace-main">
+        {/* Panel 1: Project Tree */}
+        {viewState.panels.tree && (
+          <div className="layout-col-tree">
+            <ProjectTree
+              graph={specificationState.specification}
+              viewState={viewState}
+              onSelectNode={handleSelectNode}
+              onScopeChange={handleScopeChange}
+              onSearchChange={handleSearchChange}
+            />
+          </div>
+        )}
+
+        {/* Center Work Area: Scoped Canvas + Source Viewer */}
+        <div className="layout-col-center">
+          {/* Panel 2: Scoped Canvas */}
+          {viewState.panels.canvas && (
+            <div className="center-top-canvas">
+              <Canvas
+                graph={specificationState.specification}
+                layout={specificationState.layout}
+                viewState={viewState}
+                onSelectNode={handleSelectNode}
+                onScopeChange={handleScopeChange}
+              />
+            </div>
+          )}
+
+          {/* Panel 4: Source Viewer */}
+          {viewState.panels.source && (
+            <div className="center-bottom-source">
+              <SourceViewer
+                project={specificationState.project}
+                graph={specificationState.specification}
+                analysisState={analysisState}
+                viewState={viewState}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Right Work Area: Property Inspector + Review Area */}
+        <div className="layout-col-right">
+          {/* Panel 3: Property Inspector */}
+          {viewState.panels.inspector && (
+            <div className="right-top-inspector">
+              <PropertyInspector
+                project={specificationState.project}
+                graph={specificationState.specification}
+                viewState={viewState}
+                onClearSelection={handleClearSelection}
+              />
+            </div>
+          )}
+
+          {/* Panel 5: Review Area */}
+          {viewState.panels.review && (
+            <div className="right-bottom-review">
+              <ReviewPanel
+                project={specificationState.project}
+                graph={specificationState.specification}
+                analysisState={analysisState}
+              />
+            </div>
+          )}
+        </div>
+      </main>
+
+      <ProjectModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        availableProjects={availableProjects}
+        activeProjectId={specificationState.project.id}
+        onSelectProject={loadProjectById}
+        onCreateProject={handleCreateProject}
+        initialTab={modalTab}
+      />
+    </div>
+  );
+};
