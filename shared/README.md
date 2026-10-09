@@ -2,6 +2,17 @@
 
 T001 defines one graph in `shared/model.ts` for architecture, ER, and optional function workflows. Views select entities from `nodes` and relationships from `edges`; they retain the same IDs and references. Layout remains outside the graph. T003 adds graph-level requirements; function scenarios, policies, provenance, and source bindings remain on the existing node records.
 
+## Loopback binding and browser origin enforcement (T015)
+
+`server/main.ts` binds the Fastify service exclusively to loopback interfaces (`127.0.0.1`, `localhost`, `::1`, or IPv4 `127.0.0.0/8`) and rejects wildcard (`0.0.0.0`, `::`) and non-loopback interface bindings at both configuration and `app.listen` time.
+
+A precise allowed-origin policy is enforced across reads, mutations, event streams, and preflight requests:
+- Allowed origins comprise local development browser origins (`http://127.0.0.1:5173`, `http://localhost:5173`, `http://[::1]:5173`), same-origin loopback ports matching the service's own port (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`, defaulting to port 4317 or the active bound listener port), and any custom origins configured via `options.allowedOrigins` or `ALLOWED_ORIGINS`.
+- Preflight `OPTIONS` requests from allowed origins return 204 No Content with `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`, `Access-Control-Max-Age: 86400`, and `Vary: Origin`. Preflights from foreign origins are rejected with status 403 Forbidden without CORS allow headers.
+- Protected API routes and SSE event streams (`/api/events` and `/api/projects/:id/events`) validate the `Origin` header: foreign browser origins are rejected with 403 Forbidden before any route handler executes, preventing unauthorized reads, mutations, or stream access.
+- Same-origin production packaged serving via `@fastify/static` serves static frontend assets and provides SPA client routing fallback when `staticDir` or `dist/` is present, while continuing to enforce origin protection on all API routes.
+- DNS rebinding is prevented by validating the `Host` header against loopback interfaces, and cross-site browser requests attempting to omit `Origin` with `Sec-Fetch-Site: cross-site` are rejected with status 403 Forbidden.
+
 ## Validated local project and revision interfaces (T014)
 
 `shared/api.ts` exports validated Zod request and response schemas and types: `CreateProjectRequestSchema`, `UpdateSpecificationRequestSchema`, `UpdateLayoutRequestSchema`, `ProjectIdParamSchema`, `ProjectSchema`, `ProjectListResponseSchema`, `RevisionRecordSchema`, `RevisionHistoryResponseSchema`, `LayoutResponseSchema`, `ChecksSchema`, and `ApiErrorResponseSchema`.

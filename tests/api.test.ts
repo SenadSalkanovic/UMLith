@@ -2,7 +2,7 @@ import { it, expect, describe } from 'vitest';
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from '../server/main';
+import { createServer, isLoopbackHost, isWildcardHost, isAllowedOrigin, DEFAULT_ALLOWED_ORIGINS } from '../server/main';
 import { ProjectStore } from '../server/store';
 import { emptyGraph, GraphSchema, type Project } from '../shared/model';
 
@@ -798,5 +798,570 @@ describe('Project and revision API interfaces (T014)', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('Loopback binding and origin enforcement (T015)', () => {
+  it('binds Fastify service to loopback and rejects wildcard and non-loopback interfaces', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-loopback-'));
+    try {
+      const store = new ProjectStore(dir);
+
+      // 1. Rejects wildcard and non-loopback host at createServer configuration time
+      await expect(createServer({ store, host: '0.0.0.0' })).rejects.toThrow(/non-loopback/i);
+      await expect(createServer({ store, host: '::' })).rejects.toThrow(/non-loopback/i);
+      await expect(createServer({ store, host: '192.168.1.100' })).rejects.toThrow(/non-loopback/i);
+
+      // 2. Rejects wildcard and non-loopback host at app.listen time
+      const app = await createServer({ store });
+      await expect(app.listen({ host: '0.0.0.0', port: 0 })).rejects.toThrow(/wildcard/i);
+      await expect(app.listen({ host: '::', port: 0 })).rejects.toThrow(/wildcard/i);
+      await expect(app.listen({ host: '[::]', port: 0 })).rejects.toThrow(/wildcard/i);
+      await expect(app.listen({ host: '192.168.1.50', port: 0 })).rejects.toThrow(/non-loopback/i);
+
+      // 3. Successfully binds to loopback interface and verifies actual listener address
+      const address = await app.listen({ host: '127.0.0.1', port: 0 });
+      const serverAddr = app.server.address() as any;
+      expect(serverAddr).toBeDefined();
+      expect(serverAddr.address).toBe('127.0.0.1');
+      expect(serverAddr.address).not.toBe('0.0.0.0');
+      expect(serverAddr.address).not.toBe('::');
+      expect(typeof serverAddr.port).toBe('number');
+      expect(serverAddr.port).toBeGreaterThan(0);
+      expect(address).toContain('127.0.0.1');
+
+      // 4. Default listen without host binds to loopback
+      const appDefault = await createServer({ store });
+      await appDefault.listen({ port: 0 });
+      const defaultAddr = appDefault.server.address() as any;
+      expect(defaultAddr.address).toBe('127.0.0.1');
+
+      await app.close();
+      await appDefault.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('handles preflight OPTIONS requests for allowed origins and rejects foreign origins', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-preflight-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+
+      // 1. Allowed Vite dev origin (127.0.0.1:5173) preflight returns 204 with CORS headers
+      const resDev1 = await app.inject({
+        method: 'OPTIONS',
+        url: '/api/projects',
+        headers: {
+          origin: 'http://127.0.0.1:5173',
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'content-type',
+        },
+      });
+      expect(resDev1.statusCode).toBe(204);
+      expect(resDev1.headers['access-control-allow-origin']).toBe('http://127.0.0.1:5173');
+      expect(resDev1.headers['access-control-allow-methods']).toContain('POST');
+      expect(resDev1.headers['access-control-allow-methods']).toContain('GET');
+      expect(resDev1.headers['access-control-allow-methods']).toContain('PUT');
+      expect(resDev1.headers['access-control-allow-methods']).toContain('DELETE');
+      expect(resDev1.headers['access-control-allow-headers']).toBe('content-type');
+      expect(resDev1.headers['access-control-max-age']).toBe('86400');
+      expect(resDev1.headers['vary']).toBe('Origin');
+
+      // 2. Allowed localhost:5173 dev origin preflight on subroute
+      const resDev2 = await app.inject({
+        method: 'OPTIONS',
+        url: '/api/projects/proj-123/specification',
+        headers: {
+          origin: 'http://localhost:5173',
+          'access-control-request-method': 'PUT',
+        },
+      });
+      expect(resDev2.statusCode).toBe(204);
+      expect(resDev2.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+
+      // 3. Allowed IPv6 [::1]:5173 dev origin
+      const resDev3 = await app.inject({
+        method: 'OPTIONS',
+        url: '/api/projects',
+        headers: {
+          origin: 'http://[::1]:5173',
+        },
+      });
+      expect(resDev3.statusCode).toBe(204);
+      expect(resDev3.headers['access-control-allow-origin']).toBe('http://[::1]:5173');
+
+      // 4. Foreign origin preflight is rejected with 403 Forbidden without CORS allow header
+      const resEvil = await app.inject({
+        method: 'OPTIONS',
+        url: '/api/projects',
+        headers: {
+          origin: 'http://evil.com',
+          'access-control-request-method': 'POST',
+        },
+      });
+      expect(resEvil.statusCode).toBe(403);
+      expect(resEvil.headers['access-control-allow-origin']).toBeUndefined();
+      expect(resEvil.json()).toEqual(expect.objectContaining({
+        error: 'Forbidden',
+        statusCode: 403,
+      }));
+
+      // 5. Foreign origin preflight on subroute is rejected
+      const resEvilSub = await app.inject({
+        method: 'OPTIONS',
+        url: '/api/projects/some-id/layout',
+        headers: {
+          origin: 'http://attacker.local:8080',
+        },
+      });
+      expect(resEvilSub.statusCode).toBe(403);
+      expect(resEvilSub.headers['access-control-allow-origin']).toBeUndefined();
+
+      // 6. Direct local OPTIONS without origin returns 204 with Allow header
+      const resNoOrigin = await app.inject({
+        method: 'OPTIONS',
+        url: '/api/projects',
+      });
+      expect(resNoOrigin.statusCode).toBe(204);
+      expect(resNoOrigin.headers['allow']).toContain('GET');
+      expect(resNoOrigin.headers['access-control-allow-origin']).toBeUndefined();
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects foreign browser origins on reads and mutations and prevents unauthorized state changes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-foreign-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+
+      const p = await store.create({ name: 'Protected Workspace' });
+
+      // 1. Foreign origin GET on projects list: 403
+      const getList = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { origin: 'http://evil.com' },
+      });
+      expect(getList.statusCode).toBe(403);
+      expect(getList.headers['access-control-allow-origin']).toBeUndefined();
+      expect(getList.json()).toEqual(expect.objectContaining({ error: 'Forbidden', statusCode: 403 }));
+
+      // 2. Foreign origin GET on single project: 403
+      const getProj = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${p.id}`,
+        headers: { origin: 'http://evil.com' },
+      });
+      expect(getProj.statusCode).toBe(403);
+
+      // 3. Foreign origin GET on revisions: 403
+      const getRevs = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${p.id}/revisions`,
+        headers: { origin: 'http://evil.com' },
+      });
+      expect(getRevs.statusCode).toBe(403);
+
+      // 4. Foreign origin GET on layout: 403
+      const getLayout = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${p.id}/layout`,
+        headers: { origin: 'http://evil.com' },
+      });
+      expect(getLayout.statusCode).toBe(403);
+
+      // 5. Foreign origin GET on health: 403
+      const getHealth = await app.inject({
+        method: 'GET',
+        url: '/api/health',
+        headers: { origin: 'http://evil.com' },
+      });
+      expect(getHealth.statusCode).toBe(403);
+
+      // 6. Foreign origin POST (mutation): 403 and project is NOT created
+      const postProj = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        headers: { origin: 'http://evil.com' },
+        payload: { name: 'Malicious Project' },
+      });
+      expect(postProj.statusCode).toBe(403);
+      const allProjects = await store.list();
+      expect(allProjects).toHaveLength(1);
+      expect(allProjects[0].name).toBe('Protected Workspace');
+
+      // 7. Foreign origin PUT specification (mutation): 403 and spec is NOT updated
+      const putSpec = await app.inject({
+        method: 'PUT',
+        url: `/api/projects/${p.id}/specification`,
+        headers: { origin: 'http://evil.com' },
+        payload: {
+          expectedRevision: 0,
+          graph: { nodes: [{ id: 'evil-node', kind: 'module', name: 'Evil' }], edges: [] },
+        },
+      });
+      expect(putSpec.statusCode).toBe(403);
+      const unchangedProject = await store.get(p.id);
+      expect(unchangedProject.specRevision).toBe(0);
+      expect(unchangedProject.specification.nodes).toHaveLength(0);
+
+      // 8. Foreign origin PUT layout (mutation): 403 and layout is NOT updated
+      const putLayout = await app.inject({
+        method: 'PUT',
+        url: `/api/projects/${p.id}/layout`,
+        headers: { origin: 'http://evil.com' },
+        payload: { layout: { 'evil-node': { x: 1, y: 2 } } },
+      });
+      expect(putLayout.statusCode).toBe(403);
+
+      // 9. Foreign origin PUT checks (mutation): 403 and checks are NOT updated
+      const putChecks = await app.inject({
+        method: 'PUT',
+        url: `/api/projects/${p.id}/checks`,
+        headers: { origin: 'http://evil.com' },
+        payload: { check1: { command: 'echo', args: ['evil'] } },
+      });
+      expect(putChecks.statusCode).toBe(403);
+
+      // 10. Rejection of other foreign origin shapes
+      const foreignOrigins = [
+        'https://evil.com',
+        'null',
+        'http://attacker.local:8080',
+        'http://localhost.evil.com',
+        'http://127.0.0.1.attacker.com',
+        'http://192.168.1.100:5173',
+        'http://localhost:8080',
+        'http://127.0.0.1:9999',
+      ];
+      for (const fo of foreignOrigins) {
+        const res = await app.inject({
+          method: 'GET',
+          url: '/api/projects',
+          headers: { origin: fo },
+        });
+        expect(res.statusCode).toBe(403);
+        expect(res.headers['access-control-allow-origin']).toBeUndefined();
+      }
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces origin policy on SSE event stream routes (/api/events and /api/projects/:id/events)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-sse-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+      const p = await store.create({ name: 'SSE Workspace' });
+
+      // 1. Foreign origin to /api/events is rejected with 403
+      const evilEvents = await app.inject({
+        method: 'GET',
+        url: '/api/events',
+        headers: { origin: 'http://evil.com' },
+      });
+      expect(evilEvents.statusCode).toBe(403);
+      expect(evilEvents.headers['access-control-allow-origin']).toBeUndefined();
+      expect(evilEvents.json()).toEqual(expect.objectContaining({ error: 'Forbidden', statusCode: 403 }));
+
+      // 2. Foreign origin to /api/projects/:id/events is rejected with 403
+      const evilProjectEvents = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${p.id}/events`,
+        headers: { origin: 'http://evil.com' },
+      });
+      expect(evilProjectEvents.statusCode).toBe(403);
+      expect(evilProjectEvents.headers['access-control-allow-origin']).toBeUndefined();
+
+      // 3. Allowed dev origin (127.0.0.1:5173) connects to /api/events and receives SSE stream
+      const allowedEvents = await app.inject({
+        method: 'GET',
+        url: '/api/events?once=true',
+        headers: { origin: 'http://127.0.0.1:5173' },
+      });
+      expect(allowedEvents.statusCode).toBe(200);
+      expect(allowedEvents.headers['content-type']).toBe('text/event-stream');
+      expect(allowedEvents.headers['access-control-allow-origin']).toBe('http://127.0.0.1:5173');
+      expect(allowedEvents.headers['vary']).toBe('Origin');
+      expect(allowedEvents.body).toContain('event: ready');
+      expect(allowedEvents.body).toContain('"status":"connected"');
+
+      // 4. Allowed localhost:5173 connects to /api/projects/:id/events and receives project SSE stream
+      const allowedProjectEvents = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${p.id}/events?once=true`,
+        headers: { origin: 'http://localhost:5173' },
+      });
+      expect(allowedProjectEvents.statusCode).toBe(200);
+      expect(allowedProjectEvents.headers['content-type']).toBe('text/event-stream');
+      expect(allowedProjectEvents.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+      expect(allowedProjectEvents.body).toContain('event: ready');
+      expect(allowedProjectEvents.body).toContain(p.id);
+
+      // 5. Non-existent project on SSE endpoint returns 404
+      const missingProjEvents = await app.inject({
+        method: 'GET',
+        url: '/api/projects/00000000-0000-0000-0000-000000000000/events',
+        headers: { origin: 'http://127.0.0.1:5173' },
+      });
+      expect(missingProjEvents.statusCode).toBe(404);
+
+      // 6. Test over real HTTP loopback network socket with fetch
+      const address = await app.listen({ host: '127.0.0.1', port: 0 });
+
+      // Foreign origin over real socket: 403
+      const netEvil = await fetch(`${address}/api/events`, {
+        headers: { Origin: 'http://evil.com' },
+      });
+      expect(netEvil.status).toBe(403);
+      expect(netEvil.headers.get('access-control-allow-origin')).toBeNull();
+
+      // Allowed dev origin over real socket: 200 SSE
+      const netAllowed = await fetch(`${address}/api/events`, {
+        headers: { Origin: 'http://127.0.0.1:5173' },
+      });
+      expect(netAllowed.status).toBe(200);
+      expect(netAllowed.headers.get('content-type')).toBe('text/event-stream');
+      expect(netAllowed.headers.get('access-control-allow-origin')).toBe('http://127.0.0.1:5173');
+      const reader = netAllowed.body!.getReader();
+      const chunk = await reader.read();
+      const decoded = new TextDecoder().decode(chunk.value);
+      expect(decoded).toContain('event: ready');
+      await reader.cancel();
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('supports local development and configured custom allowed origins', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-custom-origins-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({
+        store,
+        allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+      });
+
+      // 1. Configured custom origin is allowed
+      const res3000 = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { origin: 'http://localhost:3000' },
+      });
+      expect(res3000.statusCode).toBe(200);
+      expect(res3000.headers['access-control-allow-origin']).toBe('http://localhost:3000');
+      expect(res3000.headers['vary']).toBe('Origin');
+
+      // 2. Unconfigured origin on port 3001 is rejected
+      const res3001 = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { origin: 'http://localhost:3001' },
+      });
+      expect(res3001.statusCode).toBe(403);
+
+      // 3. Default dev origins still work alongside custom origins
+      const resDev = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        headers: { origin: 'http://127.0.0.1:5173' },
+        payload: { name: 'Dev Origin Project' },
+      });
+      expect(resDev.statusCode).toBe(201);
+      expect(resDev.headers['access-control-allow-origin']).toBe('http://127.0.0.1:5173');
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('supports same-origin packaged production serving and client-side routing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-packaged-'));
+    try {
+      const store = new ProjectStore(dir);
+      const staticDir = join(dir, 'dist');
+      await mkdir(join(staticDir, 'assets'), { recursive: true });
+      await writeFile(
+        join(staticDir, 'index.html'),
+        '<!DOCTYPE html><html><head><title>UMLith Workspace</title></head><body><div id="root">App</div></body></html>'
+      );
+      await writeFile(join(staticDir, 'assets', 'index.js'), 'console.log("bundle");');
+
+      const app = await createServer({ store, staticDir });
+      const address = await app.listen({ host: '127.0.0.1', port: 0 });
+      const serverAddr = app.server.address() as any;
+      const origin = `http://127.0.0.1:${serverAddr.port}`;
+
+      // 1. Same-origin root serves index.html
+      const rootRes = await fetch(`${address}/`);
+      expect(rootRes.status).toBe(200);
+      expect(await rootRes.text()).toContain('UMLith Workspace');
+
+      // 2. Same-origin direct index.html request
+      const indexRes = await fetch(`${address}/index.html`);
+      expect(indexRes.status).toBe(200);
+      expect(await indexRes.text()).toContain('UMLith Workspace');
+
+      // 3. Static asset file request
+      const assetRes = await fetch(`${address}/assets/index.js`);
+      expect(assetRes.status).toBe(200);
+      expect(await assetRes.text()).toBe('console.log("bundle");');
+
+      // 4. SPA client-side route fallback serves index.html
+      const spaRes = await fetch(`${address}/projects/my-project`);
+      expect(spaRes.status).toBe(200);
+      expect(await spaRes.text()).toContain('UMLith Workspace');
+
+      // 5. Unknown API route returns 404 JSON, NOT index.html
+      const api404 = await fetch(`${address}/api/unknown-endpoint`);
+      expect(api404.status).toBe(404);
+      const api404Json = await api404.json() as any;
+      expect(api404Json.error).toBe('Not Found');
+
+      // 6. Same-origin API mutation with Origin header matching server's own port succeeds
+      const createRes = await fetch(`${address}/api/projects`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          Origin: origin,
+        },
+        body: JSON.stringify({ name: 'Production Project' }),
+      });
+      expect(createRes.status).toBe(201);
+      expect(createRes.headers.get('access-control-allow-origin')).toBe(origin);
+      const created = await createRes.json() as Project;
+      expect(created.name).toBe('Production Project');
+
+      // 7. Same-origin API read
+      const getRes = await fetch(`${address}/api/projects/${created.id}`, {
+        headers: { Origin: origin },
+      });
+      expect(getRes.status).toBe(200);
+      expect(getRes.headers.get('access-control-allow-origin')).toBe(origin);
+
+      // 8. Foreign origin is still rejected in production mode
+      const evilRes = await fetch(`${address}/api/projects`, {
+        headers: { Origin: 'http://evil.com' },
+      });
+      expect(evilRes.status).toBe(403);
+      expect(evilRes.headers.get('access-control-allow-origin')).toBeNull();
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('protects against DNS rebinding and cross-site requests', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-dns-rebinding-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+
+      // 1. Host header set to foreign domain (DNS rebinding attempt): 403 Forbidden
+      const resForeignHost = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { host: 'evil.com:4317' },
+      });
+      expect(resForeignHost.statusCode).toBe(403);
+      expect(resForeignHost.json().message).toMatch(/foreign host header/i);
+
+      // 2. Host header set to attacker domain: 403 Forbidden
+      const resAttackerHost = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { host: 'attacker.local:8080' },
+      });
+      expect(resAttackerHost.statusCode).toBe(403);
+
+      // 3. Cross-site request without allowed origin (Sec-Fetch-Site: cross-site): 403
+      const resCrossSite = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { 'sec-fetch-site': 'cross-site' },
+      });
+      expect(resCrossSite.statusCode).toBe(403);
+      expect(resCrossSite.json().message).toMatch(/cross-site request/i);
+
+      // 4. Valid loopback Host headers succeed
+      const resLoopbackHost = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { host: '127.0.0.1:4317' },
+      });
+      expect(resLoopbackHost.statusCode).toBe(200);
+
+      const resLocalhost = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { host: 'localhost:4317' },
+      });
+      expect(resLocalhost.statusCode).toBe(200);
+
+      // 5. Security response headers are present
+      expect(resLoopbackHost.headers['x-content-type-options']).toBe('nosniff');
+      expect(resLoopbackHost.headers['x-frame-options']).toBe('DENY');
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('validates helper functions isLoopbackHost, isWildcardHost, and isAllowedOrigin', () => {
+    // isWildcardHost
+    expect(isWildcardHost('0.0.0.0')).toBe(true);
+    expect(isWildcardHost('::')).toBe(true);
+    expect(isWildcardHost('[::]')).toBe(true);
+    expect(isWildcardHost('')).toBe(true);
+    expect(isWildcardHost('127.0.0.1')).toBe(false);
+    expect(isWildcardHost('localhost')).toBe(false);
+
+    // isLoopbackHost
+    expect(isLoopbackHost('localhost')).toBe(true);
+    expect(isLoopbackHost('127.0.0.1')).toBe(true);
+    expect(isLoopbackHost('127.0.0.2')).toBe(true);
+    expect(isLoopbackHost('::1')).toBe(true);
+    expect(isLoopbackHost('[::1]')).toBe(true);
+    expect(isLoopbackHost('0.0.0.0')).toBe(false);
+    expect(isLoopbackHost('::')).toBe(false);
+    expect(isLoopbackHost('192.168.1.1')).toBe(false);
+    expect(isLoopbackHost('evil.com')).toBe(false);
+    expect(isLoopbackHost('localhost.evil.com')).toBe(false);
+
+    // isAllowedOrigin
+    expect(isAllowedOrigin('http://127.0.0.1:5173')).toBe(true);
+    expect(isAllowedOrigin('http://localhost:5173')).toBe(true);
+    expect(isAllowedOrigin('http://[::1]:5173')).toBe(true);
+    expect(isAllowedOrigin('http://127.0.0.1:4317')).toBe(true);
+    expect(isAllowedOrigin('http://localhost:4317')).toBe(true);
+    expect(isAllowedOrigin('http://[::1]:4317')).toBe(true);
+    expect(isAllowedOrigin('http://127.0.0.1:9000', { port: 9000 })).toBe(true);
+    expect(isAllowedOrigin('http://localhost:3000', { allowedOrigins: ['http://localhost:3000'] })).toBe(true);
+
+    expect(isAllowedOrigin(undefined)).toBe(false);
+    expect(isAllowedOrigin(null)).toBe(false);
+    expect(isAllowedOrigin('')).toBe(false);
+    expect(isAllowedOrigin('null')).toBe(false);
+    expect(isAllowedOrigin('http://evil.com')).toBe(false);
+    expect(isAllowedOrigin('https://evil.com')).toBe(false);
+    expect(isAllowedOrigin('http://localhost:8080')).toBe(false);
+    expect(isAllowedOrigin('http://127.0.0.1:8080')).toBe(false);
+    expect(isAllowedOrigin('http://192.168.1.5:5173')).toBe(false);
+    expect(isAllowedOrigin('http://localhost.evil.com:5173')).toBe(false);
+    expect(isAllowedOrigin('http://127.0.0.1.attacker.com')).toBe(false);
   });
 });
