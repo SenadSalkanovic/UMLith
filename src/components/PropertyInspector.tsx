@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Graph, ProgramNode, ProgramEdge, Project } from '../../shared/model';
 import type { ViewState } from '../types';
-import { Sliders, Shield, Tag, FileText, CheckCircle2, AlertCircle, Info, Trash2, Edit3 } from 'lucide-react';
+import { Sliders, Shield, Tag, FileText, CheckCircle2, AlertCircle, Info, Trash2, Edit3, Database } from 'lucide-react';
 
 interface PropertyInspectorProps {
   project: Project | null;
@@ -10,6 +10,7 @@ interface PropertyInspectorProps {
   onClearSelection: () => void;
   onDeleteNode?: (id: string) => void;
   onEditNode?: (id: string) => void;
+  onEditErNode?: (id: string) => void;
 }
 
 export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
@@ -19,6 +20,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   onClearSelection,
   onDeleteNode,
   onEditNode,
+  onEditErNode,
 }) => {
   const selectedNode = viewState.selectedId
     ? graph?.nodes.find(n => n.id === viewState.selectedId) || null
@@ -61,7 +63,17 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                   <h3 className="item-title" title={selectedNode.name}>{selectedNode.name}</h3>
                 </div>
                 <div className="inspector-actions">
-                  {onEditNode && (
+                  {(selectedNode.kind === 'entity' || selectedNode.kind === 'enum') && onEditErNode ? (
+                    <button
+                      className="btn btn-xs btn-outline"
+                      onClick={() => onEditErNode(selectedNode.id)}
+                      title={`Edit ER schema for ${selectedNode.name}`}
+                      data-testid="inspector-edit-er-node"
+                    >
+                      <Database size={12} />
+                      <span>Edit ER</span>
+                    </button>
+                  ) : onEditNode ? (
                     <button
                       className="btn btn-xs btn-outline"
                       onClick={() => onEditNode(selectedNode.id)}
@@ -71,7 +83,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                       <Edit3 size={12} />
                       <span>Edit</span>
                     </button>
-                  )}
+                  ) : null}
                   {onDeleteNode && (
                     <button
                       className="btn btn-xs btn-outline-danger"
@@ -134,6 +146,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                         <th>Name</th>
                         <th>Type</th>
                         <th>Key</th>
+                        <th>Mapped</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -142,6 +155,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                           <td>{f.name}{f.optional ? '?' : ''}</td>
                           <td><code>{f.type}</code></td>
                           <td>{f.key || '-'}</td>
+                          <td>{f.mappedName ? <code>{f.mappedName}</code> : '-'}</td>
                         </tr>
                       ))}
                     </tbody>

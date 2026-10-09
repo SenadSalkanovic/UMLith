@@ -27,6 +27,7 @@ import {
   X,
   Maximize2,
   HelpCircle,
+  Database,
 } from 'lucide-react';
 import * as api from '../api';
 
@@ -43,6 +44,7 @@ export interface GraphCanvasProps {
   apiBaseUrl?: string;
   readOnly?: boolean;
   onOpenArchitectureEditor?: () => void;
+  onOpenErEditor?: () => void;
 }
 
 export function getValidRelationshipKinds(
@@ -179,6 +181,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
   apiBaseUrl,
   readOnly = false,
   onOpenArchitectureEditor,
+  onOpenErEditor,
 }) => {
   const allNodes = useMemo(() => graph?.nodes || [], [graph]);
   const allEdges = useMemo(() => graph?.edges || [], [graph]);
@@ -606,6 +609,18 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
             >
               <Plus size={12} />
               <span>Add Item</span>
+            </button>
+          )}
+
+          {!readOnly && onOpenErEditor && (
+            <button
+              className="btn btn-xs btn-outline"
+              onClick={onOpenErEditor}
+              title="Open ER Schema Editor"
+              data-testid="canvas-open-er-btn"
+            >
+              <Database size={12} />
+              <span>ER Schema</span>
             </button>
           )}
 

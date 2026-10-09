@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Project } from '../../shared/model';
 import type { SyncStatus, ViewState } from '../types';
-import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen } from 'lucide-react';
+import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database } from 'lucide-react';
 
 interface HeaderProps {
   project: Project | null;
@@ -11,6 +11,7 @@ interface HeaderProps {
   onOpenNewProject: () => void;
   onOpenProjectPicker: () => void;
   onOpenArchitectureEditor?: () => void;
+  onOpenErEditor?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -21,6 +22,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenNewProject,
   onOpenProjectPicker,
   onOpenArchitectureEditor,
+  onOpenErEditor,
 }) => {
   const getStatusBadge = () => {
     switch (syncStatus) {
@@ -93,6 +95,18 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Layers size={16} />
             <span>Architecture</span>
+          </button>
+        )}
+
+        {onOpenErEditor && (
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenErEditor}
+            title="Open ER Schema Editor"
+            data-testid="header-open-er"
+          >
+            <Database size={16} />
+            <span>ER Schema</span>
           </button>
         )}
 
