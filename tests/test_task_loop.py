@@ -72,6 +72,38 @@ if mode == 'lingering':
     subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
 '''
 
+FAKE_AGY = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+args=sys.argv[1:]
+assert '--sandbox' in args and '--dangerously-skip-permissions' in args
+assert args[args.index('--input-format')+1]=='stream-json'
+assert args[args.index('--output-format')+1]=='stream-json'
+prompt=json.loads(sys.stdin.readline())['message']['content']
+assert not sys.stdin.read()
+root=pathlib.Path.cwd()
+calls=root/'.codex-task-loop/fake-calls.json'
+history=json.loads(calls.read_text()) if calls.exists() else []
+schema=json.loads(pathlib.Path(args[args.index('--json-schema')+1]).read_text())
+role='review' if 'decision' in schema['required'] else 'implement'
+history.append(role); calls.write_text(json.dumps(history))
+mode=os.environ.get('FAKE_MODE','approve')
+if mode=='quota' and len(history)==1:
+    print(json.dumps({'event':'result','result':{'status':'ERROR','error':'RESOURCE_EXHAUSTED: quota exhausted','retry_after_seconds':0}}));sys.exit(1)
+if mode in ('auth','nonterminal'):
+    print(json.dumps({'event':'result','result':{'status':'ERROR' if mode=='auth' else 'WAITING','error':'authentication required'}}));sys.exit(0)
+if role=='implement':
+    task=prompt.split('CURRENT TASK: ')[1].split()[0]
+    (root/(task+'.txt')).write_text('implemented\n')
+    output={'status':'completed','summary':'Implemented fixture','checks':['fixture passes']}
+else:
+    output={'decision':'approve','summary':'Independent review passed','findings':[]}
+    if mode=='mutating-review': (root/'tampered.txt').write_text('unreviewed')
+if mode=='malformed': output={'status':'completed'}
+print(json.dumps({'event':'result','result':{'status':'SUCCESS','structured_output':output}}))
+if mode=='contradictory':
+    print(json.dumps({'event':'result','result':{'status':'ERROR','error':'Terminal failure after success'}}))
+'''
+
 
 class TaskLoopTests(unittest.TestCase):
     def setUp(self):
@@ -114,8 +146,11 @@ class TaskLoopTests(unittest.TestCase):
         dependency_text = f'- [{dependency} — prerequisite](../01-phase/{dependency}-fixture.md)' if dependency else '- None'
         (directory / f'{task}-fixture.md').write_text(f'# {task}: Fixture\n\n**Status:** Not assessed\n**Phase:** {phase} — Fixture\n\n## Dependencies\n\n{dependency_text}\n\n## Acceptance criteria\n\n- [ ] Implement the fixture.\n')
 
-    def run_loop(self, mode='approve', max_tasks=0, check=None, rounds=3):
+    def run_loop(self, mode='approve', max_tasks=0, check=None, rounds=3, engine='codex'):
+        if engine == 'agy':
+            self.cli.write_text(FAKE_AGY)
         args = self.runner.parse_args(['--repo', str(self.repo), '--codex', str(self.cli),
+                                      '--engine', engine, '--agy', str(self.cli),
                                       '--secret-command', str(self.scanner), '--check', check or 'true',
                                       '--max-tasks', str(max_tasks), '--max-fix-rounds', str(rounds),
                                       '--quota-wait', '0.001'])
@@ -148,6 +183,22 @@ class TaskLoopTests(unittest.TestCase):
     def test_quota_during_review_retries_review_without_reimplementing(self):
         self.assertEqual(self.run_loop('quota-review', max_tasks=1), 0)
         self.assertEqual(json.loads((self.repo / '.codex-task-loop/fake-calls.json').read_text()), ['implement', 'review', 'review'])
+
+    def test_agy_implements_independently_reviews_and_commits_locally(self):
+        self.assertEqual(self.run_loop(engine='agy', max_tasks=1), 0)
+        self.assertIn('UMLith-Task: T001', self.git('log', '-1', '--format=%B'))
+        self.assertEqual(json.loads((self.repo/'.codex-task-loop/fake-calls.json').read_text()), ['implement','review'])
+
+    def test_agy_quota_retries_but_other_errors_block(self):
+        self.assertEqual(self.run_loop('quota', engine='agy', max_tasks=1), 0)
+        self.assertEqual(json.loads((self.repo/'.codex-task-loop/fake-calls.json').read_text()), ['implement','implement','review'])
+        self.assertEqual(self.runner.CHILDREN,set())
+
+    def test_agy_auth_nonterminal_malformed_or_mutating_review_never_commit(self):
+        for mode in ('auth','nonterminal','malformed','mutating-review','contradictory'):
+            with self.subTest(mode=mode), self.assertRaises(self.runner.LoopError):
+                self.run_loop(mode, engine='agy', max_tasks=1)
+            self.assertEqual(self.git('rev-parse','HEAD').strip(),self.base)
 
     def test_local_completion_does_not_push_to_configured_origin(self):
         remote = self.repo / '.git' / 'remote.git'

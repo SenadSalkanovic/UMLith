@@ -16,11 +16,38 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
 class LoopError(RuntimeError):
     pass
+
+
+STOP = threading.Event()
+CHILDREN = set()
+CHILDREN_LOCK = threading.Lock()
+
+
+def register_child(child):
+    with CHILDREN_LOCK:
+        CHILDREN.add(child)
+        if STOP.is_set():
+            stop_child(child)
+            raise LoopError('Task loop stopped')
+
+
+def unregister_child(child):
+    with CHILDREN_LOCK:
+        CHILDREN.discard(child)
+
+
+def cancel_children():
+    STOP.set()
+    with CHILDREN_LOCK:
+        children = list(CHILDREN)
+    for child in children:
+        stop_child(child)
 
 
 IMPLEMENT_SCHEMA = {
@@ -37,7 +64,7 @@ REVIEW_SCHEMA = {
                    'summary': {'type': 'string'},
                    'findings': {'type': 'array', 'items': {'type': 'string'}}},
 }
-RATE_ERROR = re.compile(r'usage[_ ]limit|rate[_ -]limit|quota (?:exceeded|exhausted)|insufficient_quota|too many requests|http\s*429|out of (?:tokens|credits)|token limit reached', re.I)
+RATE_ERROR = re.compile(r'usage[_ ]limit|rate[_ -]limit|resource[_ -]exhausted|quota (?:exceeded|exhausted)|insufficient_quota|too many requests|http\s*429|out of (?:tokens|credits)|token limit reached', re.I)
 SENSITIVE_NAMES = {'auth.json', 'credentials.json', 'id_rsa', 'id_ed25519', '.npmrc', '.pypirc'}
 LOCAL_PATTERNS = {
     'private key': r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----',
@@ -51,7 +78,12 @@ def parse_args(argv=None):
     p.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
     p.add_argument('--tasks', default='docs/tasks/architecture-workspace')
     p.add_argument('--codex', default='codex', help='Codex executable (defaults to configured model)')
-    p.add_argument('--model', help='Optional explicit model for both sessions')
+    p.add_argument('--agy', default='agy', help='Google Antigravity CLI executable')
+    p.add_argument('--engine', choices=['codex', 'agy'], default='codex', help='CLI for implementation and fresh review sessions')
+    p.add_argument('--workers', choices=['codex,agy'], help='Run two isolated workers, one per CLI')
+    p.add_argument('--agy-model', help='Optional Antigravity model; --model applies only to Codex')
+    p.add_argument('--task', help='Run a single initial task ID whose prerequisites are committed')
+    p.add_argument('--model', help='Optional explicit Codex model for implementation and review')
     p.add_argument('--check', action='append', help='Required command, repeatable; no shell expansion. Default: npm test and npx tsc --noEmit')
     p.add_argument('--secret-command', default='uvx --from detect-secrets==1.5.0 detect-secrets scan --all-files --no-verify', help='Scanner command producing detect-secrets JSON; snapshot path is appended')
     p.add_argument('--quota-wait', type=float, default=900, help='Fallback quota retry interval in seconds (default 900)')
@@ -68,6 +100,8 @@ def parse_args(argv=None):
 
 def command(argv, repo, timeout=None, env=None):
     """A command's entire process group belongs to this runner, including checks."""
+    if STOP.is_set():
+        raise LoopError('Task loop stopped')
     try:
         child = subprocess.Popen(argv, cwd=repo, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True, start_new_session=True,
@@ -75,6 +109,7 @@ def command(argv, repo, timeout=None, env=None):
     except OSError as error:
         raise LoopError(f'Cannot start {argv[0]}: {error}') from error
     try:
+        register_child(child)
         output, _ = child.communicate(timeout=timeout)
         return child.returncode, output
     except (KeyboardInterrupt, subprocess.TimeoutExpired):
@@ -82,6 +117,7 @@ def command(argv, repo, timeout=None, env=None):
         raise
     finally:
         stop_child(child)
+        unregister_child(child)
 
 
 def stop_child(child):
@@ -184,10 +220,11 @@ def fingerprint(repo, include_index=True):
     return digest.hexdigest()
 
 
-def plan_hash(directory):
+def plan_hash(directory, overrides=None):
     digest = hashlib.sha256()
     for file in sorted(directory.rglob('*.md')):
-        digest.update(str(file.relative_to(directory)).encode() + b'\0' + file.read_bytes())
+        relative = str(file.relative_to(directory))
+        digest.update(relative.encode() + b'\0' + (overrides or {}).get(relative, file.read_bytes()))
     return digest.hexdigest()
 
 
@@ -248,7 +285,8 @@ def wait_for_quota(seconds, state, state_path):
     atomic_json(state_path, state)
     print(f'Quota exhausted; waiting {math.ceil(seconds)} seconds. Ctrl+C stops safely.', flush=True)
     while time.time() < deadline:
-        time.sleep(min(30, max(0, deadline - time.time())))
+        if STOP.wait(min(30, max(0, deadline - time.time()))):
+            raise LoopError('Task loop stopped during quota wait')
     state.pop('retry_at', None)
     atomic_json(state_path, state)
 
@@ -262,25 +300,38 @@ def run_agent(args, repo, state_dir, state, prompt, review=False):
         if state.get('retry_at', 0) > time.time():
             wait_for_quota(state['retry_at'] - time.time(), state, state_dir / 'state.json')
         result_path.unlink(missing_ok=True)
-        argv = [args.codex, '--ask-for-approval', 'never', 'exec', '--cd', str(repo),
-                '--sandbox', 'read-only' if review else 'workspace-write', '--json',
-                '--output-schema', str(schema), '--output-last-message', str(result_path)]
-        if args.model:
-            argv += ['--model', args.model]
-        argv += ['-']
+        if STOP.is_set():
+            raise LoopError('Task loop stopped')
+        if args.engine == 'agy':
+            argv = [args.agy, '--input-format', 'stream-json', '--output-format', 'stream-json',
+                    '--json-schema', str(schema), '--sandbox', '--dangerously-skip-permissions',
+                    '--mode', 'plan' if review else 'accept-edits', '--disable-slash-commands',
+                    '--print-timeout', '0', '--log-file', str(state_dir / f'agy-{role}.log')]
+            if args.agy_model:
+                argv += ['--model', args.agy_model]
+            stdin = json.dumps({'event': 'user', 'message': {'content': prompt}}) + '\n'
+        else:
+            argv = [args.codex, '--ask-for-approval', 'never', 'exec', '--cd', str(repo),
+                    '--sandbox', 'read-only' if review else 'workspace-write', '--json',
+                    '--output-schema', str(schema), '--output-last-message', str(result_path)]
+            if args.model:
+                argv += ['--model', args.model]
+            argv += ['-']
+            stdin = prompt
         try:
             child = subprocess.Popen(argv, cwd=repo, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      start_new_session=True,
                                      env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
         except OSError as error:
-            raise LoopError(f'Cannot start Codex: {error}') from error
+            raise LoopError(f'Cannot start {args.engine}: {error}') from error
         errors = []
         completed = False
+        terminal_count = 0
         log_path = state_dir / f"{state['task']}-{role}.jsonl"
-        print(f"{state['task']}: starting fresh {role} CLI session", flush=True)
+        print(f"{state['task']}: starting fresh {args.engine} {role} CLI session", flush=True)
         def read_event(raw, log):
-            nonlocal completed
+            nonlocal completed, terminal_count
             line = raw.decode('utf8', errors='replace')
             log.write(line + '\n')
             log.flush()
@@ -289,18 +340,35 @@ def run_agent(args, repo, state_dir, state, prompt, review=False):
             except ValueError:
                 errors.append(line)
                 return
+            if not isinstance(event, dict):
+                errors.append('Invalid CLI event')
+                return
+            if args.engine == 'agy' and event.get('event') == 'result':
+                terminal_count += 1
+                envelope = event.get('result')
+                if terminal_count == 1 and isinstance(envelope, dict) and envelope.get('status') == 'SUCCESS':
+                    completed = True
+                    atomic_json(result_path, envelope.get('structured_output'))
+                else:
+                    completed = False
+                    result_path.unlink(missing_ok=True)
+                    errors.append(json.dumps(event))
+                return
             kind = event.get('type')
             if kind == 'turn.completed':
                 completed = True
             if kind in ('error', 'turn.failed'):
                 errors.append(json.dumps(event))
         try:
+            register_child(child)
             with log_path.open('a') as log, selectors.DefaultSelector() as selector:
-                child.stdin.write(prompt.encode())
+                child.stdin.write(stdin.encode())
                 child.stdin.close()
                 selector.register(child.stdout, selectors.EVENT_READ)
                 buffer = b''
                 while True:
+                    if STOP.is_set():
+                        raise LoopError('Task loop stopped')
                     if child.poll() is not None:
                         # A background tool may inherit stdout after the CLI
                         # exits. Kill remaining descendants before waiting EOF.
@@ -322,6 +390,7 @@ def run_agent(args, repo, state_dir, state, prompt, review=False):
             raise
         finally:
             stop_child(child)
+            unregister_child(child)
             child.stdout.close()
             child.stdin.close()
         if child.returncode == 0 and completed and result_path.exists():
@@ -329,7 +398,7 @@ def run_agent(args, repo, state_dir, state, prompt, review=False):
         failure = '\n'.join(errors)
         delay = quota_delay(failure, args.quota_wait)
         if delay is None:
-            raise LoopError(f'Codex {role} failed (exit {child.returncode}); inspect private log {log_path.name}')
+            raise LoopError(f'{args.engine} {role} failed (exit {child.returncode}); inspect private log {log_path.name}')
         # Keep existing partial files; a fresh session reads the same task again.
         wait_for_quota(delay, state, state_dir / 'state.json')
         if git(repo, 'rev-parse', 'HEAD').strip() != state['base']:
@@ -342,7 +411,7 @@ def validate_result(result, review=False):
             or not isinstance(result[field], str) or result[field] not in values or not isinstance(result['summary'], str)
             or not result['summary'].strip() or not isinstance(result[items], list)
             or not all(isinstance(item, str) for item in result[items])):
-        raise LoopError('Codex returned malformed structured output; no commit allowed')
+        raise LoopError('CLI returned malformed structured output; no commit allowed')
     if review and result['decision'] == 'approve' and result['findings']:
         raise LoopError('Reviewer approved with unresolved findings; no commit allowed')
 
@@ -402,7 +471,7 @@ def scan_staged(repo, scanner, tree=None):
             raise LoopError('Secret scanner found possible credentials; inspect staged files locally. No commit created.')
 
 
-def record_completion(card, state, commit):
+def completion_text(card, state, commit):
     text = card['path'].read_text()
     text = re.sub(r'^\*\*Status:\*\*.*$', '**Status:** Complete — checked, reviewed, and committed locally', text, count=1, flags=re.M)
     text = text.replace('- [ ]', '- [x]')
@@ -414,6 +483,11 @@ def record_completion(card, state, commit):
              f"- Implementation evidence: {state.get('implementation', {}).get('summary', '')}\n"
              f"- Task checks: {json.dumps(state.get('implementation', {}).get('checks', []))}\n"
              f"- Review evidence: {state.get('review', {}).get('summary', '')}\n")
+    return text
+
+
+def record_completion(card, state, commit):
+    text = completion_text(card, state, commit)
     temporary = card['path'].with_suffix('.tmp')
     temporary.write_text(text)
     temporary.replace(card['path'])
@@ -464,6 +538,10 @@ def run(args):
     if not directory.is_relative_to(repo):
         raise LoopError('Task directory must stay inside the repository')
     cards = task_cards(directory)
+    if args.task:
+        cards = [card for card in cards if card['id'] == args.task]
+        if not cards:
+            raise LoopError('Requested task is missing or deferred')
     done = completed_tasks(repo)
     if args.dry_run:
         card = next_task(cards, done)
@@ -474,6 +552,9 @@ def run(args):
     if ignored != 0:
         raise LoopError('Add /.codex-task-loop/ to .gitignore before running; logs/state must stay private')
     with lock(state_dir):
+        parallel = load_json(state_dir / 'parallel.json', {})
+        if parallel.get('jobs') or parallel.get('publishing') or parallel.get('migration'):
+            raise LoopError('Pending parallel work exists; restart with --workers codex,agy to preserve task ownership')
         check_hooks(repo)
         check_local_boundaries(repo, directory)
         state_path = state_dir / 'state.json'
@@ -513,7 +594,8 @@ def run(args):
                           'The user authorized automatic task implementation, independent review and local commits. '
                           'Do not ask again for routine design approval within the specified task. '
                           'Do not stage, commit, reset, push, or modify Git configuration: the controller owns Git. '
-                          'Do not change the runner, its tests, its state/logs, task documents or original plan. '
+                          'Do not change scripts/codex-task-loop.py, scripts/parallel_task_loop.py, tests/test_task_loop.py, '
+                          'tests/test_parallel_task_loop.py, runner state/logs, task documents or original plan. '
                           'Do not add private paths, credentials, auth files, or logs to source. '
                           'Partial work may already exist after quota interruption; inspect it and continue. '
                           'Use meaningful task tests and return blocked when acceptance cannot be verified.\n'
@@ -583,6 +665,8 @@ def run(args):
                     or git(repo, 'write-tree').strip() != tree
                     or fingerprint(repo) != before or plan_hash(directory) != state['plan_hash']):
                 raise LoopError('Candidate changed during pre-commit scan; no commit allowed')
+            if getattr(args, 'prepare_only', False):
+                return {'card': card, 'state': state, 'tree': tree, 'fingerprint': before}
             message = f"Complete {card['title']}\n\nUMLith-Task: {card['id']}\n"
             # Build precisely the immutable reviewed tree, then atomically move
             # HEAD only if its parent still matches; never reread a racing index.
@@ -602,8 +686,13 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        return run(parse_args())
+        args = parse_args()
+        if args.workers:
+            from parallel_task_loop import run_parallel
+            return run_parallel(args, sys.modules[__name__])
+        return run(args)
     except KeyboardInterrupt:
+        cancel_children()
         print('Stopped; pending work and local state retained. Nothing pushed.', file=sys.stderr)
         return 130
     except (LoopError, OSError) as error:

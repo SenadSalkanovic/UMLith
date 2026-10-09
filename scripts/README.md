@@ -1,4 +1,4 @@
-# Local Codex task loop
+# Local CLI task loop
 
 `codex-task-loop.py` runs the initial task cards in numeric order. Each task gets a fresh implementation CLI session, required checks, and a separate read-only review session. Review findings go back to implementation for up to three rounds. Only approval with no findings, passing checks, and a successful staged-content secret scan permits a local commit. The script never pushes.
 
@@ -21,11 +21,39 @@ python3 scripts/codex-task-loop.py
 
 The five Phase 8 milestones are deferred and always excluded. Explicit task dependencies must be completed before their dependents. Git commits carry `UMLith-Task: T001` trailers; these are the completion ledger. Already implemented tasks can receive a reviewed empty completion commit after their acceptance criteria are verified. The corresponding local card is marked complete and receives an evidence record only after a successful commit.
 
+## Codex and Google Antigravity together
+
+The installed `agy` must be the Antigravity **agent CLI**, with `--input-format stream-json` and `--json-schema` in `agy --help`. An older IDE launcher also named `agy` cannot run these tasks. Authenticate once using `agy` before unattended runs; its credentials remain in the CLI's own storage. The runner uses the documented [headless stdin protocol and structured results](https://www.antigravity.google/docs/cli/headless/).
+
+```bash
+# Preview the two earliest tasks whose prerequisites are committed.
+python3 scripts/codex-task-loop.py --workers codex,agy --dry-run
+
+# Run Codex and Antigravity concurrently, with separate workspaces.
+python3 scripts/codex-task-loop.py --workers codex,agy
+
+# Limit the combined run to two successful local task commits.
+python3 scripts/codex-task-loop.py --workers codex,agy --max-tasks 2
+
+# Use Antigravity alone through the same checks/review/commit pipeline.
+python3 scripts/codex-task-loop.py --engine agy
+```
+
+`--codex` and `--agy` select executable paths. `--model` selects only the Codex model; `--agy-model` selects only the Antigravity model. Without overrides, each CLI keeps its configured model. Each task uses a fresh implementation session and a separate fresh review session from its assigned provider. Codex reviews use its read-only sandbox. Antigravity reviews use plan mode and the runner refuses approval if source, index, history, or task documents change.
+
+Both workers operate in detached Git worktrees inside ignored `.codex-task-loop/worktrees/`, with separate copies of the task plan, logs, state, and Node dependencies. Setup runs `npm install --ignore-scripts --no-audit --no-fund` per worker, cached while its package inputs stay unchanged. This requires network access on first setup; packages that need installation scripts require their documented setup separately. Antigravity uses `--sandbox` for terminal restrictions and `--dangerously-skip-permissions` to avoid unattended permission prompts; this approves tool calls, including writes. The runner does not change your global Antigravity settings. Worktrees isolate Git candidates; CLI sandbox boundaries and mutation checks provide their additional controls.
+
+The coordinator reserves unique task IDs and chooses the lowest-numbered **ready** task for each free worker. Only main's committed `UMLith-Task` trailers satisfy prerequisites. Independent tasks may finish out of numeric order; unmet prerequisites keep their dependents waiting. A dependency chain may leave one worker idle. Implementation and review run concurrently across tasks, while publication to main is serialized. If main advances, the candidate is merged into that new base in its worker and must repeat implementation verification, required checks, independent review, and the secret scan. An unresolved merge conflict stops safely and retains both candidates for inspection.
+
+If the old single-worker loop has a matching pending task, switching to `--workers codex,agy` first copies that candidate into its assigned worker, journals the migration, and removes only the copied pending files from main. No task is marked complete by migration. Already committed tasks remain the shared ledger. A dirty main checkout without a matching pending state is refused.
+
+Quota waits affect the exhausted worker; the other can continue. Ctrl+C stops child process groups and quota waits, preserving candidates and reservations. Restart the same dual-worker command to resume. `parallel.json` and per-worker `state.json` journal interrupted publication and revalidation; changed files outside recorded recovery states stop rather than overwriting edits. Do not edit main or worker files while the loop is active, and do not delete its state or worktrees while tasks are pending. The single-worker command refuses a pending parallel run, so the same task cannot be claimed twice. Neither mode pushes.
+
 ## Checks and privacy
 
 Default required checks are `npm test` and `npx tsc --noEmit`. Repeat `--check 'command arguments'` to supply project-specific required commands; supplying this option replaces both defaults. Commands run without shell expansion. A check timeout is a failure. Checks that modify candidate source invalidate review evidence.
 
-This repository currently has a pre-existing TS2367 error at `server/jobs.ts:99`; the default type check will block commits until that issue is resolved. A failed check is sent to implementation for repair; the loop stops after the fix limit if it remains unresolved. It does not silently waive a failing baseline. The incomplete initial Vite application is why the default includes the compiler check rather than the full Vite build; task-specific acceptance still requires its documented checks, including a build when appropriate.
+A failed check is sent to implementation for repair; the loop stops after the fix limit if it remains unresolved. It does not silently waive a failing baseline. The incomplete initial Vite application is why the default includes the compiler check rather than the full Vite build; task-specific acceptance still requires its documented checks, including a build when appropriate.
 
 Immediately before each commit, the script checks whitespace, scans the exact staged snapshot with `detect-secrets==1.5.0` (27 detectors, network verification disabled), and rejects credential filenames, private keys, credential-bearing URLs, private local home paths, symlinks, and submodules. A scanner error blocks committing. Findings require local inspection; no baseline automatically suppresses them. Secret scanning reduces accidental disclosure; it cannot prove arbitrary source content contains no private information. Your configured Git author name/email remain commit metadata.
 
@@ -44,7 +72,7 @@ If a local commit succeeds just before a crash, the completion trailer prevents 
 ## Runner tests
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_task_loop.py' -q
+python3 -m unittest discover -s tests -p 'test*task_loop.py' -q
 ```
 
-These tests use disposable real Git repositories and a fake Codex executable. They cover ordering, deferred tasks, quota retry, repair/review cycles, local-only commits, staged-secret rejection, failed checks, malformed approvals, review mutation, dependency validation, and restart. They do not consume model tokens or run the real project task backlog.
+These tests use disposable real Git repositories and a fake Codex executable. They cover ordering, deferred tasks, quota retry, repair/review cycles, local-only commits, staged-secret rejection, failed checks, malformed approvals, review mutation, dependency validation, and restart. They also verify Antigravity results, actual two-worker overlap, prerequisite scheduling, independent quota waits, revalidation after base changes, interrupted migration/publication, preservation of manual corrections, and cancellation. They do not consume model tokens or run the real project task backlog.
