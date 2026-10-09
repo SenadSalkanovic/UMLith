@@ -18,6 +18,7 @@ import {
   FileCode,
   Check,
   RotateCcw,
+  Workflow,
 } from 'lucide-react';
 
 export const WORKFLOW_OPTIONAL_NOTICE =
@@ -67,6 +68,7 @@ export interface FunctionEditorProps {
   mode?: 'modal' | 'panel' | 'inline';
   readOnly?: boolean;
   initialTab?: 'details' | 'contract' | 'scenarios' | 'add';
+  onOpenWorkflowEditor?: (functionId: string) => void;
 }
 
 /**
@@ -424,6 +426,7 @@ export const FunctionEditor: React.FC<FunctionEditorProps> = ({
   mode = 'modal',
   readOnly = false,
   initialTab = 'details',
+  onOpenWorkflowEditor,
 }) => {
   const [activeTab, setActiveTab] = useState<'details' | 'contract' | 'scenarios' | 'add'>(initialTab);
   const functionNodes = useMemo(() => (graph ? getFunctionNodes(graph) : []), [graph]);
@@ -834,6 +837,18 @@ export const FunctionEditor: React.FC<FunctionEditorProps> = ({
                     <span className="badge badge-no-workflow" data-testid="badge-workflow-status">
                       {currentHasWorkflow ? 'Has workflow steps' : 'No workflow steps (Optional)'}
                     </span>
+                    {onOpenWorkflowEditor && activeNode && (
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-outline"
+                        onClick={() => onOpenWorkflowEditor(activeNode.id)}
+                        data-testid="function-open-workflow-btn"
+                        title="Open Workflow Editor for this function"
+                      >
+                        <Workflow size={12} />
+                        <span>{currentHasWorkflow ? 'Edit Workflow' : 'Add Workflow'}</span>
+                      </button>
+                    )}
                   </div>
                 </div>
 

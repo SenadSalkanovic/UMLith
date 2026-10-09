@@ -3032,3 +3032,676 @@ button {
   gap: 16px;
   color: var(--text-muted);
 }
+
+/* =========================================================================
+   Workflow Editor Styles (T023)
+   ========================================================================= */
+
+.workflow-editor-modal-container {
+  max-width: 960px;
+  width: 92vw;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.workflow-editor-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+}
+
+.workflow-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--bg-panel-header);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.workflow-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.workflow-header-icon {
+  color: #818cf8;
+}
+
+.workflow-header-title h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.workflow-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.btn-close-workflow {
+  color: var(--text-muted);
+  background: transparent;
+  padding: 4px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-close-workflow:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.workflow-optional-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: rgba(129, 140, 248, 0.08);
+  border-bottom: 1px solid rgba(129, 140, 248, 0.2);
+  color: #a5b4fc;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.workflow-function-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  background: rgba(0, 0, 0, 0.15);
+  border-bottom: 1px solid var(--border-color);
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.function-select-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.function-meta-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.badge-step-count {
+  background: rgba(129, 140, 248, 0.15);
+  color: #a5b4fc;
+  border: 1px solid rgba(129, 140, 248, 0.3);
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.badge-contract-indicator,
+.badge-scenarios-indicator {
+  background: rgba(52, 211, 153, 0.12);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.workflow-tab-bar {
+  display: flex;
+  background: var(--bg-panel-header);
+  border-bottom: 1px solid var(--border-color);
+  padding: 0 16px;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.workflow-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.workflow-tab-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.workflow-tab-btn.active {
+  color: #818cf8;
+  border-bottom-color: #818cf8;
+  background: rgba(129, 140, 248, 0.05);
+}
+
+.workflow-tab-btn.tab-danger.active {
+  color: #f87171;
+  border-bottom-color: #f87171;
+  background: rgba(248, 113, 113, 0.05);
+}
+
+.workflow-editor-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.workflow-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  text-align: center;
+  gap: 16px;
+  color: var(--text-muted);
+}
+
+/* Steps Pane */
+.steps-split-view,
+.connect-split-view {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+@media (max-width: 800px) {
+  .steps-split-view,
+  .connect-split-view {
+    grid-template-columns: 1fr;
+  }
+}
+
+.steps-list-column,
+.transitions-list-column,
+.steps-form-column,
+.transitions-form-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.column-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.steps-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.step-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+
+.step-card:hover {
+  border-color: #818cf8;
+  background: rgba(129, 140, 248, 0.03);
+}
+
+.step-card.selected {
+  border-color: #818cf8;
+  background: rgba(129, 140, 248, 0.08);
+}
+
+.step-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-card-name {
+  font-weight: 600;
+  font-size: 13px;
+  flex: 1;
+}
+
+.step-card-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.step-card-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.step-nested-badge {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.step-opaque-badge {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+/* Step Type Pills */
+.step-type-pill {
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.step-type-operation {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
+.step-type-call {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+}
+
+.step-type-condition {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+
+.step-type-loop {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+
+.step-type-try {
+  background: rgba(34, 211, 238, 0.15);
+  color: #22d3ee;
+}
+
+.step-type-throw {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.step-type-return {
+  background: rgba(52, 211, 153, 0.15);
+  color: #34d399;
+}
+
+.step-type-opaque {
+  background: rgba(249, 115, 22, 0.15);
+  color: #fb923c;
+}
+
+/* Transitions Table */
+.transitions-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.transitions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.transitions-table th,
+.transitions-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.transitions-table th {
+  background: var(--bg-panel-header);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.edge-kind-pill {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.edge-kind-next {
+  background: rgba(129, 140, 248, 0.15);
+  color: #a5b4fc;
+}
+
+.edge-kind-true {
+  background: rgba(52, 211, 153, 0.15);
+  color: #34d399;
+}
+
+.edge-kind-false {
+  background: rgba(244, 63, 94, 0.15);
+  color: #fb7185;
+}
+
+.edge-kind-exception {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.branch-label {
+  color: #38bdf8;
+  font-size: 11px;
+}
+
+.sub-type {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: normal;
+}
+
+/* Opaque Steps Pane */
+.opaque-header-info {
+  display: flex;
+  gap: 10px;
+  padding: 12px 16px;
+  background: rgba(249, 115, 22, 0.08);
+  border: 1px solid rgba(249, 115, 22, 0.2);
+  border-radius: 6px;
+  color: #fdba74;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+
+.opaque-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.opaque-step-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.opaque-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.opaque-card-top h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.opaque-tag {
+  background: rgba(249, 115, 22, 0.2);
+  color: #fb923c;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.opaque-source-box {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.opaque-source-box code {
+  color: #38bdf8;
+}
+
+/* Opaque Form Section */
+.opaque-inputs-section {
+  background: rgba(249, 115, 22, 0.05);
+  border: 1px solid rgba(249, 115, 22, 0.2);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+/* Overview Pane */
+.overview-summary-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.overview-summary-card h3 {
+  margin: 0 0 14px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.summary-metrics {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.metric-val {
+  font-size: 20px;
+  font-weight: 700;
+  color: #818cf8;
+}
+
+.metric-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.overview-steps-flow h4 {
+  font-size: 13px;
+  margin: 0 0 12px 0;
+}
+
+.flow-step-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.flow-step-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flow-step-badge-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.flow-outgoing-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-left: 20px;
+}
+
+.flow-edge-badge {
+  background: rgba(129, 140, 248, 0.1);
+  border: 1px solid rgba(129, 140, 248, 0.2);
+  color: #c7d2fe;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* Remove Workflow Pane */
+.remove-workflow-card {
+  background: var(--bg-card);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 640px;
+  margin: 20px auto;
+}
+
+.card-warning-header {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.warning-icon {
+  color: #f87171;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.card-warning-header h3 {
+  margin: 0 0 6px 0;
+  font-size: 16px;
+  color: #f87171;
+}
+
+.card-warning-header p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.remove-details-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 6px;
+  padding: 14px;
+  font-size: 13px;
+}
+
+.detail-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.removal-impact-summary {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.step-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.step-badge-condition {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fbbf24;
+}
+
+.step-badge-loop {
+  background: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+}
+
+.step-badge-call {
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+}
+
+.step-badge-return {
+  background: rgba(52, 211, 153, 0.2);
+  color: #34d399;
+}
+
+.step-badge-throw {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+}
+
+.step-badge-try {
+  background: rgba(34, 211, 238, 0.2);
+  color: #22d3ee;
+}
+
+.step-badge-opaque {
+  background: rgba(249, 115, 22, 0.2);
+  color: #fb923c;
+}
+
+.step-badge-operation {
+  background: rgba(148, 163, 184, 0.2);
+  color: #94a3b8;
+}

@@ -47,6 +47,7 @@ export interface GraphCanvasProps {
   onOpenArchitectureEditor?: () => void;
   onOpenErEditor?: () => void;
   onOpenFunctionEditor?: () => void;
+  onOpenWorkflowEditor?: () => void;
 }
 
 export function getValidRelationshipKinds(
@@ -185,6 +186,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
   onOpenArchitectureEditor,
   onOpenErEditor,
   onOpenFunctionEditor,
+  onOpenWorkflowEditor,
 }) => {
   const allNodes = useMemo(() => graph?.nodes || [], [graph]);
   const allEdges = useMemo(() => graph?.edges || [], [graph]);
@@ -286,6 +288,14 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
           ? '#34d399'
           : edge.kind === 'calls'
           ? '#38bdf8'
+          : edge.kind === 'true'
+          ? '#10b981'
+          : edge.kind === 'false'
+          ? '#f43f5e'
+          : edge.kind === 'exception'
+          ? '#ef4444'
+          : edge.kind === 'next'
+          ? '#8b5cf6'
           : '#64748b';
 
         return {

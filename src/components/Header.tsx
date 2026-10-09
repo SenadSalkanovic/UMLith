@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Project } from '../../shared/model';
 import type { SyncStatus, ViewState } from '../types';
-import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database, Terminal } from 'lucide-react';
+import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database, Terminal, Workflow } from 'lucide-react';
 
 interface HeaderProps {
   project: Project | null;
@@ -13,6 +13,7 @@ interface HeaderProps {
   onOpenArchitectureEditor?: () => void;
   onOpenErEditor?: () => void;
   onOpenFunctionEditor?: () => void;
+  onOpenWorkflowEditor?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -25,6 +26,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenArchitectureEditor,
   onOpenErEditor,
   onOpenFunctionEditor,
+  onOpenWorkflowEditor,
 }) => {
   const getStatusBadge = () => {
     switch (syncStatus) {
@@ -121,6 +123,18 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Terminal size={16} />
             <span>Functions</span>
+          </button>
+        )}
+
+        {onOpenWorkflowEditor && (
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenWorkflowEditor}
+            title="Open Function Workflows Editor"
+            data-testid="header-open-workflows"
+          >
+            <Workflow size={16} />
+            <span>Workflows</span>
           </button>
         )}
 

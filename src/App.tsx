@@ -15,6 +15,7 @@ import { ProjectModal } from './components/ProjectModal';
 import { ArchitectureEditor } from './components/ArchitectureEditor';
 import { ErEditor } from './components/ErEditor';
 import { FunctionEditor } from './components/FunctionEditor';
+import { WorkflowEditor } from './components/WorkflowEditor';
 import { Loader2 } from 'lucide-react';
 
 export interface AppProps {
@@ -53,6 +54,11 @@ export const App: React.FC<AppProps> = ({
   const [isFunctionEditorOpen, setIsFunctionEditorOpen] = useState<boolean>(false);
   const [functionEditorTab, setFunctionEditorTab] = useState<'details' | 'contract' | 'scenarios' | 'add'>('details');
   const [functionEditorNodeId, setFunctionEditorNodeId] = useState<string | null>(null);
+
+  // Workflow Editor Modal State
+  const [isWorkflowEditorOpen, setIsWorkflowEditorOpen] = useState<boolean>(false);
+  const [workflowEditorTab, setWorkflowEditorTab] = useState<'steps' | 'connect' | 'opaque' | 'overview' | 'remove'>('steps');
+  const [workflowEditorFunctionId, setWorkflowEditorFunctionId] = useState<string | null>(null);
 
   // 3. Specification State (Persistent & Versioned Intent)
   const [specificationState, setSpecificationState] = useState<SpecificationState>(() => ({
@@ -310,6 +316,27 @@ export const App: React.FC<AppProps> = ({
     setIsFunctionEditorOpen(true);
   };
 
+  const handleOpenWorkflowEditor = (
+    tab: 'steps' | 'connect' | 'opaque' | 'overview' | 'remove' = 'steps',
+    functionId: string | null = null
+  ) => {
+    setWorkflowEditorTab(tab);
+    if (functionId) {
+      setWorkflowEditorFunctionId(functionId);
+    } else {
+      const currentSpec = specificationState.specification;
+      const selected = viewState.selectedId
+        ? currentSpec?.nodes.find(n => n.id === viewState.selectedId)
+        : null;
+      if (selected?.kind === 'function') {
+        setWorkflowEditorFunctionId(selected.id);
+      } else if (selected?.kind === 'step') {
+        setWorkflowEditorFunctionId(selected.parentId || null);
+      }
+    }
+    setIsWorkflowEditorOpen(true);
+  };
+
   const handleEditNode = (nodeId: string) => {
     const currentSpec = specificationState.specification;
     const target = currentSpec?.nodes.find(n => n.id === nodeId);
@@ -319,6 +346,8 @@ export const App: React.FC<AppProps> = ({
       handleOpenErEditor('enums', nodeId);
     } else if (target?.kind === 'function') {
       handleOpenFunctionEditor('details', nodeId);
+    } else if (target?.kind === 'step') {
+      handleOpenWorkflowEditor('steps', target.parentId || null);
     } else {
       handleOpenArchitectureEditor('edit', nodeId);
     }
@@ -618,6 +647,7 @@ export const App: React.FC<AppProps> = ({
         onOpenArchitectureEditor={() => handleOpenArchitectureEditor('add')}
         onOpenErEditor={() => handleOpenErEditor('entities')}
         onOpenFunctionEditor={() => handleOpenFunctionEditor('details')}
+        onOpenWorkflowEditor={() => handleOpenWorkflowEditor('steps')}
       />
 
       <main className="workspace-main" data-testid="workspace-main">
@@ -657,6 +687,7 @@ export const App: React.FC<AppProps> = ({
                 onOpenArchitectureEditor={() => handleOpenArchitectureEditor('add')}
                 onOpenErEditor={() => handleOpenErEditor('entities')}
                 onOpenFunctionEditor={() => handleOpenFunctionEditor('details')}
+                onOpenWorkflowEditor={() => handleOpenWorkflowEditor('steps')}
               />
             </div>
           )}
@@ -688,6 +719,17 @@ export const App: React.FC<AppProps> = ({
                 onEditNode={handleEditNode}
                 onEditErNode={id => handleOpenErEditor('fields', id)}
                 onEditFunctionNode={id => handleOpenFunctionEditor('details', id)}
+                onEditWorkflowNode={id => {
+                  const currentSpec = specificationState.specification;
+                  const target = currentSpec?.nodes.find(n => n.id === id);
+                  if (target?.kind === 'function') {
+                    handleOpenWorkflowEditor('steps', id);
+                  } else if (target?.kind === 'step') {
+                    handleOpenWorkflowEditor('steps', target.parentId || null);
+                  } else {
+                    handleOpenWorkflowEditor('steps');
+                  }
+                }}
               />
             </div>
           )}
@@ -748,6 +790,19 @@ export const App: React.FC<AppProps> = ({
         selectedNodeId={functionEditorNodeId || viewState.selectedId}
         onSelectNode={handleSelectNode}
         initialTab={functionEditorTab}
+        mode="modal"
+        onOpenWorkflowEditor={id => handleOpenWorkflowEditor('steps', id)}
+      />
+
+      <WorkflowEditor
+        isOpen={isWorkflowEditorOpen}
+        onClose={() => setIsWorkflowEditorOpen(false)}
+        project={specificationState.project}
+        graph={specificationState.specification}
+        onUpdateSpecification={handleUpdateSpecification}
+        selectedFunctionId={workflowEditorFunctionId || viewState.selectedId}
+        onSelectFunction={id => setWorkflowEditorFunctionId(id)}
+        initialTab={workflowEditorTab}
         mode="modal"
       />
     </div>

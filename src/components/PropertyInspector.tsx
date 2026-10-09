@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Graph, ProgramNode, ProgramEdge, Project } from '../../shared/model';
 import type { ViewState } from '../types';
-import { Sliders, Shield, Tag, FileText, CheckCircle2, AlertCircle, Info, Trash2, Edit3, Database, Terminal } from 'lucide-react';
+import { Sliders, Shield, Tag, FileText, CheckCircle2, AlertCircle, Info, Trash2, Edit3, Database, Terminal, Workflow } from 'lucide-react';
 
 interface PropertyInspectorProps {
   project: Project | null;
@@ -12,6 +12,7 @@ interface PropertyInspectorProps {
   onEditNode?: (id: string) => void;
   onEditErNode?: (id: string) => void;
   onEditFunctionNode?: (id: string) => void;
+  onEditWorkflowNode?: (id: string) => void;
 }
 
 export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
@@ -23,6 +24,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   onEditNode,
   onEditErNode,
   onEditFunctionNode,
+  onEditWorkflowNode,
 }) => {
   const selectedNode = viewState.selectedId
     ? graph?.nodes.find(n => n.id === viewState.selectedId) || null
@@ -75,15 +77,40 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                       <Database size={12} />
                       <span>Edit ER</span>
                     </button>
-                  ) : selectedNode.kind === 'function' && onEditFunctionNode ? (
+                  ) : selectedNode.kind === 'function' ? (
+                    <>
+                      {onEditFunctionNode && (
+                        <button
+                          className="btn btn-xs btn-outline"
+                          onClick={() => onEditFunctionNode(selectedNode.id)}
+                          title={`Edit function contract for ${selectedNode.name}`}
+                          data-testid="inspector-edit-function-node"
+                        >
+                          <Terminal size={12} />
+                          <span>Edit Function</span>
+                        </button>
+                      )}
+                      {onEditWorkflowNode && (
+                        <button
+                          className="btn btn-xs btn-outline"
+                          onClick={() => onEditWorkflowNode(selectedNode.id)}
+                          title={`Edit workflow for ${selectedNode.name}`}
+                          data-testid="inspector-edit-workflow-node"
+                        >
+                          <Workflow size={12} />
+                          <span>Workflow</span>
+                        </button>
+                      )}
+                    </>
+                  ) : selectedNode.kind === 'step' && onEditWorkflowNode ? (
                     <button
                       className="btn btn-xs btn-outline"
-                      onClick={() => onEditFunctionNode(selectedNode.id)}
-                      title={`Edit function contract for ${selectedNode.name}`}
-                      data-testid="inspector-edit-function-node"
+                      onClick={() => onEditWorkflowNode(selectedNode.id)}
+                      title={`Edit workflow step ${selectedNode.name}`}
+                      data-testid="inspector-edit-step-node"
                     >
-                      <Terminal size={12} />
-                      <span>Edit Function</span>
+                      <Workflow size={12} />
+                      <span>Edit Step</span>
                     </button>
                   ) : onEditNode ? (
                     <button
@@ -111,6 +138,14 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
               </div>
               <div className="badge-row">
                 <span className="kind-badge">{selectedNode.kind}</span>
+                {selectedNode.stepType && (
+                  <span
+                    className={`step-badge step-badge-${selectedNode.stepType}`}
+                    data-testid="inspector-step-type"
+                  >
+                    {selectedNode.stepType}
+                  </span>
+                )}
                 <span className={`policy-badge policy-${selectedNode.policy}`}>
                   <Shield size={12} />
                   {selectedNode.policy}
