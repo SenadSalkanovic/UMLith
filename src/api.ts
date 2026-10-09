@@ -109,6 +109,38 @@ export async function createProject(data: CreateProjectRequest, baseUrl?: string
   }, baseUrl);
 }
 
+export async function createBlankProject(
+  data: { name: string; description?: string; target?: string },
+  baseUrl?: string
+): Promise<Project> {
+  return createProject({
+    name: data.name,
+    description: data.description || '',
+    target: data.target || 'TypeScript application',
+  }, baseUrl);
+}
+
+export async function registerExistingProject(
+  data: { name: string; root: string; description?: string; target?: string },
+  baseUrl?: string
+): Promise<Project> {
+  return createProject({
+    name: data.name,
+    description: data.description || '',
+    target: data.target || 'TypeScript application',
+    root: data.root,
+  }, baseUrl);
+}
+
+export async function adoptImplementedArchitecture(
+  id: string,
+  expectedRevision: number,
+  implementedGraph: Graph,
+  baseUrl?: string
+): Promise<Project> {
+  return updateSpecification(id, expectedRevision, implementedGraph, baseUrl);
+}
+
 export async function getSpecification(id: string, baseUrl?: string): Promise<Graph> {
   return request<Graph>(`/projects/${id}/specification`, { method: 'GET' }, baseUrl);
 }

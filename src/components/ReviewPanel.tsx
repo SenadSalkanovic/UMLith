@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   GitPullRequest,
   RefreshCw,
+  FileCode,
 } from 'lucide-react';
 
 interface ReviewPanelProps {
@@ -132,6 +133,31 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
           </div>
           <p className="no-proposals-text">No pending specification or code proposals awaiting review.</p>
         </div>
+
+        {analysisState.analysis && analysisState.analysis.graph.nodes.length > 0 && (
+          <div className="review-card" data-testid="imported-structure-card">
+            <div className="review-card-header">
+              <FileCode size={14} />
+              <span>Imported Structure (Implemented Model)</span>
+            </div>
+            <div className="imported-structure-info">
+              <p className="imported-structure-desc">
+                Imported code populates the <strong>implemented graph</strong> (<strong data-testid="implemented-count">{analysisState.analysis.graph.nodes.length}</strong> node(s)).
+                {' '}{project?.specification.nodes.length
+                  ? 'The intended specification is maintained separately'
+                  : 'The intended specification remains unadopted'} (Revision {project?.specRevision ?? 0}) under human control (R03).
+              </p>
+              <div className="imported-node-chips" data-testid="imported-node-chips">
+                {analysisState.analysis.graph.nodes.map(node => (
+                  <span key={node.id} className="imported-node-chip" title={`${node.kind}: ${node.name}`} data-testid={`imported-node-${node.id}`}>
+                    <span className="chip-kind">{node.kind}</span>
+                    <span className="chip-name">{node.name}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );
