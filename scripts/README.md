@@ -55,7 +55,15 @@ Default required checks are `npm test` and `npx tsc --noEmit`. Repeat `--check '
 
 A failed check is sent to implementation for repair; the loop stops after the fix limit if it remains unresolved. It does not silently waive a failing baseline. The incomplete initial Vite application is why the default includes the compiler check rather than the full Vite build; task-specific acceptance still requires its documented checks, including a build when appropriate.
 
-Immediately before each commit, the script checks whitespace, scans the exact staged snapshot with `detect-secrets==1.5.0` (27 detectors, network verification disabled), and rejects credential filenames, private keys, credential-bearing URLs, private local home paths, symlinks, and submodules. A scanner error blocks committing. Findings require local inspection; no baseline automatically suppresses them. Secret scanning reduces accidental disclosure; it cannot prove arbitrary source content contains no private information. Your configured Git author name/email remain commit metadata.
+Immediately before each commit, the script checks whitespace, scans the exact staged snapshot with `detect-secrets==1.5.0` (27 detectors, network verification disabled), and rejects credential filenames, private keys, credential-bearing URLs, symlinks, and submodules. Potential private local paths require manual review. A scanner error blocks committing. Credential findings require correction; no baseline automatically suppresses them. Secret scanning reduces accidental disclosure; it cannot prove arbitrary source content contains no private information. Your configured Git author name/email remain commit metadata.
+
+When the only findings are potential private local paths, an interactive terminal pauses and lists their workspace, filenames, and line numbers without printing the matched text. Inspect those files, then enter one of:
+
+- `approve`: confirm the listed findings are harmless and continue the existing reviewed commit.
+- `fix`: edit the listed workspace files while paused, then press Enter. The loop repeats implementation verification, required checks, independent review, and scanning before committing.
+- `stop`: leave everything uncommitted and exit safely.
+
+There is no default approval. A non-interactive run still stops on an unapproved finding. Approval is limited to the exact filename, line, pattern, and complete file contents inspected; any changed file requires new approval. Editing while choosing `approve` also triggers fresh verification. Unchanged approved examples can pass later task scans without repeated prompts. The private, ignored `privacy-approvals.json` stores only approval hashes, never matched text; parallel workers share this record and serialize terminal questions. Ctrl+C cancels a pending question. Credentials, private keys, sensitive files, scanner failures, failing tests, and review findings still block commits.
 
 The scanner may need network access on its first `uvx` invocation to populate the tool cache. It is installed into the tool cache, not the project's dependencies.
 

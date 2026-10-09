@@ -24,9 +24,14 @@ class LoopError(RuntimeError):
     pass
 
 
+class PrivacyFixRequested(LoopError):
+    pass
+
+
 STOP = threading.Event()
 CHILDREN = set()
 CHILDREN_LOCK = threading.Lock()
+PRIVACY_LOCK = threading.Lock()
 
 
 def register_child(child):
@@ -433,9 +438,63 @@ def checks(args, repo, state_dir):
     return failures
 
 
-def scan_staged(repo, scanner, tree=None):
+def privacy_answer(prompt):
+    if not sys.stdin.isatty():
+        raise LoopError('Privacy finding needs manual review in a terminal; no commit created')
+    print(prompt, end='', flush=True)
+    with selectors.DefaultSelector() as selector:
+        selector.register(sys.stdin, selectors.EVENT_READ)
+        answer = bytearray()
+        while not STOP.is_set():
+            if selector.select(timeout=0.2):
+                chunk = os.read(sys.stdin.fileno(), 1)
+                if not chunk:
+                    raise LoopError('Privacy review input closed; no commit created')
+                if chunk == b'\n':
+                    return answer.decode(errors='replace').strip().lower()
+                answer.extend(chunk)
+    raise LoopError('Task loop stopped during privacy review')
+
+
+def review_private_paths(repo, findings, approval_dir, interactive, before):
+    with PRIVACY_LOCK:
+        path = approval_dir / 'privacy-approvals.json'
+        approvals = load_json(path, {'approved': []})
+        if (not isinstance(approvals, dict) or set(approvals) != {'approved'}
+                or not isinstance(approvals['approved'], list)
+                or not all(isinstance(item, str) and re.fullmatch(r'[0-9a-f]{64}', item) for item in approvals['approved'])):
+            raise LoopError('Invalid private privacy-approval record; no commit allowed')
+        pending = [item for item in findings if item['id'] not in approvals['approved']]
+        if not pending:
+            return
+        if not interactive:
+            item = pending[0]
+            raise LoopError(f"Potential private local path: {item['file']}:{item['line']}; inspect locally")
+        print(f'\nPrivacy review needed. Workspace: {repo}', flush=True)
+        for item in pending:
+            print(f"Potential private local path: {item['file']}:{item['line']}", flush=True)
+        while True:
+            answer = privacy_answer('Inspect the files. [approve] harmless findings / [fix] edit and reverify / [stop] keep uncommitted: ')
+            if answer == 'stop':
+                raise LoopError('Privacy review stopped; changes retained and uncommitted')
+            if answer == 'fix':
+                privacy_answer('Edit the workspace files now, then press Enter to rerun checks and independent review: ')
+                raise PrivacyFixRequested('Human requested privacy corrections')
+            if answer == 'approve':
+                if fingerprint(repo) != before:
+                    raise PrivacyFixRequested('Files changed during privacy inspection')
+                approval_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                approvals['approved'] = sorted(set(approvals['approved']) | {item['id'] for item in pending})
+                atomic_json(path, approvals)
+                return
+            print('Enter approve, fix, or stop; no default approval.', flush=True)
+
+
+def scan_staged(repo, scanner, tree=None, interactive=False, approval_dir=None):
     """Scan index content, not the potentially different working tree."""
     tree = tree or git(repo, 'write-tree').strip()
+    before = fingerprint(repo)
+    findings = []
     with tempfile.TemporaryDirectory(prefix='umlith-staged-scan-') as tmp:
         env = {'GIT_INDEX_FILE': str(Path(tmp) / 'index')}
         snapshot = Path(tmp) / 'files'
@@ -454,10 +513,14 @@ def scan_staged(repo, scanner, tree=None):
         git(repo, 'checkout-index', '--all', f'--prefix={snapshot}/', env=env)
         for name in tracked:
             file = snapshot / name
+            digest = hashlib.sha256(file.read_bytes()).hexdigest()
             for line_number, line in enumerate(file.read_text(errors='replace').splitlines(), 1):
                 for label, pattern in LOCAL_PATTERNS.items():
                     if re.search(pattern, line):
-                        raise LoopError(f'Potential {label}: {name}:{line_number}; inspect locally')
+                        if label != 'private local path':
+                            raise LoopError(f'Potential {label}: {name}:{line_number}; inspect locally')
+                        identifier = hashlib.sha256(f'{name}\0{line_number}\0{pattern}\0{digest}'.encode()).hexdigest()
+                        findings.append({'id': identifier, 'file': name, 'line': line_number})
         code, output = command(shlex.split(scanner) + [str(snapshot)], repo, timeout=300)
         if code:
             raise LoopError('Secret scanner failed; refusing to commit')
@@ -469,6 +532,8 @@ def scan_staged(repo, scanner, tree=None):
             raise LoopError('Secret scanner report is malformed; refusing to commit')
         if any(result['results'].values()):
             raise LoopError('Secret scanner found possible credentials; inspect staged files locally. No commit created.')
+    if findings:
+        review_private_paths(repo, findings, approval_dir or repo / '.codex-task-loop', interactive, before)
 
 
 def completion_text(card, state, commit):
@@ -660,7 +725,18 @@ def run(args):
             if git(repo, 'write-tree').strip() != tree:
                 raise LoopError('Index no longer matches the approved tree; no commit allowed')
             git(repo, 'diff', '--cached', '--check')
-            scan_staged(repo, args.secret_command, tree=tree)
+            try:
+                scan_staged(repo, args.secret_command, tree=tree, interactive=True,
+                            approval_dir=getattr(args, 'privacy_directory', state_dir))
+            except PrivacyFixRequested as error:
+                if git(repo, 'rev-parse', 'HEAD').strip() != state['base'] or plan_hash(directory) != state['plan_hash']:
+                    raise LoopError('History/task plan changed during privacy inspection; no commit allowed') from error
+                state['feedback'] = ('The human requested privacy corrections or edited files during inspection. '
+                                     'Inspect the existing edits, reverify task acceptance, rerun required checks and obtain fresh independent review.\n'
+                                     + state.get('feedback', ''))
+                state.pop('review', None)
+                atomic_json(state_path, state)
+                continue
             if (git(repo, 'rev-parse', 'HEAD').strip() != state['base']
                     or git(repo, 'write-tree').strip() != tree
                     or fingerprint(repo) != before or plan_hash(directory) != state['plan_hash']):

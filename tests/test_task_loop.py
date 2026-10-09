@@ -51,6 +51,8 @@ if role == 'implement':
     (root / (task + '.txt')).write_text('implemented\n')
     if mode == 'secret':
         (root / 'auth.json').write_text('{}')
+    if mode == 'private':
+        (root / 'example.txt').write_text('Example: ' + '/' + 'home/user/project\nTask: '+task+'\n')
     if mode == 'empty':
         (root / (task + '.txt')).unlink()
     if mode == 'expose-docs':
@@ -216,6 +218,128 @@ class TaskLoopTests(unittest.TestCase):
         with self.assertRaises(self.runner.LoopError):
             self.runner.scan_staged(self.repo, str(self.scanner))
         self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+
+    def private_example(self):
+        file = self.repo / 'example.txt'
+        file.write_text('Example: ' + '/' + 'home/user/project\n')
+        self.git('add', 'example.txt')
+        return file
+
+    def test_private_path_can_be_approved_once_for_exact_file_contents(self):
+        self.private_example()
+        with patch.object(self.runner, 'privacy_answer', return_value='approve') as answer:
+            self.runner.scan_staged(self.repo, str(self.scanner), interactive=True)
+            self.runner.scan_staged(self.repo, str(self.scanner), interactive=True)
+        self.assertEqual(answer.call_count, 1)
+        report=self.repo/'.codex-task-loop/privacy-approvals.json'
+        self.assertTrue(report.exists())
+        self.assertNotIn('/'+'home/user/project',report.read_text())
+        self.assertEqual(self.git('rev-parse','HEAD').strip(),self.base)
+
+    def test_changed_private_example_requires_new_approval(self):
+        file=self.private_example()
+        with patch.object(self.runner,'privacy_answer',return_value='approve'):
+            self.runner.scan_staged(self.repo,str(self.scanner),interactive=True)
+        file.write_text(file.read_text()+'Changed contents\n');self.git('add','example.txt')
+        with patch.object(self.runner,'privacy_answer',return_value='stop') as answer,self.assertRaises(self.runner.LoopError):
+            self.runner.scan_staged(self.repo,str(self.scanner),interactive=True)
+        answer.assert_called_once()
+
+    def test_fix_requests_fresh_verification_and_never_approves_old_tree(self):
+        self.private_example()
+        with patch.object(self.runner,'privacy_answer',side_effect=['fix','']),self.assertRaises(self.runner.PrivacyFixRequested):
+            self.runner.scan_staged(self.repo,str(self.scanner),interactive=True)
+        self.assertFalse((self.repo/'.codex-task-loop/privacy-approvals.json').exists())
+
+    def test_privacy_approval_does_not_override_credentials(self):
+        self.private_example();(self.repo/'auth.json').write_text('{}');self.git('add','auth.json')
+        with patch.object(self.runner,'privacy_answer',return_value='approve') as answer,self.assertRaises(self.runner.LoopError):
+            self.runner.scan_staged(self.repo,str(self.scanner),interactive=True)
+        answer.assert_not_called()
+
+    def test_editing_during_approval_requires_fresh_verification(self):
+        file=self.private_example()
+        def approve(prompt):
+            file.write_text('Changed while inspecting\n');return 'approve'
+        with patch.object(self.runner,'privacy_answer',side_effect=approve),self.assertRaises(self.runner.PrivacyFixRequested):
+            self.runner.scan_staged(self.repo,str(self.scanner),interactive=True)
+        self.assertFalse((self.repo/'.codex-task-loop/privacy-approvals.json').exists())
+
+    def test_scanner_findings_cannot_be_overridden_by_privacy_approval(self):
+        self.private_example()
+        self.scanner.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps({"results":{"example.txt":[{"type":"Secret Keyword","line_number":1}]}}))\n')
+        with patch.object(self.runner,'privacy_answer',return_value='approve') as answer,self.assertRaises(self.runner.LoopError):
+            self.runner.scan_staged(self.repo,str(self.scanner),interactive=True)
+        answer.assert_not_called()
+
+    def test_noninteractive_private_finding_still_blocks(self):
+        self.private_example()
+        with patch.object(self.runner.sys.stdin,'isatty',return_value=False),self.assertRaises(self.runner.LoopError):
+            self.runner.scan_staged(self.repo,str(self.scanner),interactive=True)
+
+    def test_approve_commits_and_fix_reruns_checks_and_review(self):
+        with patch.object(self.runner,'privacy_answer',return_value='approve'):
+            self.assertEqual(self.run_loop('private',max_tasks=1),0)
+        self.assertIn('T001',self.runner.completed_tasks(self.repo))
+        self.card('T002',1,'T001')
+        calls=self.repo/'.codex-task-loop/fake-calls.json'
+        calls.unlink()
+        original=self.runner.checks
+        checked=[]
+        def required(*args):
+            checked.append('checked');return original(*args)
+        def human(prompt):
+            if 'Edit the workspace' in prompt:
+                (self.repo/'example.txt').write_text('Harmless sample\n')
+                os.environ['FAKE_MODE']='approve'
+                return ''
+            return 'fix'
+        # New candidate contents invalidate the first task's approval.
+        with patch.object(self.runner,'privacy_answer',side_effect=human),patch.object(self.runner,'checks',side_effect=required):
+            self.assertEqual(self.run_loop('private',max_tasks=1),0)
+        self.assertEqual(checked,['checked','checked'])
+        self.assertEqual(json.loads(calls.read_text()),['implement','review','implement','review'])
+        self.assertEqual((self.repo/'example.txt').read_text(),'Harmless sample\n')
+
+    def test_terminal_privacy_reader_can_be_cancelled(self):
+        import pty
+        import threading
+        import io
+        import tty
+        master,slave=pty.openpty()
+        tty.setcbreak(slave)
+        stream=io.TextIOWrapper(os.fdopen(slave,'rb',buffering=0))
+        errors=[]
+        def reader():
+            try:self.runner.privacy_answer('Test privacy prompt: ')
+            except self.runner.LoopError as error:errors.append(str(error))
+        try:
+            with patch.object(self.runner.sys,'stdin',stream):
+                os.write(master,b'a')
+                thread=threading.Thread(target=reader);thread.start()
+                time.sleep(.05);self.runner.STOP.set();thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+                self.assertTrue(errors)
+        finally:
+            self.runner.STOP.clear();stream.close();os.close(master)
+
+    def test_terminal_reader_preserves_two_pasted_answers(self):
+        import pty
+        import threading
+        import io
+        master,slave=pty.openpty()
+        stream=io.TextIOWrapper(os.fdopen(slave,'rb',buffering=0));answers=[]
+        def reader():
+            answers.append(self.runner.privacy_answer('First: '))
+            answers.append(self.runner.privacy_answer('Second: '))
+        try:
+            with patch.object(self.runner.sys,'stdin',stream):
+                os.write(master,b'approve\nstop\n')
+                thread=threading.Thread(target=reader);thread.start();thread.join(timeout=2)
+                self.runner.STOP.set();thread.join(timeout=2)
+                self.assertEqual(answers,['approve','stop'])
+        finally:
+            self.runner.STOP.clear();stream.close();os.close(master)
 
     def test_pending_failure_can_resume_without_skipping_task(self):
         with self.assertRaises(self.runner.LoopError):

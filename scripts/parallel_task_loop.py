@@ -211,6 +211,7 @@ class Coordinator:
         args = copy.copy(self.args)
         args.repo, args.engine, args.workers = workspace, engine, None
         args.task, args.max_tasks, args.prepare_only = self.data['jobs'][engine], 1, True
+        args.privacy_directory = self.private
         self.recover_rebase(engine, self.r.load_json(self.worker_state(engine), {}))
         self.setup_dependencies(workspace)
         for _ in range(args.max_fix_rounds):
