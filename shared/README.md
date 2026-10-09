@@ -2,6 +2,23 @@
 
 T001 defines one graph in `shared/model.ts` for architecture, ER, and optional function workflows. Views select entities from `nodes` and relationships from `edges`; they retain the same IDs and references. Layout remains outside the graph. T003 adds graph-level requirements; function scenarios, policies, provenance, and source bindings remain on the existing node records.
 
+## Validated local project and revision interfaces (T014)
+
+`shared/api.ts` exports validated Zod request and response schemas and types: `CreateProjectRequestSchema`, `UpdateSpecificationRequestSchema`, `UpdateLayoutRequestSchema`, `ProjectIdParamSchema`, `ProjectSchema`, `ProjectListResponseSchema`, `RevisionRecordSchema`, `RevisionHistoryResponseSchema`, `LayoutResponseSchema`, `ChecksSchema`, and `ApiErrorResponseSchema`.
+
+`server/main.ts` exports `createServer` building a Fastify service bound to local API routes:
+- `GET /api/projects`: lists stored projects, sorted by creation date descending.
+- `POST /api/projects`: creates a new managed project or registers and imports an existing project root with structural analysis. Invalid parameters, nonexistent roots, files as roots, and syntax/graph errors during import fail closed with status 400 without storing malformed projects.
+- `GET /api/projects/:id`: retrieves the stored project with its intended specification, layout, and analysis snapshot.
+- `PUT /api/projects/:id/specification` and `/spec`: updates the human specification with a mandatory concurrency guard (`expectedRevision` or `expected`). Malformed graph JSON fails schema validation with status 400 Bad Request, leaving stored project data and revision history unchanged. Stale revisions reject with status 409 Conflict containing `projectId`, `expectedRevision`, `currentRevision`, and reload instructions.
+- `GET /api/projects/:id/specification` and `/spec`: returns the current specification graph.
+- `GET /api/projects/:id/revisions` and `/history`: returns the complete committed specification revision history.
+- `GET /api/projects/:id/layout`: retrieves default positions, `layoutRevision`, and scoped layout views.
+- `PUT /api/projects/:id/layout` and `PATCH /api/projects/:id/layout`: updates default or scoped layout positions independently of specification validity without modifying `specRevision` or intended graph JSON.
+- `GET /api/projects/:id/checks` and `PUT /api/projects/:id/checks`: retrieves and updates configured project verification checks.
+
+The service routes map validation errors to 400 Bad Request with structured issue paths, missing projects to 404 Not Found, invalid project IDs to 400 Bad Request, and specification revision conflicts to 409 Conflict. Tests in `tests/api.test.ts` verify all concrete scenarios and edge cases using both in-process Fastify injection and real HTTP loopback network calls.
+
 ## Project file and snapshot boundary (T013)
 
 The existing `server/files.ts` APIs retain their signatures. Project keys use slash-separated canonical relative paths: no empty/dot/parent segments, backslashes, drive prefixes, absolute paths or NULs. Approved roots resolve to canonical directories; symlinks below a root are excluded from enumeration and rejected by explicit access. `safePath(root, path, allowMissing)` validates a pathname at that instant, permitting absent paths only when requested. Its returned string does not pin directories for subsequent I/O.
