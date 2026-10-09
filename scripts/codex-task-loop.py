@@ -685,6 +685,16 @@ def run(args):
                 if paths:
                     git(repo, 'add', '-A', '--', *paths)
                 git(repo, 'diff', '--exit-code')
+                code, output = command(['git', 'diff', '--cached', '--check'], repo)
+                if code == 2:
+                    state['feedback'] = ('Staged whitespace check failed:\n' + output
+                                         + '\nFix the source whitespace. Do not disable the check through Git configuration or attributes.')
+                    state.pop('review', None)
+                    atomic_json(state_path, state)
+                    print(f"{card['id']}: whitespace check failed; requesting repair before review", flush=True)
+                    continue
+                if code:
+                    raise LoopError(f'Git whitespace check failed (exit {code}): {output.strip()}')
                 # Freeze the commit tree before independent review; never
                 # adopt a different index or file snapshot after approval.
                 tree = git(repo, 'write-tree').strip()

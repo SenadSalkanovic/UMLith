@@ -61,7 +61,7 @@ class ParallelTests(unittest.TestCase):
     while len(list(barrier.iterdir())) < 2 and time.monotonic() < deadline: time.sleep(.01)
     assert len(list(barrier.iterdir())) >= 2, 'workers did not overlap'
 '''
-        with patch.dict(os.environ,{'FAKE_BARRIER':str(barrier)}), patch('test_parallel_task_loop.FAKE_CODEX',FAKE_CODEX.replace("    (root / (task + '.txt')).write_text",gate+"    (root / (task + '.txt')).write_text")), patch('test_parallel_task_loop.FAKE_AGY',FAKE_AGY.replace("    (root/(task+'.txt')).write_text",gate+"    (root/(task+'.txt')).write_text")):
+        with patch.dict(os.environ,{'FAKE_BARRIER':str(barrier)}), patch('test_parallel_task_loop.FAKE_CODEX',FAKE_CODEX.replace("    (root / (task + '.txt')).write_text",gate+"    (root / (task + '.txt')).write_text",1)), patch('test_parallel_task_loop.FAKE_AGY',FAKE_AGY.replace("    (root/(task+'.txt')).write_text",gate+"    (root/(task+'.txt')).write_text",1)):
             self.assertEqual(self.parallel(),0)
         self.assertEqual({p.name for p in barrier.iterdir()},{'T001','T004'})
 
@@ -151,6 +151,12 @@ class ParallelTests(unittest.TestCase):
             path=self.repo/f'.codex-task-loop/worktrees/{engine}/.codex-task-loop/fake-calls.json'
             reviews+=json.loads(path.read_text()).count('review')
         self.assertGreaterEqual(reviews,3)
+
+    def test_workers_repair_whitespace_before_publishing(self):
+        self.independent()
+        self.assertEqual(self.parallel('whitespace-fix'),0)
+        self.assertEqual(self.runner.completed_tasks(self.repo),{'T001','T004'})
+        self.assertEqual(self.git('diff','--cached','--check'),'')
 
     def test_quota_worker_and_second_worker_both_finish(self):
         self.independent()

@@ -49,6 +49,10 @@ if mode == 'quota-review' and role == 'review' and history.count('review') == 1:
 if role == 'implement':
     task = prompt.split('CURRENT TASK: ')[1].split()[0]
     (root / (task + '.txt')).write_text('implemented\n')
+    if mode=='whitespace-always' or (mode=='whitespace-fix' and history.count('implement')==1):
+        (root / (task + '.txt')).write_text('implemented\n\n')
+    if mode=='whitespace-fix' and history.count('implement')==2:
+        assert 'Staged whitespace check failed' in prompt
     if mode == 'secret':
         (root / 'auth.json').write_text('{}')
     if mode == 'private':
@@ -96,6 +100,10 @@ if mode in ('auth','nonterminal'):
 if role=='implement':
     task=prompt.split('CURRENT TASK: ')[1].split()[0]
     (root/(task+'.txt')).write_text('implemented\n')
+    if mode=='whitespace-always' or (mode=='whitespace-fix' and history.count('implement')==1):
+        (root/(task+'.txt')).write_text('implemented\n\n')
+    if mode=='whitespace-fix' and history.count('implement')==2:
+        assert 'Staged whitespace check failed' in prompt
     output={'status':'completed','summary':'Implemented fixture','checks':['fixture passes']}
 else:
     output={'decision':'approve','summary':'Independent review passed','findings':[]}
@@ -347,6 +355,39 @@ class TaskLoopTests(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
         self.assertEqual(self.run_loop('approve', max_tasks=1), 0)
         self.assertIn('UMLith-Task: T001', self.git('log', '-1', '--format=%B'))
+
+    def whitespace_repair(self, engine):
+        with patch.object(self.runner,'checks',wraps=self.runner.checks) as required:
+            self.assertEqual(self.run_loop('whitespace-fix',engine=engine,max_tasks=1),0)
+        self.assertEqual(required.call_count,2)
+        self.assertEqual(json.loads((self.repo/'.codex-task-loop/fake-calls.json').read_text()),['implement','implement','review'])
+        self.assertEqual((self.repo/'T001.txt').read_text(),'implemented\n')
+        self.assertIn('UMLith-Task: T001',self.git('log','-1','--format=%B'))
+
+    def test_codex_repairs_whitespace_then_rechecks_and_reviews(self):
+        self.whitespace_repair('codex')
+
+    def test_agy_repairs_whitespace_then_rechecks_and_reviews(self):
+        self.whitespace_repair('agy')
+
+    def test_unrepaired_whitespace_stops_at_fix_limit_without_review_or_commit(self):
+        with self.assertRaisesRegex(self.runner.LoopError,'Fix/review limit'):
+            self.run_loop('whitespace-always',max_tasks=1,rounds=2)
+        self.assertEqual(self.git('rev-parse','HEAD').strip(),self.base)
+        self.assertEqual(json.loads((self.repo/'.codex-task-loop/fake-calls.json').read_text()),['implement','implement'])
+        self.assertIn('Staged whitespace check failed',self.runner.load_json(self.repo/'.codex-task-loop/state.json',{})['feedback'])
+        self.assertEqual((self.repo/'T001.txt').read_text(),'implemented\n\n')
+
+    def test_git_whitespace_command_error_still_stops_safely(self):
+        original=self.runner.command
+        def failed_git(argv,*args,**kwargs):
+            if argv==['git','diff','--cached','--check']:
+                return 128,'fatal: invalid Git configuration'
+            return original(argv,*args,**kwargs)
+        with patch.object(self.runner,'command',side_effect=failed_git),self.assertRaisesRegex(self.runner.LoopError,'exit 128'):
+            self.run_loop(max_tasks=1)
+        self.assertEqual(self.git('rev-parse','HEAD').strip(),self.base)
+        self.assertEqual(json.loads((self.repo/'.codex-task-loop/fake-calls.json').read_text()),['implement'])
 
     def test_resume_rejects_changed_specification_and_changed_head(self):
         with self.assertRaises(self.runner.LoopError):
