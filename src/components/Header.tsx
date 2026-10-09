@@ -10,6 +10,7 @@ interface HeaderProps {
   onTogglePanel: (panel: keyof ViewState['panels']) => void;
   onOpenNewProject: () => void;
   onOpenProjectPicker: () => void;
+  onOpenArchitectureEditor?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -19,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
   onTogglePanel,
   onOpenNewProject,
   onOpenProjectPicker,
+  onOpenArchitectureEditor,
 }) => {
   const getStatusBadge = () => {
     switch (syncStatus) {
@@ -81,6 +83,18 @@ export const Header: React.FC<HeaderProps> = ({
           <Plus size={16} />
           <span>New</span>
         </button>
+
+        {onOpenArchitectureEditor && (
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenArchitectureEditor}
+            title="Open Architecture Editor"
+            data-testid="header-open-architecture"
+          >
+            <Layers size={16} />
+            <span>Architecture</span>
+          </button>
+        )}
 
         <div className="panel-toggles">
           <button

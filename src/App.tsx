@@ -12,6 +12,7 @@ import { ReviewPanel } from './components/ReviewPanel';
 import { EmptyWorkspace } from './components/EmptyWorkspace';
 import { ErrorView } from './components/ErrorView';
 import { ProjectModal } from './components/ProjectModal';
+import { ArchitectureEditor } from './components/ArchitectureEditor';
 import { Loader2 } from 'lucide-react';
 
 export interface AppProps {
@@ -35,6 +36,11 @@ export const App: React.FC<AppProps> = ({
   const [availableProjects, setAvailableProjects] = useState<Project[]>(initialProjects || []);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [modalTab, setModalTab] = useState<'list' | 'create'>('list');
+
+  // Architecture Editor Modal State
+  const [isArchEditorOpen, setIsArchEditorOpen] = useState<boolean>(false);
+  const [archEditorTab, setArchEditorTab] = useState<'add' | 'edit' | 'connect' | 'preview-delete'>('add');
+  const [archEditorNodeId, setArchEditorNodeId] = useState<string | null>(null);
 
   // 3. Specification State (Persistent & Versioned Intent)
   const [specificationState, setSpecificationState] = useState<SpecificationState>(() => ({
@@ -263,6 +269,19 @@ export const App: React.FC<AppProps> = ({
         activeScope: scopeStillExists ? prev.activeScope : null,
       };
     });
+  };
+
+  const handleOpenArchitectureEditor = (
+    tab: 'add' | 'edit' | 'connect' | 'preview-delete' = 'add',
+    nodeId: string | null = null
+  ) => {
+    setArchEditorTab(tab);
+    setArchEditorNodeId(nodeId || viewState.selectedId);
+    setIsArchEditorOpen(true);
+  };
+
+  const handleEditNode = (nodeId: string) => {
+    handleOpenArchitectureEditor('edit', nodeId);
   };
 
   const handleDeleteNode = async (id: string) => {
@@ -556,6 +575,7 @@ export const App: React.FC<AppProps> = ({
           setModalTab('list');
           setIsModalOpen(true);
         }}
+        onOpenArchitectureEditor={() => handleOpenArchitectureEditor('add')}
       />
 
       <main className="workspace-main" data-testid="workspace-main">
@@ -592,6 +612,7 @@ export const App: React.FC<AppProps> = ({
                 onUpdateSpecification={handleUpdateSpecification}
                 projectId={specificationState.project?.id}
                 apiBaseUrl={apiBaseUrl}
+                onOpenArchitectureEditor={() => handleOpenArchitectureEditor('add')}
               />
             </div>
           )}
@@ -620,6 +641,7 @@ export const App: React.FC<AppProps> = ({
                 viewState={viewState}
                 onClearSelection={handleClearSelection}
                 onDeleteNode={handleDeleteNode}
+                onEditNode={handleEditNode}
               />
             </div>
           )}
@@ -645,6 +667,18 @@ export const App: React.FC<AppProps> = ({
         onSelectProject={loadProjectById}
         onCreateProject={handleCreateProject}
         initialTab={modalTab}
+      />
+
+      <ArchitectureEditor
+        isOpen={isArchEditorOpen}
+        onClose={() => setIsArchEditorOpen(false)}
+        project={specificationState.project}
+        graph={specificationState.specification}
+        onUpdateSpecification={handleUpdateSpecification}
+        selectedNodeId={archEditorNodeId || viewState.selectedId}
+        onSelectNode={handleSelectNode}
+        initialTab={archEditorTab}
+        mode="modal"
       />
     </div>
   );

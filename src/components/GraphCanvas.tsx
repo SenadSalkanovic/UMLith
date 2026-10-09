@@ -42,6 +42,7 @@ export interface GraphCanvasProps {
   projectId?: string;
   apiBaseUrl?: string;
   readOnly?: boolean;
+  onOpenArchitectureEditor?: () => void;
 }
 
 export function getValidRelationshipKinds(
@@ -177,6 +178,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
   projectId,
   apiBaseUrl,
   readOnly = false,
+  onOpenArchitectureEditor,
 }) => {
   const allNodes = useMemo(() => graph?.nodes || [], [graph]);
   const allEdges = useMemo(() => graph?.edges || [], [graph]);
@@ -593,6 +595,18 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
                 </button>
               )}
             </div>
+          )}
+
+          {!readOnly && onOpenArchitectureEditor && (
+            <button
+              className="btn btn-xs btn-outline"
+              onClick={onOpenArchitectureEditor}
+              title="Add architecture element"
+              data-testid="canvas-add-node-btn"
+            >
+              <Plus size={12} />
+              <span>Add Item</span>
+            </button>
           )}
 
           {!readOnly && onUpdateSpecification && scopedNodes.length >= 2 && (
