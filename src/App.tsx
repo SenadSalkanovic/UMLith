@@ -730,6 +730,10 @@ export const App: React.FC<AppProps> = ({
                     handleOpenWorkflowEditor('steps');
                   }
                 }}
+                onUpdateSpecification={handleUpdateSpecification}
+                onSelectNode={handleSelectNode}
+                onSelectEdge={handleSelectEdge}
+                apiBaseUrl={apiBaseUrl}
               />
             </div>
           )}
