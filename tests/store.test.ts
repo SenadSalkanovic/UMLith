@@ -1,16 +1,266 @@
 import {it,expect,vi} from 'vitest';
-import {mkdtemp,mkdir,readFile,writeFile,rm,readdir,rename} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,rm,readdir,rename,cp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {ProjectStore} from '../server/store';
-import {AppError} from '../server/files';
+import {AppError,captureFiles,hashes,hash} from '../server/files';
 import {Analyzer} from '../server/analyzer';
-import {freezeNode} from '../server/review';
-import {GraphSchema,NodeSchema,type Analysis} from '../shared/model';
+import {freezeNode,validateCandidate,applyReviewed} from '../server/review';
+import {bundleFiles} from '../server/export';
+import {GraphSchema,NodeSchema,type Analysis,type AgentJob,type Layout} from '../shared/model';
 const analysisMetadata:Omit<Analysis,'graph'>={revision:'source-1',sequence:1,analyzedAt:'2026-10-08T00:00:00Z',status:'current',files:{},durationMs:0,
  quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
+
+it('persists node movement separately while a pending implementation remains valid and applicable',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-independent-layout-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Pending implementation'});
+  await writeFile(join(p.root,'main.ts'),'export function save(): number { return 1; }');
+  const analysis=await new Analyzer().analyze(p.root);
+  await store.updateAnalysis(p.id,analysis);
+  const intended=await store.updateSpec(p.id,0,analysis.graph),node=analysis.graph.nodes.find(n=>n.name==='save')!;
+  const workspace=join(dir,'candidate');await cp(p.root,workspace,{recursive:true});
+  await writeFile(join(workspace,'main.ts'),'export function save(): number { return 2; }');
+  const job:AgentJob={id:'pending',projectId:p.id,kind:'implementation',status:'review',createdAt:p.createdAt,
+   specRevision:1,sourceHashes:hashes(await captureFiles(p.root)),task:'Update saving',scope:['main.ts'],workspace,events:[]};
+  job.report=await validateCandidate(intended,job);expect(job.report.passed).toBe(true);
+  await store.saveJob(job);
+  const base=store.projectDir(p.id),file=join(base,'project.json'),before=await readFile(file,'utf8');
+  const history=await store.history(p.id),historyBytes=await Promise.all([0,1].map(i=>readFile(join(base,'revisions',i+'.json'),'utf8')));
+  const exported=bundleFiles(intended,job.task,job.scope);
+  await store.updateLayout(p.id,{[node.id]:{x:123,y:-47}});
+  const reopened=await new ProjectStore(dir).get(p.id);
+  expect(reopened.layout[node.id]).toEqual({x:123,y:-47});
+  expect(reopened.layoutRevision).toBe(1);expect(reopened.specRevision).toBe(1);
+  expect(await readFile(file,'utf8')).toBe(before);expect(hash(await readFile(file))).toBe(hash(before));
+  for(const key of ['layout','scopedLayouts','layoutRevision'])expect(JSON.parse(before)).not.toHaveProperty(key);
+  expect(JSON.parse(await readFile(join(base,'layout.json'),'utf8'))).toMatchObject({schemaVersion:1,revision:1,layout:{[node.id]:{x:123,y:-47}}});
+  expect(await store.history(p.id)).toEqual(history);
+  expect(await Promise.all([0,1].map(i=>readFile(join(base,'revisions',i+'.json'),'utf8')))).toEqual(historyBytes);
+  expect(bundleFiles(reopened,job.task,job.scope)).toEqual(exported);
+  expect((await store.jobs(p.id))[0]).toEqual(job);
+  expect((await validateCandidate(reopened,job)).passed).toBe(true);
+  await applyReviewed(store,job);
+  expect(await readFile(join(p.root,'main.ts'),'utf8')).toContain('return 2');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('persists independent positions for the same stable ID in default and scoped views',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-scoped-layout-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Scoped layout'});
+  await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'Save'}],edges:[]});
+  await Promise.all([
+   store.updateLayout(p.id,{save:{x:1,y:2}}),
+   store.updateLayout(p.id,{save:{x:30,y:40}},'architecture:root'),
+   store.updateLayout(p.id,{save:{x:-5,y:6}},'function:save'),
+  ]);
+  const restarted=new ProjectStore(dir),reopened=await restarted.get(p.id);
+  expect(reopened.layout).toEqual({save:{x:1,y:2}});
+  expect(reopened.scopedLayouts).toEqual({'architecture:root':{save:{x:30,y:40}},'function:save':{save:{x:-5,y:6}}});
+  expect(reopened.layoutRevision).toBe(3);expect(reopened.specRevision).toBe(1);
+  await restarted.updateLayout(p.id,{},'function:save');
+  await restarted.updateChecks(p.id,{verify:{command:'node',args:[]}});
+  const updated=await restarted.get(p.id);
+  expect(updated.layout).toEqual(reopened.layout);
+  expect(updated.scopedLayouts).toEqual({'architecture:root':{save:{x:30,y:40}},'function:save':{}});
+  expect(updated.layoutRevision).toBe(4);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each(['specification','analysis'] as const)('retains surviving IDs across %s replacement and cleans deleted IDs from every view',async(first)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-layout-replacement-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Replacement'});
+  const graph=(ids:string[],name='Old')=>GraphSchema.parse({nodes:ids.map(id=>({id,kind:'function',name:name+id})),edges:[]});
+  await store.updateSpec(p.id,0,graph(['keep','drop','intent-only']));
+  await store.updateAnalysis(p.id,{...analysisMetadata,graph:graph(['keep','drop','source-only'])});
+  const positions={keep:{x:11,y:22},drop:{x:33,y:44},'intent-only':{x:55,y:66},'source-only':{x:77,y:88}};
+  await store.updateLayout(p.id,positions);
+  await store.updateLayout(p.id,positions,'function:keep');
+  const replace={
+   specification:()=>store.updateSpec(p.id,1,graph(['keep','intent-only'],'Renamed')),
+   analysis:()=>store.updateAnalysis(p.id,{...analysisMetadata,sequence:2,revision:'source-2',graph:graph(['keep','source-only'],'Renamed')}),
+  };
+  // An ID still present in the other graph retains its position.
+  expect((await replace[first]()).layout).toEqual(positions);
+  const replaced=await replace[first==='specification'?'analysis':'specification']();
+  const surviving={keep:{x:11,y:22},'intent-only':{x:55,y:66},'source-only':{x:77,y:88}};
+  expect(replaced.layout).toEqual(surviving);
+  expect(replaced.scopedLayouts).toEqual({'function:keep':surviving});
+  const reopened=await new ProjectStore(dir).get(p.id);
+  expect(reopened.layout).toEqual(surviving);expect(reopened.scopedLayouts).toEqual({'function:keep':surviving});
+  expect(reopened.layoutRevision).toBe(2);expect(reopened.specRevision).toBe(2);
+  // The next layout commit compacts deleted IDs in every stored view.
+  await store.updateLayout(p.id,{...surviving,missing:{x:9,y:9}});
+  const record=JSON.parse(await readFile(join(store.projectDir(p.id),'layout.json'),'utf8'));
+  expect(record.layout).toEqual(surviving);expect(record.scopedLayouts).toEqual({'function:keep':surviving});
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('retains imported positions through a Prisma parse failure, unrelated movement, restart and recovery',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-layout-analysis-recovery-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Analysis recovery'}),analyzer=new Analyzer();
+  const schema=join(p.root,'schema.prisma'),valid='model User {\n  id Int @id\n}\n';
+  await writeFile(schema,valid);
+  await writeFile(join(p.root,'main.ts'),'export function save() { return 1; }');
+  const initial=await analyzer.analyze(p.root);
+  expect(initial.status).toBe('current');
+  await store.updateAnalysis(p.id,initial);
+  const entity=initial.graph.nodes.find(n=>n.kind==='entity'&&n.name==='User')!;
+  const neighbor=initial.graph.nodes.find(n=>n.kind==='function'&&n.name==='save')!;
+  const positions={[entity.id]:{x:11,y:22},[neighbor.id]:{x:33,y:44}};
+  const scoped={[entity.id]:{x:-55,y:66},[neighbor.id]:{x:77,y:88}};
+  await store.updateLayout(p.id,positions);
+  await store.updateLayout(p.id,scoped,'er:root');
+  const file=join(store.projectDir(p.id),'project.json'),intended=await readFile(file,'utf8');
+  await writeFile(schema,'model User {\n  id\n');
+  const partial=await analyzer.analyze(p.root);
+  expect(partial.status).toBe('partial');
+  expect(partial.quality.diagnostics).toContainEqual(expect.objectContaining({path:'schema.prisma',severity:'error'}));
+  expect(partial.graph.nodes.some(n=>n.id===entity.id)).toBe(false);
+  const interrupted=await store.updateAnalysis(p.id,partial);
+  expect(interrupted.layout).toEqual(positions);
+  expect(interrupted.scopedLayouts).toEqual({'er:root':scoped});
+  const restarted=new ProjectStore(dir),during=await restarted.get(p.id);
+  await restarted.updateLayout(p.id,{...during.layout,[neighbor.id]:{x:99,y:100}});
+  await restarted.updateLayout(p.id,{...during.scopedLayouts!['er:root'],[neighbor.id]:{x:101,y:102}},'er:root');
+  await writeFile(schema,valid);
+  const repaired=await analyzer.analyze(p.root);
+  expect(repaired.status).toBe('current');
+  expect(repaired.graph.nodes.find(n=>n.kind==='entity'&&n.name==='User')?.id).toBe(entity.id);
+  await restarted.updateAnalysis(p.id,repaired);
+  const recovered=await new ProjectStore(dir).get(p.id);
+  expect(recovered.layout).toEqual({[entity.id]:{x:11,y:22},[neighbor.id]:{x:99,y:100}});
+  expect(recovered.scopedLayouts).toEqual({'er:root':{[entity.id]:{x:-55,y:66},[neighbor.id]:{x:101,y:102}}});
+  expect(recovered.layoutRevision).toBe(4);expect(recovered.specRevision).toBe(0);
+  expect(await readFile(file,'utf8')).toBe(intended);
+  // Complete analysis confirms deletion; the neighboring positions still survive.
+  await writeFile(schema,'');
+  const deleted=await analyzer.analyze(p.root);
+  expect(deleted.status).toBe('current');
+  await restarted.updateAnalysis(p.id,deleted);
+  const cleaned=await restarted.get(p.id);
+  expect(cleaned.layout).toEqual({[neighbor.id]:{x:99,y:100}});
+  expect(cleaned.scopedLayouts).toEqual({'er:root':{[neighbor.id]:{x:101,y:102}}});
+  await restarted.updateLayout(p.id,cleaned.layout);
+  const record=JSON.parse(await readFile(join(store.projectDir(p.id),'layout.json'),'utf8'));
+  expect(record.layout).toEqual(cleaned.layout);expect(record.scopedLayouts).toEqual(cleaned.scopedLayouts);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each(['layout','specification','checks'] as const)('preserves legacy inline positions when first saving %s',async(change)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-legacy-layout-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Legacy layout'}),base=store.projectDir(p.id);
+  const legacy={...p,specification:GraphSchema.parse({nodes:[{id:'save',kind:'function',name:'Save'}],edges:[]}),
+   layout:{save:{x:23,y:47}},layoutRevision:undefined,scopedLayouts:undefined};
+  await rm(join(base,'layout.json'),{force:true});
+  const before=JSON.stringify(legacy);await writeFile(join(base,'project.json'),before);
+  expect((await store.get(p.id)).layout).toEqual({save:{x:23,y:47}});
+  expect((await store.get(p.id)).layoutRevision).toBe(0);
+  expect(await readFile(join(base,'project.json'),'utf8')).toBe(before);
+  if(change==='layout')await store.updateLayout(p.id,{save:{x:30,y:40}},'function:save');
+  else if(change==='specification')await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'Renamed'}],edges:[]});
+  else await store.updateChecks(p.id,{verify:{command:'node',args:[]}});
+  const reopened=await new ProjectStore(dir).get(p.id);
+  expect(reopened.layout).toEqual({save:{x:23,y:47}});
+  const record=JSON.parse(await readFile(join(base,'layout.json'),'utf8'));
+  expect(record.layout).toEqual({save:{x:23,y:47}});
+  if(change==='layout'){
+   expect(await readFile(join(base,'project.json'),'utf8')).toBe(before);
+   expect(reopened.scopedLayouts).toEqual({'function:save':{save:{x:30,y:40}}});
+   expect(record.revision).toBe(1);
+  }else{
+   expect(JSON.parse(await readFile(join(base,'project.json'),'utf8'))).not.toHaveProperty('layout');
+   expect(record.revision).toBe(0);
+  }
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each([false,true])('normalizes legacy coordinate metadata with an existing layout sidecar: %s',async(sidecar)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-legacy-coordinate-metadata-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Legacy coordinates'}),base=store.projectDir(p.id);
+  const project=await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'Save'}],edges:[]});
+  if(sidecar)await store.updateLayout(p.id,{save:{x:30,y:40}});
+  else await rm(join(base,'layout.json'));
+  const before=JSON.stringify({...project,layout:{save:{x:1,y:2,width:20}}});
+  await writeFile(join(base,'project.json'),before);
+  const reopened=await new ProjectStore(dir).get(p.id);
+  const expected=sidecar?{save:{x:30,y:40}}:{save:{x:1,y:2}};
+  expect(reopened.layout).toEqual(expected);
+  expect(reopened.layoutRevision).toBe(sidecar?1:0);
+  expect(await readFile(join(base,'project.json'),'utf8')).toBe(before);
+  await store.updateChecks(p.id,{});
+  expect((await new ProjectStore(dir).get(p.id)).layout).toEqual(expected);
+  expect(JSON.parse(await readFile(join(base,'layout.json'),'utf8')).layout).toEqual(expected);
+  expect(JSON.parse(await readFile(join(base,'project.json'),'utf8'))).not.toHaveProperty('layout');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each([{x:NaN,y:0},{x:Infinity,y:0},{x:'1',y:0},{x:1},{x:1,y:2,z:3},{x:1,y:2,width:20}])('rejects invalid positions %j without changing committed layout',async(position)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-invalid-layout-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Invalid layout'});
+  const base=store.projectDir(p.id),before=await readFile(join(base,'layout.json'),'utf8');
+  const intended=await readFile(join(base,'project.json'),'utf8');
+  await expect(store.updateLayout(p.id,{save:position} as Layout)).rejects.toThrow();
+  expect(await readFile(join(base,'layout.json'),'utf8')).toBe(before);
+  expect(await readFile(join(base,'project.json'),'utf8')).toBe(intended);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it.each(['','   '])('rejects a blank scoped view key %j before writing',async(view)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-invalid-layout-view-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Invalid scope'});
+  const file=join(store.projectDir(p.id),'layout.json'),before=await readFile(file,'utf8');
+  await expect(store.updateLayout(p.id,{},view)).rejects.toThrow();
+  expect(await readFile(file,'utf8')).toBe(before);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('retains committed geometry and intent after a failed atomic layout rename and permits retry',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-failed-layout-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Failed movement'});
+  await store.updateSpec(p.id,0,{nodes:[{id:'save',kind:'function',name:'Save'}],edges:[]});
+  await store.updateLayout(p.id,{save:{x:1,y:2}});
+  const base=store.projectDir(p.id),before=await readFile(join(base,'layout.json'),'utf8');
+  const intended=await readFile(join(base,'project.json'),'utf8'),actual=vi.mocked(rename).getMockImplementation()!;
+  vi.mocked(rename).mockImplementation(async(from,to)=>{
+   if(String(to)===join(base,'layout.json'))throw new Error('Injected layout failure');
+   return actual(from,to);
+  });
+  await expect(store.updateLayout(p.id,{save:{x:3,y:4}})).rejects.toThrow('Injected layout failure');
+  expect(await readFile(join(base,'layout.json'),'utf8')).toBe(before);
+  expect(await readFile(join(base,'project.json'),'utf8')).toBe(intended);
+  expect((await new ProjectStore(dir).get(p.id)).layout).toEqual({save:{x:1,y:2}});
+  expect((await readdir(base)).filter(n=>n.endsWith('.tmp'))).toEqual([]);
+  vi.mocked(rename).mockImplementation(actual);
+  expect((await store.updateLayout(p.id,{save:{x:3,y:4}})).layoutRevision).toBe(2);
+ }finally{
+  const actual=await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(rename).mockImplementation(actual.rename);await rm(dir,{recursive:true,force:true});
+ }
+});
+
+it.each(['JSON','version','revision','positions','scoped positions'] as const)('reports corrupt layout %s instead of falling back to obsolete inline positions',async(problem)=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-corrupt-layout-'));
+ try{
+  const store=new ProjectStore(dir),p=await store.create({name:'Corrupt layout'}),base=store.projectDir(p.id);
+  await writeFile(join(base,'project.json'),JSON.stringify({...p,layout:{save:{x:1,y:2}}}));
+  const invalid={schemaVersion:problem==='version'?2:1,revision:problem==='revision'?-1:0,
+   layout:problem==='positions'?{save:{x:null,y:0}}:{},scopedLayouts:problem==='scoped positions'?{view:{save:{x:1}}}:{}};
+  await writeFile(join(base,'layout.json'),problem==='JSON'?'{broken':JSON.stringify(invalid));
+  await expect(new ProjectStore(dir).get(p.id)).rejects.toThrow(problem==='JSON'?/invalid JSON.*layout.json/i:undefined);
+  await expect(store.updateLayout(p.id,{})).rejects.toThrow();
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
 
 vi.mock('node:fs/promises',async importOriginal=>{
  const actual=await importOriginal<typeof import('node:fs/promises')>();
@@ -81,7 +331,10 @@ it.each([
   expect(reopened.specification.nodes[0].name).toBe('New human intent');
   expect(reopened.layout).toEqual(layout);
   expect(reopened.analysis).toEqual(analysis);
-  expect(JSON.parse(await readFile(join(base,'project.json'),'utf8'))).toMatchObject({specRevision:2,specification:{nodes:[{name:'New human intent'}]},layout});
+  const record=JSON.parse(await readFile(join(base,'project.json'),'utf8'));
+  expect(record).toMatchObject({specRevision:2,specification:{nodes:[{name:'New human intent'}]}});
+  expect(record).not.toHaveProperty('layout');
+  expect(JSON.parse(await readFile(join(base,'layout.json'),'utf8')).layout).toEqual(layout);
   expect((await store.history(p.id)).map(r=>({revision:r.revision,names:r.graph.nodes.map(n=>n.name)}))).toEqual([
    {revision:0,names:[]},{revision:1,names:['Old intent']},{revision:2,names:['New human intent']},
   ]);
@@ -328,8 +581,10 @@ it('repeated analysis updates leave intended JSON, revision history and protecte
    policy:'frozen-implementation',source,baseline:{text:'exact text\r\n',source}}],edges:[],
    requirements:[{id:'save-rule',text:'Keep documents',nodeIds:['save'],scenarios:['Reopen saved text']}]});
   await store.updateLayout(p.id,{save:{x:23,y:47}});
+  await store.updateLayout(p.id,{save:{x:-11,y:12}},'function:save');
   await store.updateChecks(p.id,{verify:{command:'node',args:['--version']}});
   const file=join(store.projectDir(p.id),'project.json'),before=await readFile(file,'utf8');
+  const layoutFile=join(store.projectDir(p.id),'layout.json'),layoutBefore=await readFile(layoutFile,'utf8');
   const intended=(await store.get(p.id)).specification;
   const history=await store.history(p.id);
   const revisionFiles=await Promise.all([0,1].map(r=>readFile(join(store.projectDir(p.id),'revisions',r+'.json'),'utf8')));
@@ -341,6 +596,10 @@ it('repeated analysis updates leave intended JSON, revision history and protecte
    expect(await readFile(file,'utf8')).toBe(before);
    expect(updated.specRevision).toBe(1);
    expect(updated.specification).toEqual(intended);
+   expect(updated.layout).toEqual({save:{x:23,y:47}});
+   expect(updated.scopedLayouts).toEqual({'function:save':{save:{x:-11,y:12}}});
+   expect(updated.layoutRevision).toBe(2);
+   expect(await readFile(layoutFile,'utf8')).toBe(layoutBefore);
    expect(await store.history(p.id)).toEqual(history);
    expect(await Promise.all([0,1].map(r=>readFile(join(store.projectDir(p.id),'revisions',r+'.json'),'utf8')))).toEqual(revisionFiles);
    expect((await new ProjectStore(dir).get(p.id)).analysis).toEqual(analysis);
@@ -376,12 +635,17 @@ it.each(['specification','layout','checks'] as const)('preserves legacy inline a
   const store=new ProjectStore(dir),p=await store.create({name:'Legacy'});
   const analysis={...analysisMetadata,graph:GraphSchema.parse({nodes:[{id:'old',kind:'function',name:'Analyzed'}],edges:[]})};
   const file=join(store.projectDir(p.id),'project.json');
-  await writeFile(file,JSON.stringify({...p,analysis}));
+  const before=JSON.stringify({...p,analysis});await writeFile(file,before);
   if(change==='specification')await store.updateSpec(p.id,0,{nodes:[],edges:[]});
   else if(change==='layout')await store.updateLayout(p.id,{old:{x:1,y:2}});
   else await store.updateChecks(p.id,{verify:{command:'node',args:[]}});
-  expect(JSON.parse(await readFile(file,'utf8')).analysis).toBeUndefined();
-  expect(JSON.parse(await readFile(join(store.projectDir(p.id),'analysis.json'),'utf8'))).toEqual(analysis);
+  if(change==='layout'){
+   expect(await readFile(file,'utf8')).toBe(before);
+   await expect(readFile(join(store.projectDir(p.id),'analysis.json'),'utf8')).rejects.toMatchObject({code:'ENOENT'});
+  }else{
+   expect(JSON.parse(await readFile(file,'utf8')).analysis).toBeUndefined();
+   expect(JSON.parse(await readFile(join(store.projectDir(p.id),'analysis.json'),'utf8'))).toEqual(analysis);
+  }
   expect((await new ProjectStore(dir).get(p.id)).analysis).toEqual(analysis);
   expect((await store.get(p.id)).specRevision).toBe(change==='specification'?1:0);
  }finally{await rm(dir,{recursive:true,force:true});}

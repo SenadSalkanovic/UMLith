@@ -2,7 +2,7 @@ import {mkdir,readFile,readdir,realpath,stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
-import {GraphSchema,emptyGraph,type Project,type GraphInput,type Layout,type Analysis,type AgentJob} from '../shared/model';
+import {GraphSchema,LayoutSchema,ScopedLayoutsSchema,emptyGraph,type Project,type GraphInput,type Layout,type Analysis,type AgentJob} from '../shared/model';
 import {AppError,atomicJson} from './files';
 import {AnalysisWorker} from './worker';
 const RevisionSchema=z.int().nonnegative();
@@ -14,12 +14,26 @@ export class SpecificationConflictError extends AppError {
 const ProjectRecordSchema=z.object({
  id:z.string().regex(/^[a-zA-Z0-9-]+$/),name:z.string(),description:z.string(),target:z.string(),root:z.string(),
  managed:z.boolean(),createdAt:z.iso.datetime({offset:true}),specRevision:RevisionSchema,
- specification:z.unknown(),layout:z.record(z.string(),z.object({x:z.number().finite(),y:z.number().finite()})),
+ // Legacy inline positions accepted extra metadata; normalize it before migrating.
+ specification:z.unknown(),layout:z.record(z.string(),z.object({x:z.number().finite(),y:z.number().finite()})).default({}),layoutRevision:RevisionSchema.default(0),scopedLayouts:ScopedLayoutsSchema.default({}),
  checks:z.record(z.string(),z.object({command:z.string(),args:z.array(z.string())})),
 }).passthrough();
 const RevisionRecordSchema=z.object({
  schemaVersion:z.literal(1).default(1),revision:RevisionSchema,createdAt:z.iso.datetime({offset:true}),graph:z.unknown(),
 }).strict();
+const LayoutRecordSchema=z.object({
+ schemaVersion:z.literal(1),revision:RevisionSchema,layout:LayoutSchema,scopedLayouts:ScopedLayoutsSchema,
+}).strict();
+function retainLayout(project:Project):Project{
+ // Missing IDs in incomplete analysis are not confirmed deletions.
+ if(project.analysis&&project.analysis.status!=='current')return project;
+ // Filter deleted IDs without coupling graph commits to a layout write.
+ const ids=new Set([...project.specification.nodes,...(project.analysis?.graph.nodes??[])].map(node=>node.id));
+ const retain=(layout:Layout)=>Object.fromEntries(Object.entries(layout).filter(([id])=>ids.has(id)));
+ project.layout=retain(project.layout);
+ project.scopedLayouts=Object.fromEntries(Object.entries(project.scopedLayouts??{}).map(([view,layout])=>[view,retain(layout)]));
+ return project;
+}
 async function readJson(path:string,record:string):Promise<unknown>{
  const text=await readFile(path,'utf8');
  try{return JSON.parse(text);}
@@ -39,7 +53,7 @@ export class ProjectStore {
   const root=input.root?await realpath(input.root):join(dir,'source');
   if(input.root&&!(await stat(root)).isDirectory())throw new AppError('Project root must be a directory');
   await mkdir(root,{recursive:true});
-  const project:Project={id,name:input.name,description:input.description||'',target:input.target||'TypeScript application',root,managed:!input.root,createdAt:new Date().toISOString(),specRevision:0,specification:emptyGraph(),layout:{},checks:{}};
+  const project:Project={id,name:input.name,description:input.description||'',target:input.target||'TypeScript application',root,managed:!input.root,createdAt:new Date().toISOString(),specRevision:0,specification:emptyGraph(),layout:{},layoutRevision:0,scopedLayouts:{},checks:{}};
   if(input.root){
    const worker=new AnalysisWorker();
    try{
@@ -59,7 +73,11 @@ export class ProjectStore {
    try{project.analysis=JSON.parse(await readFile(join(this.projectDir(id),'analysis.json'),'utf8'));}
    catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
    if(project.analysis!==undefined)project.analysis.graph=GraphSchema.parse(project.analysis?.graph);
-   return project;
+   try{
+    const layout=LayoutRecordSchema.parse(await readJson(join(this.projectDir(id),'layout.json'),'project '+id+'/layout.json'));
+    project.layout=layout.layout;project.layoutRevision=layout.revision;project.scopedLayouts=layout.scopedLayouts;
+   }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+   return retainLayout(project);
   }
   catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')throw new AppError('Project not found',404);throw error;}
  }
@@ -73,10 +91,18 @@ export class ProjectStore {
   return result.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
  }
  private async save(project:Project){
-  const {analysis,...specification}=project;
+  const {analysis,layout,layoutRevision,scopedLayouts,...specification}=project;
+  // Commit legacy geometry before removing it from project.json.
+  try{await stat(join(this.projectDir(project.id),'layout.json'));}
+  catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;await this.saveLayout(project);}
   // Persist legacy inline evidence before removing it from the intended storage.
   if(analysis)await atomicJson(join(this.projectDir(project.id),'analysis.json'),analysis);
   await atomicJson(join(this.projectDir(project.id),'project.json'),specification);
+ }
+ private async saveLayout(project:Project){
+  await atomicJson(join(this.projectDir(project.id),'layout.json'),LayoutRecordSchema.parse({
+   schemaVersion:1,revision:project.layoutRevision??0,layout:project.layout,scopedLayouts:project.scopedLayouts??{},
+  }));
  }
  async updateSpec(id:string,expected:number,graph:GraphInput):Promise<Project>{
   if(!RevisionSchema.safeParse(expected).success)throw new AppError('Expected specification revision must be a nonnegative safe integer.');
@@ -86,16 +112,24 @@ export class ProjectStore {
    const parsed=GraphSchema.parse(graph);
    project.specification=parsed;project.specRevision=RevisionSchema.parse(project.specRevision+1);
    await atomicJson(join(this.projectDir(id),'revisions',project.specRevision+'.json'),{schemaVersion:1,revision:project.specRevision,createdAt:new Date().toISOString(),graph:parsed});
-   await this.save(project);return project;
+   await this.save(project);return retainLayout(project);
   });
  }
- async updateLayout(id:string,layout:Layout){
-  return this.transaction(id,async()=>{const project=await this.get(id);project.layout=layout;await this.save(project);return project;});
+ async updateLayout(id:string,layout:Layout,view?:string):Promise<Project>{
+  const parsed=LayoutSchema.parse(layout);
+  if(view!==undefined)z.string().refine(value=>!!value.trim()).parse(view);
+  return this.transaction(id,async()=>{
+   const project=await this.get(id);
+   if(view===undefined)project.layout=parsed;
+   else project.scopedLayouts={...project.scopedLayouts,[view]:parsed};
+   project.layoutRevision=RevisionSchema.parse((project.layoutRevision??0)+1);
+   retainLayout(project);await this.saveLayout(project);return project;
+  });
  }
  async updateAnalysis(id:string,analysis:Analysis) {
   return this.transaction(id,async()=>{
    const p=await this.get(id);p.analysis={...analysis,graph:GraphSchema.parse(analysis.graph)};
-   await atomicJson(join(this.projectDir(id),'analysis.json'),p.analysis);return p;
+   await atomicJson(join(this.projectDir(id),'analysis.json'),p.analysis);return retainLayout(p);
   });
  }
  async updateChecks(id:string,checks:Project['checks']) {

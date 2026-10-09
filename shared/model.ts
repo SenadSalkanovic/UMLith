@@ -271,10 +271,13 @@ export type Quality=z.infer<typeof QualitySchema>;
 export type Analysis=z.infer<typeof AnalysisSchema>;
 export type GraphDelta=z.infer<typeof GraphDeltaSchema>;
 export type GraphUpdate=z.infer<typeof GraphUpdateSchema>;
-export type Layout=Record<string,{x:number;y:number}>;
+export const LayoutSchema=z.record(z.string().min(1),z.object({x:z.number().finite(),y:z.number().finite()}).strict());
+export const ScopedLayoutsSchema=z.record(z.string().refine(value=>!!value.trim()),LayoutSchema);
+export type Layout=z.infer<typeof LayoutSchema>;
 export type Project={
   id:string; name:string; description:string; target:string; root:string; managed:boolean; createdAt:string;
   specRevision:number; specification:Graph; layout:Layout; analysis?:Analysis;
+  layoutRevision?:number; scopedLayouts?:Record<string,Layout>;
   checks:Record<string,{command:string;args:string[]}>;
 };
 export type ValidationIssue={code:string;message:string;nodeId?:string;path?:string};
