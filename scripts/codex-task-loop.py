@@ -301,6 +301,7 @@ def run_agent(args, repo, state_dir, state, prompt, review=False):
     schema = state_dir / f'{role}-schema.json'
     atomic_json(schema, REVIEW_SCHEMA if review else IMPLEMENT_SCHEMA)
     result_path = state_dir / f'{role}-result.json'
+    stream_retries = 0
     while True:
         if state.get('retry_at', 0) > time.time():
             wait_for_quota(state['retry_at'] - time.time(), state, state_dir / 'state.json')
@@ -332,11 +333,12 @@ def run_agent(args, repo, state_dir, state, prompt, review=False):
             raise LoopError(f'Cannot start {args.engine}: {error}') from error
         errors = []
         completed = False
+        stream_interrupted = False
         terminal_count = 0
         log_path = state_dir / f"{state['task']}-{role}.jsonl"
         print(f"{state['task']}: starting fresh {args.engine} {role} CLI session", flush=True)
         def read_event(raw, log):
-            nonlocal completed, terminal_count
+            nonlocal completed, terminal_count, stream_interrupted
             line = raw.decode('utf8', errors='replace')
             log.write(line + '\n')
             log.flush()
@@ -358,6 +360,8 @@ def run_agent(args, repo, state_dir, state, prompt, review=False):
                     completed = False
                     result_path.unlink(missing_ok=True)
                     errors.append(json.dumps(event))
+                    if isinstance(envelope, dict) and envelope.get('status') == 'ERROR':
+                        stream_interrupted = str(envelope.get('error', '')).startswith('The stream was interrupted.')
                 return
             kind = event.get('type')
             if kind == 'turn.completed':
@@ -400,6 +404,16 @@ def run_agent(args, repo, state_dir, state, prompt, review=False):
             child.stdin.close()
         if child.returncode == 0 and completed and result_path.exists():
             return load_json(result_path, None)
+        if stream_interrupted and terminal_count == 1:
+            if stream_retries >= 1:
+                raise LoopError(f'{args.engine} {role} stream interrupted after one retry; pending work retained. Rerun to continue.')
+            if (git(repo, 'rev-parse', 'HEAD').strip() != state['base']
+                    or plan_hash(repo / args.tasks) != state['plan_hash']):
+                raise LoopError('HEAD/task plan changed during interrupted session; refusing to continue')
+            stream_retries += 1
+            print(f"{state['task']}: {args.engine} {role} stream interrupted; retrying once with existing work", flush=True)
+            prompt += '\nThe previous CLI stream was interrupted. Inspect existing work and continue the same task and role.\n'
+            continue
         failure = '\n'.join(errors)
         delay = quota_delay(failure, args.quota_wait)
         if delay is None:

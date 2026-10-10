@@ -97,6 +97,9 @@ if mode=='quota' and len(history)==1:
     print(json.dumps({'event':'result','result':{'status':'ERROR','error':'RESOURCE_EXHAUSTED: quota exhausted','retry_after_seconds':0}}));sys.exit(1)
 if mode in ('auth','nonterminal'):
     print(json.dumps({'event':'result','result':{'status':'ERROR' if mode=='auth' else 'WAITING','error':'authentication required'}}));sys.exit(0)
+if mode=='stream-always' or (mode=='stream-once' and history.count(role)==1):
+    (root/'partial.txt').write_text('partial work\n')
+    print(json.dumps({'event':'result','result':{'status':'ERROR','error':'The stream was interrupted. Please continue the task you were working on.','structured_output':{'status':'completed','summary':'Implemented rate limit middleware','checks':[]}}}));sys.exit(0)
 if role=='implement':
     task=prompt.split('CURRENT TASK: ')[1].split()[0]
     (root/(task+'.txt')).write_text('implemented\n')
@@ -203,6 +206,23 @@ class TaskLoopTests(unittest.TestCase):
         self.assertEqual(self.run_loop('quota', engine='agy', max_tasks=1), 0)
         self.assertEqual(json.loads((self.repo/'.codex-task-loop/fake-calls.json').read_text()), ['implement','implement','review'])
         self.assertEqual(self.runner.CHILDREN,set())
+
+    def test_agy_retries_interrupted_implementation_and_review_without_trusting_error_result(self):
+        with patch.object(self.runner, 'wait_for_quota', side_effect=AssertionError('Stream interruption is not quota exhaustion')), patch.object(self.runner, 'checks', wraps=self.runner.checks) as required:
+            self.assertEqual(self.run_loop('stream-once', engine='agy', max_tasks=1), 0)
+        self.assertEqual(required.call_count, 1)
+        self.assertEqual(json.loads((self.repo/'.codex-task-loop/fake-calls.json').read_text()),
+                         ['implement', 'implement', 'review', 'review'])
+        self.assertEqual((self.repo/'partial.txt').read_text(), 'partial work\n')
+        self.assertIn('T001', self.runner.completed_tasks(self.repo))
+
+    def test_agy_repeated_stream_interruption_stops_without_commit(self):
+        with patch.object(self.runner, 'wait_for_quota', side_effect=AssertionError('Stream interruption is not quota exhaustion')), self.assertRaisesRegex(self.runner.LoopError, 'stream interrupted'):
+            self.run_loop('stream-always', engine='agy', max_tasks=1)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+        self.assertEqual(json.loads((self.repo/'.codex-task-loop/fake-calls.json').read_text()),
+                         ['implement', 'implement'])
+        self.assertFalse((self.repo/'.codex-task-loop/implement-result.json').exists())
 
     def test_agy_auth_nonterminal_malformed_or_mutating_review_never_commit(self):
         for mode in ('auth','nonterminal','malformed','mutating-review','contradictory'):
