@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd,SCHEMA_DERIVED_NOTICE,extractPrismaDefault,extractPrismaMapping,extractAttributeFieldList,extractAttributeArgumentValue,extractPrismaKeysAndIndexes,extractPrismaRelationName,extractPrismaRelationFields,findPrismaInverseRelationField,computePrismaRelationCardinality} from '../server/analyzer';
+import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd,SCHEMA_DERIVED_NOTICE,extractPrismaDefault,extractPrismaMapping,extractAttributeFieldList,extractAttributeArgumentValue,extractPrismaKeysAndIndexes,extractPrismaRelationName,extractPrismaRelationFields,findPrismaInverseRelationField,computePrismaRelationCardinality,BEHAVIORAL_LIMIT_STATEMENT,generateImportQualityReport,formatImportQualityReport,type ImportQualityReport} from '../server/analyzer';
 import {GraphSchema,resolveSourceEvidence,type AgentJob} from '../shared/model';
 import {getMappedTableName} from '../src/components/ErEditor';
 import {hash,captureSourceRevision,captureFiles,hashes} from '../server/files';
@@ -3140,4 +3140,219 @@ model Post {
  } finally {
   await rm(tempDir, { recursive: true, force: true });
  }
+});
+
+it('imports a fixture with valid, invalid, opaque, and unresolved content and publishes an honest quality report (T044 concrete scenario 1 & AC 1, 3)', async () => {
+ const fixtureDir = resolve('tests/fixtures/import-quality');
+ const analyzer = new Analyzer();
+ const a = await analyzer.analyze(fixtureDir);
+ const report = analyzer.generateQualityReport(a);
+
+ // 1. Schema validity and explicit partial status
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+ expect(a.status).toBe('partial');
+ expect(report.status).toBe('partial');
+ expect(report.revision).toBe(a.revision);
+ expect(report.revision.length).toBeGreaterThan(0);
+
+ // 2. Counts correspond exactly to the import fixture and diagnostics (AC 1)
+ // Denominator covers all 5 eligible files (3 TS + 2 Prisma)
+ expect(a.quality.eligibleFiles).toBe(5);
+ expect(report.eligibleFiles).toBe(5);
+ expect(report.coverage.eligibleFiles).toBe(5);
+
+ // Numerator counts only successfully analyzed files (invalid.prisma omitted due to parse error)
+ expect(a.quality.analyzedFiles).toBe(4);
+ expect(report.analyzedFiles).toBe(4);
+ expect(report.coverage.analyzedFiles).toBe(4);
+ expect(report.coverage.ratio).toBe(0.8);
+ expect(report.coverage.percentage).toBe(80);
+ expect(report.coverage.isFullyCovered).toBe(false);
+
+ // Unresolved references tracked
+ expect(a.quality.unresolvedReferences).toBeGreaterThanOrEqual(1);
+ expect(report.unresolvedReferences).toBe(a.quality.unresolvedReferences);
+
+ // Unsupported constructs tracked (eval in src/opaque.ts)
+ expect(a.quality.unsupportedConstructs).toBe(2);
+ expect(report.unsupportedConstructs).toBe(2);
+
+ // Inferred items default to 0 (compiler extraction does not fabricate AI inferences)
+ expect(a.quality.inferredItems).toBe(0);
+ expect(report.inferredItems).toBe(0);
+
+ // Prisma semantic validation status
+ expect(a.quality.prismaValidation).toBe('unavailable');
+ expect(report.prismaValidation).toBe('unavailable');
+
+ // 3. Diagnostics contain specific findings with severity, codes, and paths
+ expect(a.quality.diagnostics.length).toBeGreaterThanOrEqual(3);
+ expect(report.diagnostics.length).toBe(a.quality.diagnostics.length);
+
+ // Prisma parse error on invalid.prisma
+ const prismaErr = report.diagnostics.find(d => d.path === 'prisma/invalid.prisma');
+ expect(prismaErr).toBeDefined();
+ expect(prismaErr?.severity).toBe('error');
+ expect(prismaErr?.code).toBe('prisma-parse-error');
+
+ // Unsupported dynamic evaluation on src/opaque.ts
+ const opaqueDiag = report.diagnostics.find(d => d.path === 'src/opaque.ts');
+ expect(opaqueDiag).toBeDefined();
+ expect(opaqueDiag?.severity).toBe('warning');
+ expect(opaqueDiag?.code).toBe('unsupported-eval');
+
+ // Unresolved import on src/unresolved.ts
+ const unresolvedDiag = report.diagnostics.find(d => d.path === 'src/unresolved.ts');
+ expect(unresolvedDiag).toBeDefined();
+ expect(unresolvedDiag?.severity).toBe('error');
+
+ // 4. Valid structural findings are exposed despite partial status (AC 3)
+ const userService = a.graph.nodes.find(n => n.name === 'UserService');
+ expect(userService).toBeDefined();
+ expect(userService?.kind).toBe('class');
+ expect(userService?.provenance).toBe('extracted');
+
+ const accountModel = a.graph.nodes.find(n => n.name === 'Account');
+ expect(accountModel).toBeDefined();
+ expect(accountModel?.kind).toBe('entity');
+ expect(accountModel?.provenance).toBe('extracted');
+
+ const dynamicFn = a.graph.nodes.find(n => n.name === 'dynamicCompute');
+ expect(dynamicFn).toBeDefined();
+ expect(dynamicFn?.kind).toBe('function');
+
+ const missingFn = a.graph.nodes.find(n => n.name === 'callMissing');
+ expect(missingFn).toBeDefined();
+ expect(missingFn?.kind).toBe('function');
+
+ // Opaque node is present as visible step node
+ const opaqueStep = a.graph.nodes.find(n => n.parentId === dynamicFn?.id && n.stepType === 'opaque');
+ expect(opaqueStep).toBeDefined();
+ expect(opaqueStep?.provenance).toBe('extracted');
+
+ // 5. Carries the behavioral limit statement (R09, R39)
+ expect(report.behavioralLimitStatement).toBe(BEHAVIORAL_LIMIT_STATEMENT);
+ expect(report.limitStatement).toBe(BEHAVIORAL_LIMIT_STATEMENT);
+ expect(report.behavioralLimitStatement).toBe('File coverage must not be presented as proof of behavioral completeness.');
+});
+
+it('asserts a fully covered file set still carries the behavioral-limit statement (T044 concrete scenario 2)', async () => {
+ const tempDir = await mkdtemp(join(tmpdir(), 'architect-full-coverage-'));
+
+ try {
+  await mkdir(join(tempDir, 'src'), { recursive: true });
+  await mkdir(join(tempDir, 'prisma'), { recursive: true });
+  await writeFile(join(tempDir, 'package.json'), JSON.stringify({ name: 'full-coverage-test', private: true }));
+  await writeFile(join(tempDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' }, include: ['src/**/*'] }));
+  await writeFile(join(tempDir, 'src', 'service.ts'), 'export class HealthyService { ping(): string { return "pong"; } }\n');
+  await writeFile(
+   join(tempDir, 'prisma', 'schema.prisma'),
+   'datasource db {\n  provider = "sqlite"\n}\n\nmodel User {\n  id    Int    @id\n  email String @unique\n}\n'
+  );
+
+  const analyzer = new Analyzer();
+  const aClean = await analyzer.analyze(tempDir);
+  const cleanReport = generateImportQualityReport(aClean);
+
+  // 1. Fully covered file set: analyzedFiles === eligibleFiles
+  expect(cleanReport.coverage.eligibleFiles).toBe(2);
+  expect(cleanReport.coverage.analyzedFiles).toBe(2);
+  expect(cleanReport.coverage.isFullyCovered).toBe(true);
+  expect(cleanReport.coverage.ratio).toBe(1);
+  expect(cleanReport.coverage.percentage).toBe(100);
+  expect(aClean.status).toBe('current');
+  expect(cleanReport.status).toBe('current');
+
+  // 2. Behavioral-limit statement is still carried despite 100% coverage
+  expect(cleanReport.behavioralLimitStatement).toBe(BEHAVIORAL_LIMIT_STATEMENT);
+  expect(cleanReport.limitStatement).toBe(BEHAVIORAL_LIMIT_STATEMENT);
+  expect(cleanReport.behavioralLimitStatement).toBe('File coverage must not be presented as proof of behavioral completeness.');
+
+  // 3. Quality schema rejects any behavioral completeness claim
+  expect(cleanReport.quality).not.toHaveProperty('behavioralCompleteness');
+
+  // 4. Formatted report highlights the behavioral limit notice
+  const formatted = formatImportQualityReport(cleanReport);
+  expect(formatted).toContain('File coverage must not be presented as proof of behavioral completeness.');
+  expect(formatted).toContain('File Coverage**: 2 / 2 (100%)');
+ } finally {
+  await rm(tempDir, { recursive: true, force: true });
+ }
+});
+
+it('ensures inference counts do not inflate compiler evidence (T044 AC 2 & checklist item 2)', async () => {
+ const fixtureDir = resolve('tests/fixtures/import-quality');
+ const analyzer = new Analyzer();
+
+ // Baseline analysis with no inferences
+ const baseline = await analyzer.analyze(fixtureDir);
+ const baselineReport = analyzer.generateQualityReport(baseline);
+
+ // Analysis with explicit AI inference count
+ const withInference = await analyzer.analyze(fixtureDir, {
+  inferredItems: 7,
+  aiInferences: [{ id: 'ai-edge-1', kind: 'inferred-relation' }],
+ });
+ const inferenceReport = analyzer.generateQualityReport(withInference);
+
+ // 1. Inferred count matches requested inferences
+ expect(withInference.quality.inferredItems).toBe(7);
+ expect(inferenceReport.inferredItems).toBe(7);
+ expect(inferenceReport.counts.inferredItems).toBe(7);
+ expect(inferenceReport.breakdown.inferredInterpretations).toBe(7);
+
+ // 2. Compiler evidence is NOT inflated by inference counts (AC 2)
+ expect(withInference.quality.eligibleFiles).toBe(baseline.quality.eligibleFiles);
+ expect(withInference.quality.analyzedFiles).toBe(baseline.quality.analyzedFiles);
+ expect(withInference.quality.unresolvedReferences).toBe(baseline.quality.unresolvedReferences);
+ expect(withInference.quality.unsupportedConstructs).toBe(baseline.quality.unsupportedConstructs);
+ expect(withInference.quality.diagnostics).toEqual(baseline.quality.diagnostics);
+
+ // Breakdown compiler counts match baseline exactly
+ expect(inferenceReport.breakdown.compilerDiagnostics).toBe(baselineReport.breakdown.compilerDiagnostics);
+ expect(inferenceReport.breakdown.parserDiagnostics).toBe(baselineReport.breakdown.parserDiagnostics);
+ expect(inferenceReport.breakdown.errors).toBe(baselineReport.breakdown.errors);
+ expect(inferenceReport.breakdown.warnings).toBe(baselineReport.breakdown.warnings);
+
+ // Extracted graph elements retain extracted provenance
+ const extractedNodes = withInference.graph.nodes.filter(n => n.provenance === 'extracted');
+ expect(extractedNodes.length).toBe(baseline.graph.nodes.length);
+});
+
+it('associates findings with source revisions and explicit analysis status across lifecycles', async () => {
+ const fixtureDir = resolve('tests/fixtures/import-quality');
+ const analyzer = new Analyzer();
+
+ // 1. Test analyzeAndReport convenience helper
+ const { analysis, report } = await analyzer.analyzeAndReport(fixtureDir);
+ expect(report.revision).toBe(analysis.revision);
+ expect(report.status).toBe(analysis.status);
+ expect(analyzer.lastAnalysis).toBe(analysis);
+ expect(analyzer.lastReport).toEqual(report);
+
+ // 2. Test generateImportQualityReport with standalone quality metadata and different statuses
+ const staleReport = generateImportQualityReport({
+  quality: analysis.quality,
+  revision: 'rev-xyz',
+  status: 'stale',
+ });
+ expect(staleReport.status).toBe('stale');
+ expect(staleReport.revision).toBe('rev-xyz');
+ expect(staleReport.behavioralLimitStatement).toBe(BEHAVIORAL_LIMIT_STATEMENT);
+
+ const updatingReport = generateImportQualityReport({
+  quality: analysis.quality,
+  revision: 'rev-abc',
+  status: 'updating',
+ });
+ expect(updatingReport.status).toBe('updating');
+ expect(updatingReport.revision).toBe('rev-abc');
+
+ // 3. Formatted markdown summary produces well-structured report
+ const formatted = formatImportQualityReport(report);
+ expect(formatted).toContain('# Import Quality Report');
+ expect(formatted).toContain('- **Status**: partial');
+ expect(formatted).toContain(`- **Revision**: ${analysis.revision}`);
+ expect(formatted).toContain(`- **File Coverage**: 4 / 5 (80%)`);
+ expect(formatted).toContain(`> **Notice**: ${BEHAVIORAL_LIMIT_STATEMENT}`);
 });

@@ -14,13 +14,14 @@ import {access,mkdtemp,symlink,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve,relative,basename,dirname,join} from 'node:path';
 import {performance} from 'node:perf_hooks';
-import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge,type KeyDefinition} from '../shared/model';
+import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge,type KeyDefinition,type Quality,QualitySchema} from '../shared/model';
 import {captureFiles,captureSourceRevision,isRevisionIncomplete,type CaptureOptions,type CapturedRevision,scanProjectDirectory,hash,AppError,copySnapshot} from './files';
 import {runSandbox,sandboxAvailable,type SandboxExecutor} from './sandbox';
 const idFor=(key:string)=>hash(key).slice(0,24);
 const normalize=(value:string)=>value.replace(/\s+/g,' ').trim();
 
 export const TYPESCRIPT_PIN = '6.0.3';
+export const BEHAVIORAL_LIMIT_STATEMENT = 'File coverage must not be presented as proof of behavioral completeness.';
 
 export function checkCompilerPin(): { pinned: string; installed: string; compatible: boolean } {
  return {
@@ -1016,17 +1017,22 @@ export interface AnalyzeOptions {
  prismaParserConfig?: PrismaAstConfig['parser'];
  validatePrisma?: boolean;
  prismaValidationOptions?: PrismaValidationOptions;
+ inferredItems?: number;
+ aiInferences?: Array<{ id?: string; kind?: string; description?: string }>;
 }
 
 export class Analyzer {
  public static readonly COMPILER_PIN = TYPESCRIPT_PIN;
  public static readonly PRISMA_PARSER_CONFIG = PRISMA_PARSER_CONFIG;
  public static readonly SCHEMA_DERIVED_NOTICE = SCHEMA_DERIVED_NOTICE;
+ public static readonly BEHAVIORAL_LIMIT_STATEMENT = BEHAVIORAL_LIMIT_STATEMENT;
  public readonly compilerPin = TYPESCRIPT_PIN;
  public readonly compilerVersion = ts.version;
  public readonly prismaParserConfig: PrismaAstConfig['parser'];
  public lastDiscovery?: AnalysisInputDiscovery;
  public lastPrismaValidation?: PrismaValidationResult;
+ public lastAnalysis?: Analysis;
+ public lastReport?: ImportQualityReport;
  private programs=new Map<string,ts.Program>();
  private sourceCache=new Map<string,{hash:string;source:ts.SourceFile}>();
  private sequence=0;
@@ -2114,6 +2120,181 @@ export class Analyzer {
   const graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id)),requirements:[]};
   const isCurrent = !isIncomplete && !dedup.some(d=>d.severity!=='info');
   const status: 'current' | 'partial' = isCurrent ? 'current' : 'partial';
-  return {revision,sequence:++this.sequence,analyzedAt:new Date().toISOString(),status,graph,files,durationMs:performance.now()-start,quality:{eligibleFiles:eligible.length,analyzedFiles:analyzed,unresolvedReferences:unresolved,unsupportedConstructs:unsupported,inferredItems:0,prismaValidation:prismaValidationStatus,diagnostics:dedup}};
+  const inferredCount = Math.max(
+   0,
+   typeof options?.inferredItems === 'number' ? Math.floor(options.inferredItems) : 0,
+   Array.isArray(options?.aiInferences) ? options.aiInferences.length : 0
+  );
+  const result: Analysis = {
+   revision,
+   sequence: ++this.sequence,
+   analyzedAt: new Date().toISOString(),
+   status,
+   graph,
+   files,
+   durationMs: performance.now() - start,
+   quality: {
+    eligibleFiles: eligible.length,
+    analyzedFiles: analyzed,
+    unresolvedReferences: unresolved,
+    unsupportedConstructs: unsupported,
+    inferredItems: inferredCount,
+    prismaValidation: prismaValidationStatus,
+    diagnostics: dedup,
+   },
+  };
+  this.lastAnalysis = result;
+  this.lastReport = generateImportQualityReport(result);
+  return result;
  }
+
+ public generateQualityReport(analysis?: Analysis): ImportQualityReport {
+  const target = analysis ?? this.lastAnalysis;
+  if (!target) {
+   throw new AppError('No analysis available to generate quality report');
+  }
+  return generateImportQualityReport(target);
+ }
+
+ public async analyzeAndReport(
+  root: string,
+  options?: AnalyzeOptions
+ ): Promise<{ analysis: Analysis; report: ImportQualityReport }> {
+  const analysis = await this.analyze(root, options);
+  const report = this.generateQualityReport(analysis);
+  return { analysis, report };
+ }
+}
+
+export interface ImportQualityReportCoverage {
+ eligibleFiles: number;
+ analyzedFiles: number;
+ ratio: number;
+ percentage: number;
+ isFullyCovered: boolean;
+}
+
+export interface ImportQualityReportBreakdown {
+ compilerDiagnostics: number;
+ parserDiagnostics: number;
+ errors: number;
+ warnings: number;
+ info: number;
+ opaqueConstructs: number;
+ unresolvedReferences: number;
+ inferredInterpretations: number;
+}
+
+export interface ImportQualityReportCounts {
+ eligibleFiles: number;
+ analyzedFiles: number;
+ unresolvedReferences: number;
+ unsupportedConstructs: number;
+ inferredItems: number;
+ diagnostics: number;
+ errors: number;
+ warnings: number;
+}
+
+export interface ImportQualityReport {
+ revision: string;
+ status: 'updating' | 'current' | 'partial' | 'stale';
+ eligibleFiles: number;
+ analyzedFiles: number;
+ unresolvedReferences: number;
+ unsupportedConstructs: number;
+ inferredItems: number;
+ prismaValidation: PrismaValidationStatus;
+ diagnostics: Diagnostic[];
+ behavioralLimitStatement: string;
+ limitStatement: string;
+ coverage: ImportQualityReportCoverage;
+ breakdown: ImportQualityReportBreakdown;
+ counts: ImportQualityReportCounts;
+ quality: Quality;
+}
+
+export function generateImportQualityReport(
+ analysisOrQuality: Analysis | { quality: Quality; revision?: string; status?: Analysis['status'] }
+): ImportQualityReport {
+ const q = analysisOrQuality.quality;
+ QualitySchema.parse(q);
+ const revision = 'revision' in analysisOrQuality && analysisOrQuality.revision !== undefined ? analysisOrQuality.revision : '';
+ const status = 'status' in analysisOrQuality && analysisOrQuality.status !== undefined ? analysisOrQuality.status : 'current';
+
+ const ratio = q.eligibleFiles > 0 ? q.analyzedFiles / q.eligibleFiles : (q.analyzedFiles === 0 ? 1 : 0);
+ const errors = q.diagnostics.filter(d => d.severity === 'error').length;
+ const warnings = q.diagnostics.filter(d => d.severity === 'warning').length;
+ const info = q.diagnostics.filter(d => d.severity === 'info').length;
+
+ const parserDiagnostics = q.diagnostics.filter(d =>
+  d.code === 'prisma-parse-error' ||
+  d.code === 'incomplete-revision' ||
+  d.code === 'prisma-validation' ||
+  d.message.toLowerCase().includes('parse') ||
+  d.message.toLowerCase().includes('syntax')
+ ).length;
+
+ const compilerDiagnostics = q.diagnostics.length - parserDiagnostics;
+
+ return {
+  revision,
+  status,
+  eligibleFiles: q.eligibleFiles,
+  analyzedFiles: q.analyzedFiles,
+  unresolvedReferences: q.unresolvedReferences,
+  unsupportedConstructs: q.unsupportedConstructs,
+  inferredItems: q.inferredItems,
+  prismaValidation: q.prismaValidation,
+  diagnostics: q.diagnostics,
+  behavioralLimitStatement: BEHAVIORAL_LIMIT_STATEMENT,
+  limitStatement: BEHAVIORAL_LIMIT_STATEMENT,
+  coverage: {
+   eligibleFiles: q.eligibleFiles,
+   analyzedFiles: q.analyzedFiles,
+   ratio,
+   percentage: Math.round(ratio * 100),
+   isFullyCovered: q.eligibleFiles > 0 && q.analyzedFiles === q.eligibleFiles,
+  },
+  breakdown: {
+   compilerDiagnostics,
+   parserDiagnostics,
+   errors,
+   warnings,
+   info,
+   opaqueConstructs: q.unsupportedConstructs,
+   unresolvedReferences: q.unresolvedReferences,
+   inferredInterpretations: q.inferredItems,
+  },
+  counts: {
+   eligibleFiles: q.eligibleFiles,
+   analyzedFiles: q.analyzedFiles,
+   unresolvedReferences: q.unresolvedReferences,
+   unsupportedConstructs: q.unsupportedConstructs,
+   inferredItems: q.inferredItems,
+   diagnostics: q.diagnostics.length,
+   errors,
+   warnings,
+  },
+  quality: q,
+ };
+}
+
+export function formatImportQualityReport(report: ImportQualityReport): string {
+ const lines: string[] = [];
+ lines.push('# Import Quality Report');
+ lines.push('');
+ lines.push(`- **Status**: ${report.status}`);
+ lines.push(`- **Revision**: ${report.revision || '(none)'}`);
+ lines.push(`- **File Coverage**: ${report.analyzedFiles} / ${report.eligibleFiles} (${report.coverage.percentage}%)`);
+ lines.push(`- **Diagnostics**: ${report.diagnostics.length} (${report.breakdown.errors} errors, ${report.breakdown.warnings} warnings)`);
+ lines.push(`- **Unresolved References**: ${report.unresolvedReferences}`);
+ lines.push(`- **Unsupported Constructs**: ${report.unsupportedConstructs}`);
+ lines.push(`- **AI Inferences**: ${report.inferredItems}`);
+ lines.push(`- **Prisma Validation**: ${report.prismaValidation}`);
+ lines.push('');
+ lines.push(`> [!IMPORTANT]`);
+ lines.push(`> **Notice**: ${report.behavioralLimitStatement}`);
+ lines.push('');
+ return lines.join('\n');
 }
