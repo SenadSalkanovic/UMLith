@@ -15,6 +15,7 @@ import type {
 } from '../../shared/model';
 import { graphDelta } from '../../shared/model';
 import type { AnalysisState, SyncStatus } from '../types';
+import { QualityReport } from './QualityReport';
 import {
   CheckSquare,
   Shield,
@@ -282,7 +283,8 @@ export interface ReviewPanelProps {
   onAccept?: (review: PendingReviewItem) => void | Promise<void>;
   onReject?: (review: PendingReviewItem) => void | Promise<void>;
   onDismiss?: (review: PendingReviewItem) => void;
-  initialTab?: 'overview' | 'architecture' | 'implementation';
+  initialTab?: 'overview' | 'architecture' | 'implementation' | 'import';
+  onOpenImportReview?: () => void;
 }
 
 export const ReviewPanel: React.FC<ReviewPanelProps> = ({
@@ -296,9 +298,10 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
   onReject,
   onDismiss,
   initialTab = 'overview',
+  onOpenImportReview,
 }) => {
   const [internalActiveId, setInternalActiveId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'architecture' | 'implementation'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'overview' | 'architecture' | 'implementation' | 'import'>(initialTab);
   const [reviewSection, setReviewSection] = useState<'spec' | 'code' | 'diagnostics'>('spec');
 
   const selectedId = activeReviewId !== undefined ? activeReviewId : internalActiveId;
@@ -463,6 +466,18 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
         >
           <Code size={13} />
           <span>{`Implementation (${implReviews.length})`}</span>
+        </button>
+        <button
+          type="button"
+          className={`review-tab-btn ${activeTab === 'import' ? 'active' : ''}`}
+          onClick={() => {
+            setActiveTab('import');
+            handleSelectReviewItem(null);
+          }}
+          data-testid="tab-import"
+        >
+          <FileCode size={13} />
+          <span>Import Quality</span>
         </button>
       </div>
 
@@ -1007,6 +1022,32 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+
+            {activeTab === 'import' && (
+              <div className="review-import-view" data-testid="review-import-view">
+                {onOpenImportReview && (
+                  <div className="import-review-action-banner mb-3 p-2 bg-card border rounded flex items-center justify-between">
+                    <div>
+                      <strong>Import Quality & Architecture Adoption</strong>
+                      <p className="text-xs text-muted">Review extracted codebase structure and adopt elements into your intended architecture.</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-primary"
+                      onClick={onOpenImportReview}
+                      data-testid="panel-open-import-review-btn"
+                    >
+                      <FileCode size={14} className="mr-1 inline" />
+                      <span>Review & Adopt</span>
+                    </button>
+                  </div>
+                )}
+                <QualityReport
+                  analysis={analysisState.analysis}
+                  status={analysisState.status}
+                />
               </div>
             )}
 

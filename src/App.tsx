@@ -18,6 +18,7 @@ import { FunctionEditor } from './components/FunctionEditor';
 import { WorkflowEditor } from './components/WorkflowEditor';
 import { RevisionHistory, type SpecificationConflictState } from './components/RevisionHistory';
 import { ProtectionEditor } from './components/ProtectionEditor';
+import { ImportReview } from './components/ImportReview';
 import { Loader2, Clock, AlertTriangle } from 'lucide-react';
 
 export interface AppProps {
@@ -71,6 +72,9 @@ export const App: React.FC<AppProps> = ({
   // Protection Editor Modal State (T029)
   const [isProtectionEditorOpen, setIsProtectionEditorOpen] = useState<boolean>(false);
   const [protectionEditorNodeId, setProtectionEditorNodeId] = useState<string | null>(null);
+
+  // Import Review Modal State (T046)
+  const [isImportReviewOpen, setIsImportReviewOpen] = useState<boolean>(false);
 
   // 3. Specification State (Persistent & Versioned Intent)
   const [specificationState, setSpecificationState] = useState<SpecificationState>(() => ({
@@ -821,6 +825,7 @@ export const App: React.FC<AppProps> = ({
         onOpenFunctionEditor={() => handleOpenFunctionEditor('details')}
         onOpenWorkflowEditor={() => handleOpenWorkflowEditor('steps')}
         onOpenRevisionHistory={() => setIsRevisionHistoryOpen(true)}
+        onOpenImportReview={() => setIsImportReviewOpen(true)}
       />
 
       {/* Workspace Conflict Alert Banner */}
@@ -993,6 +998,7 @@ export const App: React.FC<AppProps> = ({
                 project={specificationState.project}
                 graph={specificationState.specification}
                 analysisState={analysisState}
+                onOpenImportReview={() => setIsImportReviewOpen(true)}
               />
             </div>
           )}
@@ -1087,6 +1093,18 @@ export const App: React.FC<AppProps> = ({
         onSelectNode={handleSelectNode}
         onUpdateSpecification={handleUpdateSpecification}
         onUpdateChecks={handleUpdateChecks}
+        mode="modal"
+      />
+
+      <ImportReview
+        isOpen={isImportReviewOpen}
+        onClose={() => setIsImportReviewOpen(false)}
+        project={specificationState.project}
+        specification={specificationState.specification}
+        analysis={analysisState.analysis}
+        analysisStatus={analysisState.status}
+        onAdopt={handleUpdateSpecification}
+        apiBaseUrl={apiBaseUrl}
         mode="modal"
       />
     </div>

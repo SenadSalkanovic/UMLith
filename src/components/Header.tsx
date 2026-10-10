@@ -15,6 +15,7 @@ interface HeaderProps {
   onOpenFunctionEditor?: () => void;
   onOpenWorkflowEditor?: () => void;
   onOpenRevisionHistory?: () => void;
+  onOpenImportReview?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -29,6 +30,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenFunctionEditor,
   onOpenWorkflowEditor,
   onOpenRevisionHistory,
+  onOpenImportReview,
 }) => {
   const getStatusBadge = () => {
     switch (syncStatus) {
@@ -161,6 +163,18 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <History size={16} />
             <span>History</span>
+          </button>
+        )}
+
+        {onOpenImportReview && (
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenImportReview}
+            title="Inspect Import Quality & Adopt into Intent"
+            data-testid="header-open-import"
+          >
+            <FileCode size={16} />
+            <span>Import</span>
           </button>
         )}
 
