@@ -91,6 +91,16 @@ export function areHashesEqual(a: Record<string, string>, b: Record<string, stri
  return true;
 }
 
+export function getRelevantInputHashes(fileHashes: Record<string, string>): Record<string, string> {
+ const filtered: Record<string, string> = {};
+ for (const [path, h] of Object.entries(fileHashes)) {
+  if (isRelevantAnalysisInput(path)) {
+   filtered[path] = h;
+  }
+ }
+ return filtered;
+}
+
 type PendingRequest = {
  generation: number;
  resolve: () => void;
@@ -113,6 +123,7 @@ type Session = {
  startTimeout?: ReturnType<typeof setTimeout>;
  closed: boolean;
  bindingReviews?: BindingReviewRecord[];
+ eventDeliveryDisabled?: boolean;
 };
 
 export class SyncService extends EventEmitter {
@@ -129,8 +140,30 @@ export class SyncService extends EventEmitter {
   return this.options.debounceMs ?? 300;
  }
 
+ getReconcileIntervalMs(): number {
+  return this.options.reconcileIntervalMs ?? 60000;
+ }
+
  hasPendingDebounce(id: string): boolean {
   return Boolean(this.sessions.get(id)?.debounce !== undefined);
+ }
+
+ hasReconcileTimer(id: string): boolean {
+  return Boolean(this.sessions.get(id)?.timer !== undefined);
+ }
+
+ disableEventDelivery(id: string): void {
+  const session = this.sessions.get(id);
+  if (session) session.eventDeliveryDisabled = true;
+ }
+
+ enableEventDelivery(id: string): void {
+  const session = this.sessions.get(id);
+  if (session) session.eventDeliveryDisabled = false;
+ }
+
+ isEventDeliveryDisabled(id: string): boolean {
+  return Boolean(this.sessions.get(id)?.eventDeliveryDisabled);
  }
 
  isUpdating(id: string): boolean {
@@ -161,13 +194,124 @@ export class SyncService extends EventEmitter {
 
  handleFileEvent(id: string, event: string, filePath: string): boolean {
   const session = this.sessions.get(id);
-  if (!session || session.closed) return false;
+  if (!session || session.closed || session.eventDeliveryDisabled) return false;
   const rel = relative(session.root, filePath).replace(/\\/g, '/');
   if (isPathExcluded(rel) || isGeneratedOrTemporaryFile(rel)) return false;
   const isDir = event === 'addDir' || event === 'unlinkDir';
   if (!isDir && !isRelevantAnalysisInput(rel)) return false;
   this.schedule(id, event, filePath);
   return true;
+ }
+
+ private setupWatcher(id: string, session: Session, root: string): FSWatcher {
+  const watcher = chokidar.watch(root, {
+   ignoreInitial: true,
+   awaitWriteFinish: {
+    stabilityThreshold: this.options.stabilityThreshold ?? 150,
+    pollInterval: this.options.pollInterval ?? 50,
+   },
+   atomic: true,
+   ignored: (targetPath: string) => {
+    if (targetPath === root) return false;
+    const rel = relative(root, targetPath).replace(/\\/g, '/');
+    if (!rel || rel === '.') return false;
+    if (isPathExcluded(rel) || isGeneratedOrTemporaryFile(rel)) return true;
+    return false;
+   },
+  });
+
+  watcher.on('all', (event, filePath) => {
+   if (session.closed || session.eventDeliveryDisabled) return;
+   this.handleFileEvent(id, event, filePath);
+  });
+
+  watcher.on('error', (err) => {
+   void this.handleWatcherError(id, err);
+  });
+
+  return watcher;
+ }
+
+ async handleWatcherError(id: string, err: any, options?: { restartWatcher?: boolean }): Promise<void> {
+  const session = this.sessions.get(id);
+  if (!session || session.closed) return;
+  this.emit('watcher-error', id, err);
+  this.emit('recovery', id, { phase: 'start', error: err });
+
+  if (!session.closed && this.options.watch !== false) {
+   const watcher = session.watcher as any;
+   const isClosed = !watcher || watcher.closed || watcher.isClosed;
+   if (isClosed || options?.restartWatcher) {
+    if (watcher && !isClosed) {
+     try {
+      await watcher.close();
+     } catch {
+      // Ignore close error on damaged watcher
+     }
+    }
+    try {
+     const newWatcher = this.setupWatcher(id, session, session.root);
+     session.watcher = newWatcher;
+     await new Promise<void>((resolve) => {
+      let resolved = false;
+      const done = () => {
+       if (!resolved) {
+        resolved = true;
+        resolve();
+       }
+      };
+      newWatcher.once('ready', done);
+      newWatcher.once('error', done);
+      setTimeout(done, 1500).unref();
+     });
+     this.emit('recovery', id, { phase: 'watcher-restarted' });
+    } catch {
+     // Ignore watcher restart errors if filesystem is persistently unavailable
+    }
+   }
+  }
+
+  try {
+   await this.reconcile(id);
+   this.emit('recovery', id, { phase: 'complete' });
+  } catch (error: any) {
+   this.emit('recovery', id, { phase: 'error', error });
+   this.emit('notification', id, { type: 'error', projectId: id, message: error.message });
+  }
+ }
+
+ async rescan(id: string, options?: { force?: boolean }): Promise<boolean> {
+  return this.reconcile(id, { force: options?.force ?? true });
+ }
+
+ async resume(id?: string): Promise<void> {
+  if (id !== undefined) {
+   const session = this.sessions.get(id);
+   if (!session || session.closed) return;
+   this.emit('resume', id);
+   const reconcileInterval = this.getReconcileIntervalMs();
+   if (session.timer) {
+    clearInterval(session.timer);
+    session.timer = undefined;
+   }
+   const shouldScheduleTimer =
+    (this.options.watch !== false || this.options.reconcileIntervalMs !== undefined) && reconcileInterval > 0;
+   if (shouldScheduleTimer) {
+    session.timer = setInterval(
+     () => void this.reconcile(id).catch(error =>
+      this.emit('notification', id, { type: 'error', projectId: id, message: error.message })
+     ),
+     reconcileInterval
+    );
+    session.timer.unref();
+   }
+   await this.reconcile(id);
+   return;
+  }
+  const sessionIds = Array.from(this.sessions.keys());
+  for (const sessionId of sessionIds) {
+   await this.resume(sessionId);
+  }
  }
 
  async start(id: string): Promise<void> {
@@ -191,43 +335,8 @@ export class SyncService extends EventEmitter {
   this.sessions.set(id, session);
 
   if (this.options.watch !== false) {
-   const watcher = chokidar.watch(project.root, {
-    ignoreInitial: true,
-    awaitWriteFinish: {
-     stabilityThreshold: this.options.stabilityThreshold ?? 150,
-     pollInterval: this.options.pollInterval ?? 50,
-    },
-    atomic: true,
-    ignored: (targetPath: string) => {
-     if (targetPath === project.root) return false;
-     const rel = relative(project.root, targetPath).replace(/\\/g, '/');
-     if (!rel || rel === '.') return false;
-     if (isPathExcluded(rel) || isGeneratedOrTemporaryFile(rel)) return true;
-     return false;
-    },
-   });
+   const watcher = this.setupWatcher(id, session, project.root);
    session.watcher = watcher;
-
-   watcher.on('all', (event, filePath) => {
-    if (session.closed) return;
-    this.handleFileEvent(id, event, filePath);
-   });
-
-   watcher.on('error', (err) => {
-    this.emit('watcher-error', id, err);
-    void this.reconcile(id).catch(error =>
-     this.emit('notification', id, { type: 'error', projectId: id, message: error.message })
-    );
-   });
-
-   const reconcileInterval = this.options.reconcileIntervalMs ?? 60000;
-   session.timer = setInterval(
-    () => void this.reconcile(id).catch(error =>
-     this.emit('notification', id, { type: 'error', projectId: id, message: error.message })
-    ),
-    reconcileInterval
-   );
-   session.timer.unref();
 
    await new Promise<void>((resolve) => {
     let resolved = false;
@@ -248,17 +357,46 @@ export class SyncService extends EventEmitter {
    });
   }
 
+  const reconcileInterval = this.options.reconcileIntervalMs ?? 60000;
+  const shouldScheduleTimer =
+   (this.options.watch !== false || this.options.reconcileIntervalMs !== undefined) && reconcileInterval > 0;
+  if (shouldScheduleTimer) {
+   session.timer = setInterval(
+    () => void this.reconcile(id).catch(error =>
+     this.emit('notification', id, { type: 'error', projectId: id, message: error.message })
+    ),
+    reconcileInterval
+   );
+   session.timer.unref();
+  }
+
   return this.request(id);
  }
 
- async reconcile(id: string): Promise<void> {
+ async reconcile(id: string, options?: { force?: boolean }): Promise<boolean> {
   const session = this.sessions.get(id);
-  if (!session || session.closed) return;
+  if (!session || session.closed) return false;
+  if (session.debounce) {
+   clearTimeout(session.debounce);
+   session.debounce = undefined;
+  }
   const p = await this.store.get(id);
-  const current = hashes(await captureFiles(p.root));
-  const previous = p.analysis ? hashes(p.analysis.files) : {};
-  if (!areHashesEqual(current, previous) || p.analysis?.status === 'stale') {
+  const captured = await captureFiles(p.root);
+  const current = getRelevantInputHashes(hashes(captured));
+  const previous = p.analysis ? getRelevantInputHashes(hashes(p.analysis.files)) : {};
+  const hashesMatch = areHashesEqual(current, previous);
+  const isStale = p.analysis?.status === 'stale';
+  const shouldRequest = options?.force || !hashesMatch || isStale;
+
+  this.emit('reconcile-start', id, { current, previous, changed: !hashesMatch, force: Boolean(options?.force) });
+
+  if (shouldRequest) {
    await this.request(id);
+   this.emit('reconciled', id, { changed: true, hashes: current });
+   return true;
+  } else {
+   this.emit('reconciled', id, { changed: false, hashes: current });
+   return false;
   }
  }
 

@@ -8,7 +8,9 @@ import {
  isRelevantAnalysisInput,
  isGeneratedOrTemporaryFile,
  areHashesEqual,
+ getRelevantInputHashes,
 } from '../server/sync';
+import {Analyzer} from '../server/analyzer';
 import {AnalysisWorker} from '../server/worker';
 import {AnalysisSchema,GraphUpdateSchema,applyGraphUpdate,resolveSourceEvidence} from '../shared/model';
 import {getOutdatedPortions} from '../src/components/AnalysisStatus';
@@ -1410,4 +1412,377 @@ model ValidUser {
    await rm(dir, { recursive: true, force: true });
   }
  });
+});
+
+describe('T059: Reconcile hashes every 60 seconds and after watcher errors', () => {
+ it('Concrete Scenario 1: discovers changes missed by the watcher within a reconciliation cycle and avoids spurious revisions (AC 1 & AC 3)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t059-scenario1-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T059-Scenario1' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export function initialTask() { return 42; }');
+
+  const analyzer = new Analyzer();
+  const directWorker = {
+   analyze: (root: string, opts?: any) => analyzer.analyze(root, opts),
+   close: async () => {},
+  };
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 50,
+   stabilityThreshold: 30,
+   reconcileIntervalMs: 60000,
+   worker: directWorker as any,
+  });
+
+  const analysisUpdates: any[] = [];
+  sync.on('notification', (_id, ev) => {
+   if (ev.type === 'analysis') analysisUpdates.push(ev);
+  });
+
+  const reconciledEvents: any[] = [];
+  sync.on('reconciled', (_id, ev) => reconciledEvents.push(ev));
+
+  vi.useFakeTimers();
+  try {
+   const startPromise = sync.start(p.id);
+   await vi.advanceTimersByTimeAsync(2000);
+   await startPromise;
+
+   const initialProject = await store.get(p.id);
+   const rev1 = initialProject.analysis!.revision;
+   const seq1 = initialProject.analysis!.sequence;
+   expect(seq1).toBe(1);
+   expect(sync.hasReconcileTimer(p.id)).toBe(true);
+
+   // Clear initial notification updates captured during sync.start
+   analysisUpdates.length = 0;
+
+   // Step 1: Disable event delivery to simulate missed watcher events
+   sync.disableEventDelivery(p.id);
+   expect(sync.isEventDeliveryDisabled(p.id)).toBe(true);
+
+   // Step 2: Modify files on disk while watcher notifications are suppressed
+   await writeFile(join(p.root, 'main.ts'), 'export function updatedTask() { return 99; }');
+
+   // Confirm that without reconciliation, change is hidden
+   await vi.advanceTimersByTimeAsync(200);
+   expect(sync.hasPendingDebounce(p.id)).toBe(false);
+   const hiddenProject = await store.get(p.id);
+   expect(hiddenProject.analysis!.revision).toBe(rev1);
+   expect(analysisUpdates.length).toBe(0);
+
+   // Step 3: Advance 60 seconds to trigger the scheduled periodic reconciliation
+   const reconciledPromise = new Promise(resolve => sync.once('reconciled', resolve));
+   await vi.advanceTimersByTimeAsync(60000);
+   await reconciledPromise;
+
+   // Changes missed by watcher must be discovered within the reconciliation cycle (AC 1)
+   const updatedProject = await store.get(p.id);
+   expect(updatedProject.analysis?.graph.nodes.some(n => n.name === 'updatedTask')).toBe(true);
+   expect(updatedProject.analysis!.revision).not.toBe(rev1);
+   expect(updatedProject.analysis!.sequence).toBe(2);
+   expect(analysisUpdates.length).toBe(1);
+   expect(reconciledEvents.some(e => e.changed === true)).toBe(true);
+
+   // Step 4: Advance another 60 seconds with NO file changes (AC 3)
+   reconciledEvents.length = 0;
+   analysisUpdates.length = 0;
+   const noChangePromise = new Promise(resolve => sync.once('reconciled', resolve));
+   await vi.advanceTimersByTimeAsync(60000);
+   await noChangePromise;
+
+   // No-change reconciliation does not publish spurious graph revisions (AC 3)
+   const unchangedProject = await store.get(p.id);
+   expect(unchangedProject.analysis!.revision).toBe(updatedProject.analysis!.revision);
+   expect(unchangedProject.analysis!.sequence).toBe(updatedProject.analysis!.sequence);
+   expect(analysisUpdates.length).toBe(0);
+   expect(reconciledEvents.some(e => e.changed === false)).toBe(true);
+  } finally {
+   vi.useRealTimers();
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ }, 15000);
+
+ it('Concrete Scenario 2: emits watcher error, triggers recovery, and matches full import graph (AC 2)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t059-scenario2-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T059-Scenario2' });
+
+  await writeFile(join(p.root, 'user.ts'), 'export class UserService { getUser(): string { return "user"; } }');
+  await mkdir(join(p.root, 'prisma'), { recursive: true });
+  await writeFile(
+   join(p.root, 'prisma', 'schema.prisma'),
+   'datasource db {\n  provider = "sqlite"\n  url = "file:dev.db"\n}\n\nmodel Account {\n  id Int @id\n  email String @unique\n}\n'
+  );
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 50,
+   stabilityThreshold: 30,
+   reconcileIntervalMs: 60000,
+  });
+
+  const watcherErrors: any[] = [];
+  sync.on('watcher-error', (_id, err) => watcherErrors.push(err));
+
+  const recoveryEvents: any[] = [];
+  sync.on('recovery', (_id, ev) => recoveryEvents.push(ev));
+
+  try {
+   await sync.start(p.id);
+
+   await expect.poll(async () => {
+    const current = await store.get(p.id);
+    return (
+     current.analysis?.graph.nodes.some(n => n.name === 'UserService') &&
+     current.analysis?.graph.nodes.some(n => n.name === 'Account')
+    );
+   }, { timeout: 10000, interval: 50 }).toBe(true);
+
+   // Simulate file changes occurring while watcher is disrupted or event delivery disabled
+   sync.disableEventDelivery(p.id);
+   await writeFile(
+    join(p.root, 'order.ts'),
+    'export class OrderService { getOrder(): string { return "order"; } }'
+   );
+   await writeFile(
+    join(p.root, 'prisma', 'schema.prisma'),
+    'datasource db {\n  provider = "sqlite"\n  url = "file:dev.db"\n}\n\nmodel Account {\n  id Int @id\n  email String @unique\n}\n\nmodel Order {\n  id Int @id\n  total Float\n}\n'
+   );
+
+   // Emit watcher error on the active watcher
+   const watcher = sync.getWatcher(p.id);
+   expect(watcher).toBeDefined();
+
+   const testError = new Error('ENOSPC: System limit for number of file watchers reached');
+   watcher!.emit('error', testError);
+
+   // Await recovery triggered by the watcher error (AC 2)
+   await expect.poll(async () => {
+    return recoveryEvents.some(ev => ev.phase === 'complete');
+   }, { timeout: 10000, interval: 50 }).toBe(true);
+
+   expect(watcherErrors.length).toBeGreaterThanOrEqual(1);
+   expect(watcherErrors[0].message).toContain('ENOSPC');
+
+   // Verify graph matches a clean, independent full import
+   const cleanAnalyzer = new Analyzer();
+   const fullImport = await cleanAnalyzer.analyze(p.root);
+   const currentProject = await store.get(p.id);
+
+   expect(currentProject.analysis?.status).toBe('current');
+   const syncNodeNames = currentProject.analysis!.graph.nodes.map(n => n.name).sort();
+   const fullNodeNames = fullImport.graph.nodes.map(n => n.name).sort();
+   expect(syncNodeNames).toEqual(fullNodeNames);
+
+   expect(syncNodeNames).toContain('UserService');
+   expect(syncNodeNames).toContain('OrderService');
+   expect(syncNodeNames).toContain('Account');
+   expect(syncNodeNames).toContain('Order');
+
+   // Re-enable event delivery and verify watcher recovery continues to capture subsequent saves
+   sync.enableEventDelivery(p.id);
+   await writeFile(join(p.root, 'invoice.ts'), 'export function createInvoice() { return 1; }');
+
+   await expect.poll(async () => {
+    const latest = await store.get(p.id);
+    return latest.analysis?.graph.nodes.some(n => n.name === 'createInvoice');
+   }, { timeout: 10000, interval: 50 }).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ }, 15000);
+
+ it('detects added, deleted, config, and dependency inputs during reconciliation', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t059-inputs-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T059-Inputs' });
+
+  await writeFile(join(p.root, 'index.ts'), 'export const base = 1;');
+  await writeFile(join(p.root, 'package.json'), JSON.stringify({ name: 'input-test', version: '1.0.0' }, null, 2));
+  await writeFile(
+   join(p.root, 'tsconfig.json'),
+   JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext' } }, null, 2)
+  );
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 50,
+   reconcileIntervalMs: 60000,
+  });
+
+  try {
+   await sync.start(p.id);
+
+   await expect.poll(async () => {
+    const current = await store.get(p.id);
+    return current.analysis?.graph.nodes.some(n => n.name === 'index.ts');
+   }, { timeout: 5000, interval: 50 }).toBe(true);
+
+   // Disable watcher events to isolate reconciliation logic
+   sync.disableEventDelivery(p.id);
+
+   // 1. Added input: new source file
+   await writeFile(join(p.root, 'helper.ts'), 'export function helper() { return "help"; }');
+   const addedReconciled = await sync.reconcile(p.id);
+   expect(addedReconciled).toBe(true);
+   const withHelper = await store.get(p.id);
+   expect(withHelper.analysis?.graph.nodes.some(n => n.name === 'helper.ts')).toBe(true);
+
+   // 2. Deleted input: delete source file
+   await unlink(join(p.root, 'helper.ts'));
+   const deletedReconciled = await sync.reconcile(p.id);
+   expect(deletedReconciled).toBe(true);
+   const withoutHelper = await store.get(p.id);
+   expect(withoutHelper.analysis?.graph.nodes.some(n => n.name === 'helper.ts')).toBe(false);
+
+   // 3. Config input: change tsconfig.json
+   await writeFile(
+    join(p.root, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { target: 'ES2024', module: 'NodeNext', strict: true } }, null, 2)
+   );
+   const configReconciled = await sync.reconcile(p.id);
+   expect(configReconciled).toBe(true);
+
+   // 4. Dependency input: change package.json
+   await writeFile(
+    join(p.root, 'package.json'),
+    JSON.stringify({ name: 'input-test', version: '1.1.0', dependencies: { zod: '^4.0.0' } }, null, 2)
+   );
+   const depReconciled = await sync.reconcile(p.id);
+   expect(depReconciled).toBe(true);
+
+   // 5. Excluded/Temporary input: change .env and temp file - must NOT trigger reconciliation
+   await writeFile(join(p.root, '.env'), 'SECRET_KEY=confidential_secret');
+   await writeFile(join(p.root, 'scratch.tmp'), 'temporary contents');
+   const excludedReconciled = await sync.reconcile(p.id);
+   expect(excludedReconciled).toBe(false);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('retains a manual full-rescan action via rescan() (R16)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t059-rescan-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T059-Rescan' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export function alpha() { return "alpha"; }');
+
+  const sync = new SyncService(store, {
+   watch: false,
+  });
+
+  const reconcileStarts: any[] = [];
+  sync.on('reconcile-start', (_id, ev) => reconcileStarts.push(ev));
+
+  try {
+   await sync.start(p.id);
+   const p1 = await store.get(p.id);
+   const seq1 = p1.analysis!.sequence;
+
+   // Rescan with no file changes on disk forces analysis execution
+   const rescanResult = await sync.rescan(p.id);
+   expect(rescanResult).toBe(true);
+
+   const p2 = await store.get(p.id);
+   expect(p2.analysis!.sequence).toBe(seq1 + 1);
+   expect(reconcileStarts.some(e => e.force === true)).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('reconciles file hashes on application resume and resets interval timer (R16)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t059-resume-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T059-Resume' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export function preSleep() { return 1; }');
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 50,
+   reconcileIntervalMs: 60000,
+  });
+
+  const resumeEvents: string[] = [];
+  sync.on('resume', id => resumeEvents.push(id));
+
+  try {
+   await sync.start(p.id);
+   const before = await store.get(p.id);
+   expect(before.analysis?.graph.nodes.some(n => n.name === 'preSleep')).toBe(true);
+
+   // Simulate external change while system was suspended (event delivery disabled)
+   sync.disableEventDelivery(p.id);
+   await writeFile(join(p.root, 'main.ts'), 'export function postResume() { return 2; }');
+
+   // Application resume triggers immediate reconciliation
+   await sync.resume(p.id);
+
+   expect(resumeEvents).toContain(p.id);
+   const resumed = await store.get(p.id);
+   expect(resumed.analysis?.graph.nodes.some(n => n.name === 'postResume')).toBe(true);
+   expect(sync.hasReconcileTimer(p.id)).toBe(true);
+
+   // Resume without arguments resumes all active sessions
+   resumeEvents.length = 0;
+   await sync.resume();
+   expect(resumeEvents).toContain(p.id);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('recovers watcher cleanly when watcher was closed during error', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t059-closed-watcher-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T059-ClosedWatcher' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export const active = true;');
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 50,
+   reconcileIntervalMs: 60000,
+  });
+
+  try {
+   await sync.start(p.id);
+   expect(sync.isWatching(p.id)).toBe(true);
+
+   const watcher = sync.getWatcher(p.id);
+   expect(watcher).toBeDefined();
+
+   // Simulate fatal crash where the watcher became closed
+   await watcher!.close();
+   expect((sync.getWatcher(p.id) as any).closed).toBe(true);
+
+   // Watcher error triggers recovery and watcher re-creation
+   await sync.handleWatcherError(p.id, new Error('EIO: Watcher I/O failed'));
+
+   expect(sync.isWatching(p.id)).toBe(true);
+   const newWatcher = sync.getWatcher(p.id);
+   expect(newWatcher).toBeDefined();
+   expect(newWatcher).not.toBe(watcher);
+
+   // Newly recreated watcher successfully synchronizes subsequent saves
+   await writeFile(join(p.root, 'new-file.ts'), 'export const fresh = 100;');
+   await expect.poll(async () => {
+    const current = await store.get(p.id);
+    return current.analysis?.graph.nodes.some(n => n.name === 'new-file.ts');
+   }, { timeout: 10000, interval: 50 }).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ }, 15000);
 });
