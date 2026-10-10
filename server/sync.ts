@@ -1,11 +1,12 @@
 import {EventEmitter} from 'node:events';
 import chokidar,{type FSWatcher} from 'chokidar';
 import {basename,relative} from 'node:path';
-import type {Analysis,GraphUpdate} from '../shared/model';
+import type {Analysis,GraphUpdate,BindingReviewRecord} from '../shared/model';
 import {graphDelta,emptyGraph,GRAPH_SCHEMA_VERSION,AnalysisSchema,GraphUpdateSchema,createGraphUpdate} from '../shared/model';
 import {AnalysisWorker} from './worker';
 import {ProjectStore} from './store';
 import {captureFiles,hashes,isPathExcluded} from './files';
+import {reconcileGraphIdentities,reconcileSourceBindings} from './review';
 
 export interface SyncServiceOptions {
  watch?: boolean;
@@ -111,12 +112,17 @@ type Session = {
  stabilizationTimer?: ReturnType<typeof setTimeout>;
  startTimeout?: ReturnType<typeof setTimeout>;
  closed: boolean;
+ bindingReviews?: BindingReviewRecord[];
 };
 
 export class SyncService extends EventEmitter {
  private sessions = new Map<string, Session>();
  constructor(public store: ProjectStore, private options: SyncServiceOptions = {}) {
   super();
+ }
+
+ getBindingReviews(id: string): BindingReviewRecord[] {
+  return this.sessions.get(id)?.bindingReviews ?? [];
  }
 
  getDebounceMs(): number {
@@ -381,6 +387,14 @@ export class SyncService extends EventEmitter {
    const currentBefore = latestP.analysis;
    result.sequence = (currentBefore?.sequence || 0) + 1;
 
+   // Reconcile graph node IDs to preserve stable identities for unambiguous matches
+   const reconciled = reconcileGraphIdentities(currentBefore?.graph, result.graph, latestP.specification);
+   result.graph = reconciled.graph;
+
+   // Produce explicit binding review records for human specification nodes
+   const bindingReviews = reconcileSourceBindings(latestP.specification, result, currentBefore);
+   session.bindingReviews = bindingReviews;
+
    const update = createGraphUpdate(currentBefore, result, id);
 
    await this.emitBeforePersist(id, { generation, revision: result.revision, result });
@@ -409,6 +423,15 @@ export class SyncService extends EventEmitter {
    session.committedSequence = result.sequence;
 
    this.emit('notification', id, update);
+
+   if (bindingReviews.length > 0) {
+    this.emit('binding-review', id, bindingReviews);
+    this.emit('notification', id, {
+     type: 'binding-review',
+     projectId: id,
+     records: bindingReviews,
+    });
+   }
 
    const isIncompleteRevision = result.quality.diagnostics.some(d => d.code === 'incomplete-revision');
    if (isIncompleteRevision && !session.closed && !session.debounce) {

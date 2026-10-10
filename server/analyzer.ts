@@ -14,7 +14,7 @@ import {access,mkdtemp,symlink,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve,relative,basename,dirname,join} from 'node:path';
 import {performance} from 'node:perf_hooks';
-import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge,type KeyDefinition,type Quality,QualitySchema} from '../shared/model';
+import {NodeSchema,GraphSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge,type KeyDefinition,type Quality,QualitySchema,sourceIdentityKey,type BindingReviewRecord} from '../shared/model';
 import {captureFiles,captureSourceRevision,isRevisionIncomplete,type CaptureOptions,type CapturedRevision,scanProjectDirectory,hash,AppError,copySnapshot} from './files';
 import {runSandbox,sandboxAvailable,type SandboxExecutor} from './sandbox';
 const idFor=(key:string)=>hash(key).slice(0,24);
@@ -1040,7 +1040,342 @@ export interface IncrementalAnalysisInfo {
  rebuiltPrograms: string[];
 }
 
+export function normalizeContract(text: string): string {
+ const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, text.replace(/^(export\s+|declare\s+|async\s+|function\s+)*/, ''));
+ const tokens: string[] = [];
+ while (scanner.scan() !== ts.SyntaxKind.EndOfFileToken) tokens.push(scanner.getTokenText());
+ return tokens.join('|');
+}
+
+export function contractSignature(contract: string | undefined): string {
+ if (!contract) return '';
+ const parenIdx = contract.indexOf('(');
+ if (parenIdx !== -1) {
+  return normalizeContract(contract.slice(parenIdx));
+ }
+ return normalizeContract(contract);
+}
+
+export interface ReconcileGraphResult {
+ graph: Graph;
+ idMap: Map<string, string>;
+ ambiguous: BindingReviewRecord[];
+ unambiguousMatches: Map<string, string>;
+}
+
+export function reconcileGraphIdentities(
+ beforeGraph: Graph | undefined,
+ currentGraph: Graph,
+ specification?: Graph
+): ReconcileGraphResult {
+ const beforeNodes = beforeGraph?.nodes ?? [];
+ const currentNodes = currentGraph.nodes;
+ const idMap = new Map<string, string>();
+ const matchedBefore = new Set<string>();
+ const matchedCurrent = new Set<string>();
+ const ambiguous: BindingReviewRecord[] = [];
+
+ // Match system and module nodes first
+ for (const prev of beforeNodes) {
+  if (prev.kind === 'system' || prev.kind === 'module') {
+   const match = currentNodes.find(
+    c => c.kind === prev.kind && c.name === prev.name && (prev.kind === 'system' || prev.outputPath === c.outputPath)
+   );
+   if (match) {
+    idMap.set(match.id, prev.id);
+    matchedBefore.add(prev.id);
+    matchedCurrent.add(match.id);
+   }
+  }
+ }
+
+ // Phase 1: Match by exact sourceIdentityKey
+ const beforeByKey = new Map<string, ProgramNode[]>();
+ for (const n of beforeNodes) {
+  if (matchedBefore.has(n.id)) continue;
+  const key = sourceIdentityKey(n);
+  if (key) {
+   const list = beforeByKey.get(key) || [];
+   list.push(n);
+   beforeByKey.set(key, list);
+  }
+ }
+
+ const currentByKey = new Map<string, ProgramNode[]>();
+ for (const n of currentNodes) {
+  if (matchedCurrent.has(n.id)) continue;
+  const key = sourceIdentityKey(n);
+  if (key) {
+   const list = currentByKey.get(key) || [];
+   list.push(n);
+   currentByKey.set(key, list);
+  }
+ }
+
+ for (const [key, prevList] of beforeByKey.entries()) {
+  const currList = currentByKey.get(key);
+  if (!currList) continue;
+
+  if (prevList.length === 1 && currList.length === 1) {
+   const prev = prevList[0];
+   const curr = currList[0];
+   if (prev.kind === curr.kind) {
+    idMap.set(curr.id, prev.id);
+    matchedBefore.add(prev.id);
+    matchedCurrent.add(curr.id);
+   }
+  } else {
+   // Duplicate keys: ambiguous! Equal keys alone are not proof.
+   // Never use first-match order, nearest offsets, or policy to break ties.
+   for (const prev of prevList) {
+    ambiguous.push({
+     nodeId: prev.id,
+     nodeName: prev.name,
+     kind: prev.kind,
+     policy: prev.policy,
+     status: 'ambiguous',
+     currentBinding: prev.source,
+     contract: prev.contract,
+     baseline: prev.baseline,
+     candidates: currList.map(c => ({
+      id: c.id,
+      name: c.name,
+      kind: c.kind,
+      source: c.source!,
+      contract: c.contract,
+      matchReason: 'Duplicate matching key in source',
+     })),
+     reason: `Duplicate source identity key '${key}' with multiple candidate declarations`,
+    });
+   }
+  }
+ }
+
+ // Phase 2: Scoped declaration evidence matching for unmatched declarations (renames and moves)
+ const unmatchedBefore = beforeNodes.filter(n => !matchedBefore.has(n.id) && n.kind !== 'system' && n.kind !== 'step');
+ const unmatchedCurrent = currentNodes.filter(n => !matchedCurrent.has(n.id) && n.kind !== 'system' && n.kind !== 'step');
+
+ const candidatesForPrev = new Map<string, { node: ProgramNode; reason: string }[]>();
+ const prevForCandidate = new Map<string, string[]>();
+
+ for (const prev of unmatchedBefore) {
+  const candidates: { node: ProgramNode; reason: string }[] = [];
+  for (const curr of unmatchedCurrent) {
+   if (prev.kind !== curr.kind) continue;
+
+   const sameName = prev.name === curr.name;
+   const samePath = Boolean(prev.source?.path && curr.source?.path && prev.source.path === curr.source.path);
+   const contractsMatch = Boolean(
+    prev.contract && curr.contract &&
+    normalizeContract(prev.contract) === normalizeContract(curr.contract)
+   );
+   const signaturesMatch = Boolean(
+    prev.contract && curr.contract &&
+    contractSignature(prev.contract) &&
+    contractSignature(prev.contract) === contractSignature(curr.contract)
+   );
+   const nameSimilar = Boolean(
+    curr.name.toLowerCase().includes(prev.name.toLowerCase()) ||
+    prev.name.toLowerCase().includes(curr.name.toLowerCase())
+   );
+   const sameParent = Boolean(prev.parentId && curr.parentId && (
+    prev.parentId === curr.parentId ||
+    idMap.get(curr.parentId) === prev.parentId
+   ));
+
+   if (sameName && (samePath || sameParent || contractsMatch)) {
+    candidates.push({ node: curr, reason: 'Matching declaration name and scoped evidence' });
+   } else if (samePath && sameParent && contractsMatch) {
+    candidates.push({ node: curr, reason: 'Matching scope, kind, and declaration contract' });
+   } else if (sameName && contractsMatch) {
+    candidates.push({ node: curr, reason: 'Matching name, kind, and declaration contract' });
+   } else if (contractsMatch) {
+    candidates.push({ node: curr, reason: 'Matching declaration contract' });
+   } else if (signaturesMatch && nameSimilar) {
+    candidates.push({ node: curr, reason: 'Matching kind, signature, and similar name' });
+   }
+  }
+  candidatesForPrev.set(prev.id, candidates);
+  for (const c of candidates) {
+   const list = prevForCandidate.get(c.node.id) || [];
+   list.push(prev.id);
+   prevForCandidate.set(c.node.id, list);
+  }
+ }
+
+ for (const prev of unmatchedBefore) {
+  const candidates = candidatesForPrev.get(prev.id) || [];
+  if (candidates.length === 0) {
+   if (prev.policy === 'frozen-implementation' || prev.policy === 'frozen-contract' || prev.policy === 'sensitive') {
+    ambiguous.push({
+     nodeId: prev.id,
+     nodeName: prev.name,
+     kind: prev.kind,
+     policy: prev.policy,
+     status: 'unresolved',
+     currentBinding: prev.source,
+     contract: prev.contract,
+     baseline: prev.baseline,
+     candidates: [],
+     reason: `Declaration '${prev.name}' was moved, renamed, or deleted without candidates`,
+    });
+   }
+  } else if (candidates.length > 1) {
+   ambiguous.push({
+    nodeId: prev.id,
+    nodeName: prev.name,
+    kind: prev.kind,
+    policy: prev.policy,
+    status: 'ambiguous',
+    currentBinding: prev.source,
+    contract: prev.contract,
+    baseline: prev.baseline,
+    candidates: candidates.map(c => ({
+     id: c.node.id,
+     name: c.node.name,
+     kind: c.node.kind,
+     source: c.node.source!,
+     contract: c.node.contract,
+     matchReason: c.reason,
+    })),
+    reason: `Ambiguous match: ${candidates.length} candidate declarations match '${prev.name}'`,
+   });
+  } else {
+   const single = candidates[0];
+   const competing = prevForCandidate.get(single.node.id) || [];
+   if (competing.length > 1) {
+    ambiguous.push({
+     nodeId: prev.id,
+     nodeName: prev.name,
+     kind: prev.kind,
+     policy: prev.policy,
+     status: 'ambiguous',
+     currentBinding: prev.source,
+     contract: prev.contract,
+     baseline: prev.baseline,
+     candidates: [
+      {
+       id: single.node.id,
+       name: single.node.name,
+       kind: single.node.kind,
+       source: single.node.source!,
+       contract: single.node.contract,
+       matchReason: 'Contested by multiple previous declarations',
+      },
+     ],
+     reason: `Ambiguous match: declaration candidate is contested by multiple previous declarations`,
+    });
+   } else {
+    const isMovedOrRenamed = Boolean(
+     (prev.source?.path && single.node.source?.path && prev.source.path !== single.node.source.path) ||
+     prev.name !== single.node.name
+    );
+    if ((prev.policy === 'frozen-implementation' || prev.policy === 'frozen-contract') && isMovedOrRenamed) {
+     ambiguous.push({
+      nodeId: prev.id,
+      nodeName: prev.name,
+      kind: prev.kind,
+      policy: prev.policy,
+      status: 'ambiguous',
+      currentBinding: prev.source,
+      contract: prev.contract,
+      baseline: prev.baseline,
+      candidates: [
+       {
+        id: single.node.id,
+        name: single.node.name,
+        kind: single.node.kind,
+        source: single.node.source!,
+        contract: single.node.contract,
+        matchReason: single.reason,
+       },
+      ],
+      reason: `Protected item moved or renamed; requires explicit source-binding review`,
+     });
+    } else {
+     idMap.set(single.node.id, prev.id);
+     matchedBefore.add(prev.id);
+     matchedCurrent.add(single.node.id);
+    }
+   }
+  }
+ }
+
+ // Match workflow steps inside functions whose IDs were remapped
+ for (const curr of currentNodes) {
+  if (curr.kind === 'step' && curr.parentId && idMap.has(curr.parentId)) {
+   const newParentId = idMap.get(curr.parentId)!;
+   const matchingStep = beforeNodes.find(
+    p => p.kind === 'step' && p.parentId === newParentId && p.name === curr.name && p.stepType === curr.stepType
+   );
+   if (matchingStep) {
+    idMap.set(curr.id, matchingStep.id);
+   }
+  }
+ }
+
+ // Check specification nodes if provided and not yet mapped
+ if (specification && specification.nodes.length > 0) {
+  for (const specNode of specification.nodes) {
+   if (specNode.source && !matchedBefore.has(specNode.id)) {
+    const key = sourceIdentityKey(specNode);
+    if (key) {
+     const matchingCurr = currentNodes.filter(c => sourceIdentityKey(c) === key);
+     if (matchingCurr.length === 1 && !idMap.has(matchingCurr[0].id)) {
+      idMap.set(matchingCurr[0].id, specNode.id);
+     }
+    }
+   }
+  }
+ }
+
+ // Remap nodes, edges, requirements
+ const remappedNodes: ProgramNode[] = currentNodes.map(node => {
+  const newId = idMap.get(node.id) || node.id;
+  const updated: any = { ...node, id: newId };
+  if (node.parentId) {
+   updated.parentId = idMap.get(node.parentId) || node.parentId;
+  }
+  return NodeSchema.parse(updated);
+ }).sort((a, b) => a.id.localeCompare(b.id));
+
+ const remappedEdges: ProgramEdge[] = currentGraph.edges.map(edge => {
+  const source = idMap.get(edge.source) || edge.source;
+  const target = idMap.get(edge.target) || edge.target;
+  if (source === edge.source && target === edge.target) {
+   return edge;
+  }
+  const id = idFor(source + ':' + edge.kind + ':' + target + ':' + edge.label);
+  return {
+   ...edge,
+   id,
+   source,
+   target,
+  };
+ }).sort((a, b) => a.id.localeCompare(b.id));
+
+ const remappedRequirements = currentGraph.requirements.map(req => ({
+  ...req,
+  nodeIds: req.nodeIds.map(nid => idMap.get(nid) || nid),
+ }));
+
+ const nextGraph = GraphSchema.parse({
+  schemaVersion: currentGraph.schemaVersion,
+  nodes: remappedNodes,
+  edges: remappedEdges,
+  requirements: remappedRequirements,
+ });
+
+ return {
+  graph: nextGraph,
+  idMap,
+  ambiguous,
+  unambiguousMatches: idMap,
+ };
+}
+
 export interface AnalyzeOptions {
+ previousGraph?: Graph;
  capturedRevision?: CapturedRevision | Record<string, Buffer>;
  captureOptions?: CaptureOptions;
  prismaParserConfig?: PrismaAstConfig['parser'];
@@ -1075,6 +1410,7 @@ export class Analyzer {
  private prismaCache=new Map<string,{hash:string;parseResult:PrismaParseResult}>();
  private lastPrismaParserConfig?: PrismaAstConfig['parser'];
  private lastFiles?: Record<string, { hash: string; text: string }>;
+ private lastRoot?: string;
  private sequence=0;
 
  constructor(options?: { prismaParserConfig?: PrismaAstConfig['parser'] }) {
@@ -2394,7 +2730,11 @@ export class Analyzer {
    }
   }
   const dedup=Array.from(new Map(diagnostics.map(d=>[JSON.stringify(d),d])).values());
-  const graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id)),requirements:[]};
+  let graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id)),requirements:[]};
+  if (options?.previousGraph) {
+   const reconciled = reconcileGraphIdentities(options.previousGraph, graph);
+   graph = reconciled.graph;
+  }
   const isCurrent = !isIncomplete && !dedup.some(d=>d.severity!=='info');
   const status: 'current' | 'partial' = isCurrent ? 'current' : 'partial';
   const inferredCount = Math.max(

@@ -221,6 +221,37 @@ export function sourceIdentityKey(node:Pick<ProgramNode,'kind'|'source'>):string
   if(!source.symbol)return undefined;
   return JSON.stringify([source.path,node.kind,source.symbol]);
 }
+export const BindingCandidateSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  kind: z.enum(nodeKinds),
+  source: SourceSchema,
+  contract: z.string().default(''),
+  matchReason: z.string().optional(),
+}).strict();
+export type BindingCandidate = z.infer<typeof BindingCandidateSchema>;
+
+export const BindingReviewStatusSchema = z.enum(['unambiguous', 'ambiguous', 'unresolved']);
+export type BindingReviewStatus = z.infer<typeof BindingReviewStatusSchema>;
+
+export const BindingReviewRecordSchema = z.object({
+  nodeId: z.string().min(1),
+  nodeName: z.string().min(1),
+  kind: z.enum(nodeKinds),
+  policy: z.enum(policies),
+  status: BindingReviewStatusSchema,
+  currentBinding: SourceSchema.optional(),
+  contract: z.string().default(''),
+  baseline: z.object({
+    text: z.string().optional(),
+    contract: z.string().optional(),
+    source: SourceSchema.optional(),
+  }).optional(),
+  candidates: z.array(BindingCandidateSchema).default([]),
+  selectedCandidate: BindingCandidateSchema.optional(),
+  reason: z.string(),
+}).strict();
+export type BindingReviewRecord = z.infer<typeof BindingReviewRecordSchema>;
 const NonblankSchema=z.string().refine(value=>!!value.trim(),{message:'Must not be blank'});
 const CountSchema=z.number().int().nonnegative();
 export const AnalysisStatusSchema=z.enum(['updating','current','partial','stale']);
