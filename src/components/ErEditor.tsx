@@ -66,6 +66,7 @@ export const CARDINALITY_OPTIONS: { value: CardinalityType; label: string; descr
  */
 export function getMappedTableName(node: ProgramNode): string | undefined {
   if (node.kind !== 'entity') return undefined;
+  if (node.mappedName) return node.mappedName;
   if (node.description) {
     const match = node.description.match(/Database name:\s*([^\s;,\n]+)/i);
     if (match) return match[1];
@@ -161,6 +162,7 @@ export function createEntityNode(
     source: f.source,
   }));
 
+  const mappedTable = input.mappedTableName?.trim();
   const newNode: ProgramNode = {
     id: nodeId,
     kind: 'entity',
@@ -174,6 +176,7 @@ export function createEntityNode(
     instructions: '',
     outputPath: input.outputPath?.trim() || '',
     fields: formattedFields,
+    ...(mappedTable ? { mappedName: mappedTable } : {}),
   };
 
   const nextGraph: Graph = {
@@ -263,6 +266,10 @@ export function updateEntityNode(
       }))
     : existingNode.fields;
 
+  const mappedTable = updates.mappedTableName !== undefined
+    ? (updates.mappedTableName.trim() || undefined)
+    : existingNode.mappedName;
+
   const updatedNode: ProgramNode = {
     ...existingNode,
     name: nextName,
@@ -272,6 +279,7 @@ export function updateEntityNode(
     contract: updates.contract !== undefined ? updates.contract.trim() : existingNode.contract,
     outputPath: updates.outputPath !== undefined ? updates.outputPath.trim() : existingNode.outputPath,
     fields: nextFields,
+    mappedName: mappedTable,
   };
 
   const nextGraph: Graph = {
@@ -542,9 +550,14 @@ export function setCompositeKey(
     return f;
   });
 
+  const existingCompositeKeys = entity.compositeKeys || [];
+  const filteredKeys = existingCompositeKeys.filter(k => k.type !== keyType);
+  const updatedCompositeKeys = [...filteredKeys, { fields: fieldNames, type: keyType }];
+
   const updatedNode: ProgramNode = {
     ...entity,
     fields: nextFields,
+    compositeKeys: updatedCompositeKeys,
   };
 
   const nextGraph: Graph = {

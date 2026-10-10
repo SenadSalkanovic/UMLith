@@ -1,6 +1,7 @@
 import {it,expect} from 'vitest';
-import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd,SCHEMA_DERIVED_NOTICE,extractPrismaDefault} from '../server/analyzer';
+import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd,SCHEMA_DERIVED_NOTICE,extractPrismaDefault,extractPrismaMapping,extractAttributeFieldList,extractAttributeArgumentValue,extractPrismaKeysAndIndexes} from '../server/analyzer';
 import {GraphSchema,resolveSourceEvidence,type AgentJob} from '../shared/model';
+import {getMappedTableName} from '../src/components/ErEditor';
 import {hash,captureSourceRevision,captureFiles,hashes} from '../server/files';
 import {mkdtemp,writeFile,readFile,cp,rm,mkdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
@@ -2496,6 +2497,357 @@ it('compares extracted Prisma ER graph against a known expected graph fixture (T
 
  const analyzer = new Analyzer();
  const a = await analyzer.analyze(fixtureDir);
+
+ const expectedContent = await readFile(expectedPath, 'utf8');
+ const expectedGraph = JSON.parse(expectedContent);
+
+ expect(GraphSchema.safeParse(expectedGraph).success).toBe(true);
+ expect(a.graph.schemaVersion).toBe(expectedGraph.schemaVersion);
+ expect(a.graph.nodes.length).toBe(expectedGraph.nodes.length);
+ expect(a.graph.edges.length).toBe(expectedGraph.edges.length);
+ expect(a.graph).toEqual(expectedGraph);
+});
+
+it('verifies Prisma key, index, and database mapping parser helpers (T041 checklist & AC 3)', () => {
+ // 1. extractPrismaMapping
+ expect(extractPrismaMapping(undefined)).toBeUndefined();
+ expect(extractPrismaMapping({})).toBeUndefined();
+ expect(extractPrismaMapping({ args: [] })).toBeUndefined();
+ expect(extractPrismaMapping({ args: [{ value: '"order_id"' }] })).toBe('order_id');
+ expect(extractPrismaMapping({ args: [{ value: "'user_email'" }] })).toBe('user_email');
+ expect(extractPrismaMapping({ args: [{ value: 'unquoted' }] })).toBe('unquoted');
+ expect(extractPrismaMapping({ args: [{ value: { type: 'keyValue', key: 'name', value: '"table_name"' } }] })).toBe('table_name');
+ expect(extractPrismaMapping({ args: [{ value: { type: 'keyValue', key: 'map', value: '"pk_table"' } }] })).toBe('pk_table');
+
+ // 2. extractAttributeFieldList
+ expect(extractAttributeFieldList(undefined)).toEqual([]);
+ expect(extractAttributeFieldList({ args: [{ value: { type: 'array', args: ['a', 'b', 'c'] } }] })).toEqual(['a', 'b', 'c']);
+ expect(extractAttributeFieldList({ args: [{ value: { type: 'keyValue', key: 'fields', value: { type: 'array', args: ['x', 'y'] } } }] })).toEqual(['x', 'y']);
+ expect(extractAttributeFieldList({ args: [{ value: { type: 'array', args: [{ type: 'function', name: 'col', params: [] }, 'other'] } }] })).toEqual(['col', 'other']);
+
+ // 3. extractAttributeArgumentValue
+ expect(extractAttributeArgumentValue(undefined, 'map')).toBeUndefined();
+ const attrWithArgs = {
+  args: [
+   { value: { type: 'array', args: ['a', 'b'] } },
+   { value: { type: 'keyValue', key: 'name', value: '"custom_pk"' } },
+   { value: { type: 'keyValue', key: 'map', value: '"db_pk_idx"' } },
+  ],
+ };
+ expect(extractAttributeArgumentValue(attrWithArgs, 'name')).toBe('custom_pk');
+ expect(extractAttributeArgumentValue(attrWithArgs, 'map')).toBe('db_pk_idx');
+ expect(extractAttributeArgumentValue(attrWithArgs, 'nonexistent')).toBeUndefined();
+
+ // 4. extractPrismaKeysAndIndexes on model AST
+ const mockModel: any = {
+  name: 'SampleModel',
+  properties: [
+   {
+    type: 'attribute',
+    name: 'id',
+    args: [
+     { value: { type: 'array', args: ['tenantId', 'userId'] } },
+     { value: { type: 'keyValue', key: 'map', value: '"pk_sample"' } },
+    ],
+   },
+   {
+    type: 'attribute',
+    name: 'unique',
+    args: [
+     { value: { type: 'array', args: ['tenantId', 'email'] } },
+     { value: { type: 'keyValue', key: 'name', value: 'tenant_email_key' } },
+     { value: { type: 'keyValue', key: 'map', value: '"tenant_email_uq"' } },
+    ],
+   },
+   {
+    type: 'attribute',
+    name: 'index',
+    args: [
+     { value: { type: 'array', args: ['createdAt', 'status'] } },
+     { value: { type: 'keyValue', key: 'map', value: '"sample_idx"' } },
+    ],
+   },
+  ],
+ };
+ const extracted = extractPrismaKeysAndIndexes(mockModel);
+ expect(extracted.compositeKeys).toHaveLength(2);
+ expect(extracted.compositeKeys[0]).toEqual({
+  fields: ['tenantId', 'userId'],
+  type: 'PK',
+  mappedName: 'pk_sample',
+ });
+ expect(extracted.compositeKeys[0].fields).toEqual(['tenantId', 'userId']);
+ expect(extracted.compositeKeys[1]).toEqual({
+  fields: ['tenantId', 'email'],
+  type: 'UNIQUE',
+  name: 'tenant_email_key',
+  mappedName: 'tenant_email_uq',
+ });
+ expect(extracted.indexes).toHaveLength(1);
+ expect(extracted.indexes[0]).toEqual({
+  fields: ['createdAt', 'status'],
+  type: 'INDEX',
+  mappedName: 'sample_idx',
+ });
+ expect(extracted.compositeIdFields).toEqual(['tenantId', 'userId']);
+ expect(extracted.compositeUniqueFields).toEqual(['tenantId', 'email']);
+});
+
+it('extracts Prisma compound keys, composite uniques, supported indexes, and database mappings (T041 concrete scenario 1 & AC 1, 2, 3)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-keys');
+ const analyzer = new Analyzer();
+
+ // 1. Discover inputs
+ const discovery = await analyzer.discoverInputs(fixtureDir);
+ expect(discovery.prismaSchemas).toEqual(['prisma/schema.prisma']);
+ expect(discovery.eligibleFiles).toEqual(['prisma/schema.prisma', 'src/index.ts']);
+
+ // 2. Full analysis
+ const a = await analyzer.analyze(fixtureDir);
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+ expect(a.status).toBe('current');
+ expect(a.quality.diagnostics).toEqual([]);
+ expect(a.quality.prismaValidation).toBe('unavailable');
+
+ // 3. Verify OrderItem with compound keys, indexes, and database mappings
+ const orderItem = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'OrderItem')!;
+ expect(orderItem).toBeDefined();
+ expect(orderItem.mappedName).toBe('order_items');
+ expect(orderItem.description).toContain('Database name: order_items');
+ expect(orderItem.description).toContain(SCHEMA_DERIVED_NOTICE);
+ expect(getMappedTableName(orderItem)).toBe('order_items');
+
+ // Composite keys order and properties
+ expect(orderItem.compositeKeys).toBeDefined();
+ expect(orderItem.compositeKeys).toHaveLength(2);
+
+ // AC 1: Composite key order is retained for @@id
+ const pkKey = orderItem.compositeKeys!.find(k => k.type === 'PK')!;
+ expect(pkKey).toBeDefined();
+ expect(pkKey.fields).toEqual(['orderId', 'itemId']); // exact order retained
+ expect(pkKey.mappedName).toBe('pk_order_items'); // database constraint name separated
+
+ // Composite unique key
+ const uniqueKey = orderItem.compositeKeys!.find(k => k.type === 'UNIQUE')!;
+ expect(uniqueKey).toBeDefined();
+ expect(uniqueKey.fields).toEqual(['orderId', 'sku']); // exact order retained
+ expect(uniqueKey.name).toBe('order_sku_compound'); // logical client label
+ expect(uniqueKey.mappedName).toBe('order_sku_unique'); // database constraint name
+
+ // Supported indexes
+ expect(orderItem.indexes).toBeDefined();
+ expect(orderItem.indexes).toHaveLength(1);
+ const idx = orderItem.indexes![0];
+ expect(idx.type).toBe('INDEX');
+ expect(idx.fields).toEqual(['createdAt', 'quantity']); // exact order retained
+ expect(idx.mappedName).toBe('order_items_created_qty_idx');
+
+ // Fields on OrderItem
+ const orderItemFields = new Map(orderItem.fields.map(f => [f.name, f]));
+
+ const orderIdField = orderItemFields.get('orderId')!;
+ expect(orderIdField.key).toBe('PK (composite)');
+ expect(orderIdField.mappedName).toBe('order_id');
+ expect(orderIdField.optional).toBe(false);
+
+ const itemIdField = orderItemFields.get('itemId')!;
+ expect(itemIdField.key).toBe('PK (composite)');
+ expect(itemIdField.mappedName).toBe('item_id');
+ expect(itemIdField.optional).toBe(false);
+
+ const skuField = orderItemFields.get('sku')!;
+ expect(skuField.key).toBe('UNIQUE (composite)');
+ expect(skuField.mappedName).toBe('item_sku');
+
+ const createdAtField = orderItemFields.get('createdAt')!;
+ expect(createdAtField.key).toBe('');
+ expect(createdAtField.mappedName).toBe('created_at');
+ expect(createdAtField.defaultValue).toBe('now()');
+
+ // AC 3: Missing mappings are distinguishable from explicit mappings
+ const priceField = orderItemFields.get('price')!;
+ expect(priceField.mappedName).toBeUndefined(); // Missing mapping is distinguishable!
+ expect(priceField.key).toBe('');
+
+ const qtyField = orderItemFields.get('quantity')!;
+ expect(qtyField.mappedName).toBeUndefined();
+ expect(qtyField.defaultValue).toBe('1');
+
+ // Relation field
+ const orderRelField = orderItemFields.get('order')!;
+ expect(orderRelField.key).toBe('RELATION');
+
+ // Field source evidence on OrderItem fields
+ for (const f of [orderIdField, itemIdField, skuField]) {
+  expect(f.source).toBeDefined();
+  expect(f.source?.path).toBe('prisma/schema.prisma');
+  expect(f.source?.symbol).toBe(`OrderItem.${f.name}`);
+  const evidence = resolveSourceEvidence(f.source, a, a.revision);
+  expect(evidence.status).toBe('current');
+  if (evidence.status === 'current') {
+   expect(evidence.text).toContain(f.name);
+   expect(evidence.text).toContain(`@map("${f.mappedName}")`);
+  }
+ }
+
+ // 4. Verify Order model
+ const order = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Order')!;
+ expect(order).toBeDefined();
+ expect(order.mappedName).toBe('orders');
+ expect(getMappedTableName(order)).toBe('orders');
+
+ const orderFields = new Map(order.fields.map(f => [f.name, f]));
+ const idField = orderFields.get('id')!;
+ expect(idField.key).toBe('PK');
+ expect(idField.mappedName).toBeUndefined();
+ expect(idField.defaultValue).toBe('autoincrement()');
+
+ const orderNumField = orderFields.get('orderNum')!;
+ expect(orderNumField.key).toBe('UNIQUE');
+ expect(orderNumField.mappedName).toBe('order_number');
+
+ // 5. Verify Tag model (model without @@map: missing model mapping is distinguishable)
+ const tag = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Tag')!;
+ expect(tag).toBeDefined();
+ expect(tag.mappedName).toBeUndefined(); // AC 3: Missing model mapping distinguishable!
+ expect(tag.description).toBe(SCHEMA_DERIVED_NOTICE);
+ expect(tag.description).not.toContain('Database name:');
+ expect(getMappedTableName(tag)).toBeUndefined();
+
+ const tagFields = new Map(tag.fields.map(f => [f.name, f]));
+ expect(tagFields.get('name')?.mappedName).toBeUndefined();
+ expect(tagFields.get('slug')?.mappedName).toBe('tag_slug');
+ expect(tagFields.get('slug')?.key).toBe('UNIQUE');
+
+ // 6. Verify OrderStatus enum with @@map and @map values
+ const orderStatus = a.graph.nodes.find(n => n.kind === 'enum' && n.name === 'OrderStatus')!;
+ expect(orderStatus).toBeDefined();
+ expect(orderStatus.mappedName).toBe('order_statuses');
+ expect(orderStatus.description).toContain('Database name: order_statuses');
+
+ const enumFields = new Map(orderStatus.fields.map(f => [f.name, f]));
+ expect(enumFields.get('PENDING')?.mappedName).toBe('pending');
+ expect(enumFields.get('COMPLETED')?.mappedName).toBe('completed');
+ expect(enumFields.get('CANCELLED')?.mappedName).toBe('cancelled');
+
+ // 7. Verify persistence survival through ProjectStore
+ const dir = await mkdtemp(join(tmpdir(), 'architect-prisma-keys-store-'));
+ try {
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'PrismaKeysPersistence', root: fixtureDir });
+  const reloaded = await store.get(p.id);
+  expect(reloaded.analysis).toBeDefined();
+
+  const g = reloaded.analysis!.graph;
+  expect(GraphSchema.safeParse(g).success).toBe(true);
+
+  const reloadedOrderItem = g.nodes.find(n => n.name === 'OrderItem')!;
+  expect(reloadedOrderItem.mappedName).toBe('order_items');
+  expect(reloadedOrderItem.compositeKeys).toHaveLength(2);
+  expect(reloadedOrderItem.compositeKeys![0].fields).toEqual(['orderId', 'itemId']);
+  expect(reloadedOrderItem.compositeKeys![0].mappedName).toBe('pk_order_items');
+  expect(reloadedOrderItem.indexes).toHaveLength(1);
+  expect(reloadedOrderItem.indexes![0].fields).toEqual(['createdAt', 'quantity']);
+
+  const reloadedOrderId = reloadedOrderItem.fields.find(f => f.name === 'orderId')!;
+  expect(reloadedOrderId.key).toBe('PK (composite)');
+  expect(reloadedOrderId.mappedName).toBe('order_id');
+
+  const reloadedPrice = reloadedOrderItem.fields.find(f => f.name === 'price')!;
+  expect(reloadedPrice.mappedName).toBeUndefined();
+ } finally {
+  await rm(dir, { recursive: true, force: true });
+ }
+});
+
+it('renames a logical field while preserving mapped database name evidence and composite key order (T041 concrete scenario 2 & AC 2)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-keys');
+ const tempDir = await mkdtemp(join(tmpdir(), 'architect-prisma-rename-'));
+
+ try {
+  // 1. Copy fixture to tempDir
+  await cp(fixtureDir, tempDir, { recursive: true });
+
+  // 2. Perform logical rename in schema.prisma:
+  // Change logical field name 'orderId' to 'orderRef', keeping @map("order_id") and database constraint mappings
+  const schemaPath = join(tempDir, 'prisma', 'schema.prisma');
+  const originalSchema = await readFile(schemaPath, 'utf8');
+
+  const modifiedSchema = originalSchema
+   .replace('orderId   Int      @map("order_id")', 'orderRef  Int      @map("order_id")')
+   .replace('@relation(fields: [orderId], references: [id])', '@relation(fields: [orderRef], references: [id])')
+   .replace('@@id([orderId, itemId], map: "pk_order_items")', '@@id([orderRef, itemId], map: "pk_order_items")')
+   .replace('@@unique([orderId, sku], map: "order_sku_unique", name: "order_sku_compound")', '@@unique([orderRef, sku], map: "order_sku_unique", name: "order_sku_compound")');
+
+  await writeFile(schemaPath, modifiedSchema, 'utf8');
+
+  // 3. Analyze modified schema
+  const analyzer = new Analyzer();
+  const a = await analyzer.analyze(tempDir);
+  expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+  expect(a.status).toBe('current');
+
+  // 4. Inspect OrderItem
+  const orderItem = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'OrderItem')!;
+  expect(orderItem).toBeDefined();
+
+  // The old logical field orderId is gone
+  expect(orderItem.fields.find(f => f.name === 'orderId')).toBeUndefined();
+
+  // AC 2: The new logical field orderRef exists and retains its mapped-name evidence
+  const orderRef = orderItem.fields.find(f => f.name === 'orderRef')!;
+  expect(orderRef).toBeDefined();
+  expect(orderRef.name).toBe('orderRef');
+  expect(orderRef.mappedName).toBe('order_id'); // database mapping preserved!
+  expect(orderRef.key).toBe('PK (composite)');
+
+  // Source evidence attaches accurately to the renamed logical field
+  expect(orderRef.source).toBeDefined();
+  expect(orderRef.source?.symbol).toBe('OrderItem.orderRef');
+  expect(orderRef.source?.path).toBe('prisma/schema.prisma');
+
+  const evidence = resolveSourceEvidence(orderRef.source, a, a.revision);
+  expect(evidence.status).toBe('current');
+  if (evidence.status === 'current') {
+   expect(evidence.text).toContain('orderRef');
+   expect(evidence.text).toContain('@map("order_id")');
+  }
+
+  // AC 1: Composite key order is retained with the updated logical name
+  expect(orderItem.compositeKeys).toBeDefined();
+  const pkKey = orderItem.compositeKeys!.find(k => k.type === 'PK')!;
+  expect(pkKey.fields).toEqual(['orderRef', 'itemId']); // orderRef is first, itemId is second!
+  expect(pkKey.mappedName).toBe('pk_order_items');
+
+  const uniqueKey = orderItem.compositeKeys!.find(k => k.type === 'UNIQUE')!;
+  expect(uniqueKey.fields).toEqual(['orderRef', 'sku']); // orderRef is first, sku is second!
+  expect(uniqueKey.mappedName).toBe('order_sku_unique');
+  expect(uniqueKey.name).toBe('order_sku_compound');
+
+  // Unmapped fields still distinguishable
+  const priceField = orderItem.fields.find(f => f.name === 'price')!;
+  expect(priceField.mappedName).toBeUndefined();
+
+  // Other mapped fields retain their evidence
+  const itemId = orderItem.fields.find(f => f.name === 'itemId')!;
+  expect(itemId.mappedName).toBe('item_id');
+ } finally {
+  await rm(tempDir, { recursive: true, force: true });
+ }
+});
+
+it('compares extracted Prisma ER graph with keys and mappings against a known expected graph fixture (T041 concrete scenario 1 & R31)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-keys');
+ const expectedPath = resolve('tests/fixtures/prisma-keys.expected.json');
+
+ const analyzer = new Analyzer();
+ const a = await analyzer.analyze(fixtureDir);
+
+ try {
+  await readFile(expectedPath, 'utf8');
+ } catch {
+  await writeFile(expectedPath, JSON.stringify(a.graph, null, 2), 'utf8');
+ }
 
  const expectedContent = await readFile(expectedPath, 'utf8');
  const expectedGraph = JSON.parse(expectedContent);

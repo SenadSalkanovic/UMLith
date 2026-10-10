@@ -19,6 +19,13 @@ export const NodeFieldSchema = z.object({
   source: SourceSchema.optional(),
 });
 export type NodeField = z.infer<typeof NodeFieldSchema>;
+export const KeyDefinitionSchema = z.object({
+  fields: z.array(z.string()),
+  type: z.enum(['PK', 'UNIQUE', 'INDEX']),
+  name: z.string().optional(),
+  mappedName: z.string().optional(),
+});
+export type KeyDefinition = z.infer<typeof KeyDefinitionSchema>;
 export const NodeSchema = z.object({
   id: z.string().min(1), kind: z.enum(nodeKinds), name: z.string().min(1),
   parentId: z.string().min(1).optional(), description: z.string().default(''),
@@ -32,6 +39,9 @@ export const NodeSchema = z.object({
   fields: z.array(NodeFieldSchema).default([]),
   stepType: z.enum(['operation','call','condition','loop','try','throw','return','opaque']).optional(),
   baseline: z.object({ text:z.string().optional(), contract:z.string().optional(), source:SourceSchema.optional() }).optional(),
+  mappedName: z.string().optional(),
+  compositeKeys: z.array(KeyDefinitionSchema).optional(),
+  indexes: z.array(KeyDefinitionSchema).optional(),
 }).superRefine((node,ctx)=>{
   if(node.policy==='frozen-implementation') {
     if(!node.source)ctx.addIssue({code:'custom',path:['source'],message:'Frozen implementation requires a source binding'});

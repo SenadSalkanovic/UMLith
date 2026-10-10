@@ -11,7 +11,7 @@ import {
 } from '@mrleebo/prisma-ast';
 import {resolve,relative,basename,dirname} from 'node:path';
 import {performance} from 'node:perf_hooks';
-import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge} from '../shared/model';
+import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge,type KeyDefinition} from '../shared/model';
 import {captureFiles,captureSourceRevision,isRevisionIncomplete,type CaptureOptions,type CapturedRevision,scanProjectDirectory,hash,AppError} from './files';
 const idFor=(key:string)=>hash(key).slice(0,24);
 const normalize=(value:string)=>value.replace(/\s+/g,' ').trim();
@@ -119,6 +119,138 @@ export function extractPrismaDefault(attribute: any): string | undefined {
   return String(val);
  }
  return String(val);
+}
+
+export function extractPrismaMapping(attribute: any): string | undefined {
+ if (!attribute || !attribute.args || !attribute.args.length) return undefined;
+ const first = attribute.args[0];
+ let val = first?.value !== undefined ? first.value : first;
+ if (val && typeof val === 'object' && val.type === 'keyValue') {
+  val = val.value;
+ }
+ if (typeof val === 'string') {
+  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+   if (val.length >= 2) return val.slice(1, -1);
+  }
+  return val;
+ }
+ return undefined;
+}
+
+export function extractAttributeFieldList(attribute: any): string[] {
+ if (!attribute || !attribute.args || !attribute.args.length) return [];
+ for (const argItem of attribute.args) {
+  const val = argItem?.value !== undefined ? argItem.value : argItem;
+  if (val?.type === 'array' && Array.isArray(val.args)) {
+   return val.args.map((x: any) => {
+    if (typeof x === 'string') return x;
+    if (x && typeof x === 'object' && typeof x.name === 'string') return x.name;
+    return String(x);
+   });
+  }
+  if (val?.type === 'keyValue' && val.key === 'fields') {
+   const innerVal = val.value;
+   if (innerVal?.type === 'array' && Array.isArray(innerVal.args)) {
+    return innerVal.args.map((x: any) => {
+     if (typeof x === 'string') return x;
+     if (x && typeof x === 'object' && typeof x.name === 'string') return x.name;
+     return String(x);
+    });
+   }
+  }
+ }
+ return [];
+}
+
+export function extractAttributeArgumentValue(attribute: any, key: string): string | undefined {
+ if (!attribute || !attribute.args) return undefined;
+ for (const argItem of attribute.args) {
+  const val = argItem?.value !== undefined ? argItem.value : argItem;
+  if (val?.type === 'keyValue' && val.key === key) {
+   let raw = val.value;
+   if (typeof raw === 'string') {
+    if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+     if (raw.length >= 2) return raw.slice(1, -1);
+    }
+    return raw;
+   }
+   return String(raw);
+  }
+ }
+ return undefined;
+}
+
+export function extractPrismaKeysAndIndexes(model: Model): {
+ compositeKeys: KeyDefinition[];
+ indexes: KeyDefinition[];
+ compositeIdFields: string[];
+ singleIdFields: string[];
+ compositeUniqueFields: string[];
+ singleUniqueFields: string[];
+} {
+ const compositeKeys: KeyDefinition[] = [];
+ const indexes: KeyDefinition[] = [];
+ const compositeIdFields: string[] = [];
+ const singleIdFields: string[] = [];
+ const compositeUniqueFields: string[] = [];
+ const singleUniqueFields: string[] = [];
+
+ const attributes = model.properties.filter((p): p is any => p.type === 'attribute');
+
+ for (const attr of attributes) {
+  if (attr.name === 'id') {
+   const fieldList = extractAttributeFieldList(attr);
+   const name = extractAttributeArgumentValue(attr, 'name');
+   const map = extractAttributeArgumentValue(attr, 'map');
+   if (fieldList.length > 1) {
+    compositeKeys.push({
+     fields: fieldList,
+     type: 'PK',
+     ...(name ? { name } : {}),
+     ...(map ? { mappedName: map } : {}),
+    });
+    compositeIdFields.push(...fieldList);
+   } else if (fieldList.length === 1) {
+    singleIdFields.push(fieldList[0]);
+   }
+  } else if (attr.name === 'unique') {
+   const fieldList = extractAttributeFieldList(attr);
+   const name = extractAttributeArgumentValue(attr, 'name');
+   const map = extractAttributeArgumentValue(attr, 'map');
+   if (fieldList.length > 1) {
+    compositeKeys.push({
+     fields: fieldList,
+     type: 'UNIQUE',
+     ...(name ? { name } : {}),
+     ...(map ? { mappedName: map } : {}),
+    });
+    compositeUniqueFields.push(...fieldList);
+   } else if (fieldList.length === 1) {
+    singleUniqueFields.push(fieldList[0]);
+   }
+  } else if (attr.name === 'index') {
+   const fieldList = extractAttributeFieldList(attr);
+   const name = extractAttributeArgumentValue(attr, 'name');
+   const map = extractAttributeArgumentValue(attr, 'map');
+   if (fieldList.length > 0) {
+    indexes.push({
+     fields: fieldList,
+     type: 'INDEX',
+     ...(name ? { name } : {}),
+     ...(map ? { mappedName: map } : {}),
+    });
+   }
+  }
+ }
+
+ return {
+  compositeKeys,
+  indexes,
+  compositeIdFields,
+  singleIdFields,
+  compositeUniqueFields,
+  singleUniqueFields,
+ };
 }
 
 export function findPrismaBlockEnd(text: string, startOffset: number): number {
@@ -1414,11 +1546,24 @@ export class Analyzer {
      const id=idFor('entity:'+path+':'+model.name);
      const fields=model.properties.filter((p):p is Field=>p.type==='field');
      const foreign=new Set(fields.flatMap(f=>strings(arg(attr(f,'relation'),'fields'))));
-     const compound=new Set(model.properties.filter(p=>p.type==='attribute'&&p.name==='id').flatMap((p:any)=>strings(p.args?.[0]?.value)));
+     const {
+      compositeKeys,
+      indexes,
+      compositeIdFields,
+      singleIdFields,
+      compositeUniqueFields,
+      singleUniqueFields,
+     } = extractPrismaKeysAndIndexes(model);
+     const compositeIdSet = new Set(compositeIdFields);
+     const singleIdSet = new Set(singleIdFields);
+     const compositeUniqueSet = new Set(compositeUniqueFields);
+     const singleUniqueSet = new Set(singleUniqueFields);
+
      const location=model.location;const startOffset=location?.startOffset??files[path].text.indexOf('model '+model.name);
      const blockEnd=findPrismaBlockEnd(files[path].text,startOffset);
      const end=blockEnd > startOffset ? blockEnd : (location?.endOffset??startOffset)+1;
      const mapped=model.properties.find(p=>p.type==='attribute'&&p.name==='map') as any;
+     const modelMappedName=extractPrismaMapping(mapped);
      const modelText=files[path].text.slice(startOffset,end);
      const extractedFields=fields.map(f=>{
       const escapedName=f.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
@@ -1434,22 +1579,47 @@ export class Analyzer {
        const fEnd=startOffset+lineEnd;
        fieldSource=source(path,fStart,fEnd,`${model.name}.${f.name}`);
       }
+      let key = '';
+      if(attr(f,'id') || singleIdSet.has(f.name)){
+       key = 'PK';
+      }else if(compositeIdSet.has(f.name)){
+       key = 'PK (composite)';
+      }else if(compositeUniqueSet.has(f.name)){
+       key = 'UNIQUE (composite)';
+      }else if(foreign.has(f.name)){
+       key = 'FK';
+      }else if(attr(f,'unique') || singleUniqueSet.has(f.name)){
+       key = 'UNIQUE';
+      }else if(modelsByName.has(String(f.fieldType))){
+       key = 'RELATION';
+      }
       return {
        name:f.name,
        type:String(f.fieldType)+(f.array?'[]':''),
        optional:!!f.optional,
-       key:attr(f,'id')||compound.has(f.name)?'PK':foreign.has(f.name)?'FK':attr(f,'unique')?'UNIQUE':modelsByName.has(String(f.fieldType))?'RELATION':'',
-       mappedName:attr(f,'map')?.args?.[0]?.value as string|undefined,
+       key,
+       mappedName:extractPrismaMapping(attr(f,'map')),
        defaultValue:extractPrismaDefault(attr(f,'default')),
        source:fieldSource,
       };
      });
-     nodes.set(id,NodeSchema.parse({id,kind:'entity',name:model.name,parentId:mid,provenance:'extracted',source:source(path,startOffset,end,model.name),outputPath:path,
+     const nodePayload:any = {
+      id,kind:'entity',name:model.name,parentId:mid,provenance:'extracted',source:source(path,startOffset,end,model.name),outputPath:path,
       contract:JSON.stringify(model.properties.filter(p=>p.type==='field'||p.type==='attribute').map((p:any)=>({name:p.name,fieldType:p.fieldType,optional:p.optional,array:p.array,attributes:p.attributes,args:p.args})),(key,value)=>key==='location'||key==='comment'?undefined:value),
-      description:mapped?'Database name: '+mapped.args?.[0]?.value+' · '+SCHEMA_DERIVED_NOTICE:SCHEMA_DERIVED_NOTICE,
+      description:modelMappedName?'Database name: '+modelMappedName+' · '+SCHEMA_DERIVED_NOTICE:SCHEMA_DERIVED_NOTICE,
       instructions:SCHEMA_DERIVED_NOTICE,
       fields:extractedFields,
-     }));
+     };
+     if(modelMappedName){
+      nodePayload.mappedName=modelMappedName;
+     }
+     if(compositeKeys.length>0){
+      nodePayload.compositeKeys=compositeKeys;
+     }
+     if(indexes.length>0){
+      nodePayload.indexes=indexes;
+     }
+     nodes.set(id,NodeSchema.parse(nodePayload));
     }
     for(const model of models){
      for(const f of model.properties.filter((p):p is Field=>p.type==='field')){
@@ -1470,6 +1640,8 @@ export class Analyzer {
      const end=blockEnd > startOffset ? blockEnd : (enumLoc?.endOffset??startOffset)+1;
      const enumText=files[path].text.slice(startOffset,end);
      const enumId=idFor('enum:'+path+':'+block.name);
+     const enumMappedAttr=block.enumerators.find((p:any)=>p.type==='attribute'&&p.name==='map');
+     const enumMappedName=extractPrismaMapping(enumMappedAttr);
      const enumeratorFields=block.enumerators.filter((p:any)=>p.type==='enumerator').map((p:any)=>{
       const escapedName=p.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
       const re=new RegExp('(^|\\n)[ \\t]*('+escapedName+')\\b');
@@ -1484,9 +1656,10 @@ export class Analyzer {
        const eEnd=startOffset+lineEnd;
        enumSource=source(path,eStart,eEnd,`${block.name}.${p.name}`);
       }
-      return {name:p.name,type:'enum',source:enumSource};
+      const memberMapped=extractPrismaMapping(p.attributes?.find((a:any)=>a.name==='map'));
+      return {name:p.name,type:'enum',source:enumSource,mappedName:memberMapped};
      });
-     nodes.set(enumId,NodeSchema.parse({
+     const enumPayload:any = {
       id:enumId,
       kind:'enum',
       name:block.name,
@@ -1494,10 +1667,14 @@ export class Analyzer {
       provenance:'extracted',
       outputPath:path,
       source:source(path,startOffset,end,block.name),
-      description:SCHEMA_DERIVED_NOTICE,
+      description:enumMappedName?'Database name: '+enumMappedName+' · '+SCHEMA_DERIVED_NOTICE:SCHEMA_DERIVED_NOTICE,
       instructions:SCHEMA_DERIVED_NOTICE,
       fields:enumeratorFields,
-     }));
+     };
+     if(enumMappedName){
+      enumPayload.mappedName=enumMappedName;
+     }
+     nodes.set(enumId,NodeSchema.parse(enumPayload));
     }
     analyzed++;
    }catch(error){
