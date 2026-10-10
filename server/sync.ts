@@ -1,8 +1,8 @@
 import {EventEmitter} from 'node:events';
 import chokidar,{type FSWatcher} from 'chokidar';
 import {basename,relative} from 'node:path';
-import type {Analysis} from '../shared/model';
-import {graphDelta,emptyGraph,GRAPH_SCHEMA_VERSION,AnalysisSchema,GraphUpdateSchema} from '../shared/model';
+import type {Analysis,GraphUpdate} from '../shared/model';
+import {graphDelta,emptyGraph,GRAPH_SCHEMA_VERSION,AnalysisSchema,GraphUpdateSchema,createGraphUpdate} from '../shared/model';
 import {AnalysisWorker} from './worker';
 import {ProjectStore} from './store';
 import {captureFiles,hashes,isPathExcluded} from './files';
@@ -373,20 +373,7 @@ export class SyncService extends EventEmitter {
    const currentBefore = latestP.analysis;
    result.sequence = (currentBefore?.sequence || 0) + 1;
 
-   const update = GraphUpdateSchema.parse({
-    type: 'analysis',
-    schemaVersion: GRAPH_SCHEMA_VERSION,
-    baseRevision: currentBefore?.revision || null,
-    baseSequence: currentBefore?.sequence || 0,
-    sequence: result.sequence,
-    revision: result.revision,
-    analyzedAt: result.analyzedAt,
-    durationMs: result.durationMs,
-    status: result.status,
-    quality: result.quality,
-    staleEvidence: result.staleEvidence,
-    delta: graphDelta(currentBefore?.graph || emptyGraph(), result.graph),
-   });
+   const update = createGraphUpdate(currentBefore, result);
 
    await this.emitBeforePersist(id, { generation, revision: result.revision, result });
    if (session.closed || generation < session.generation || generation <= session.committedGeneration) {
@@ -497,6 +484,13 @@ export class SyncService extends EventEmitter {
 
  getWatcher(id: string): FSWatcher | undefined {
   return this.sessions.get(id)?.watcher;
+ }
+
+ createGraphUpdate(
+  currentBefore: Pick<Analysis, 'revision' | 'sequence' | 'graph'> | undefined,
+  result: Analysis
+ ): GraphUpdate {
+  return createGraphUpdate(currentBefore, result);
  }
 
  async stop(id: string): Promise<void> {

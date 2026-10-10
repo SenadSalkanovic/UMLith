@@ -326,10 +326,85 @@ export function graphDelta(before:Graph,after:Graph):GraphDelta {
   };
 }
 // A mismatch requires a fresh snapshot; never apply a delta to an unrelated graph.
+export class SnapshotReconciliationError extends Error {
+  constructor(public readonly reason: 'revision' | 'sequence', message: string) {
+    super(message);
+    this.name = 'SnapshotReconciliationError';
+  }
+}
+
+export function createGraphUpdate(
+  before: Pick<Analysis, 'revision' | 'sequence' | 'graph'> | undefined,
+  next: Pick<Analysis, 'revision' | 'sequence' | 'status' | 'quality' | 'durationMs' | 'analyzedAt' | 'graph'> & { staleEvidence?: Analysis['staleEvidence'] }
+): GraphUpdate {
+  return GraphUpdateSchema.parse({
+    type: 'analysis',
+    schemaVersion: GRAPH_SCHEMA_VERSION,
+    baseRevision: before?.revision || null,
+    baseSequence: before?.sequence || 0,
+    sequence: next.sequence,
+    revision: next.revision,
+    analyzedAt: next.analyzedAt,
+    durationMs: next.durationMs,
+    status: next.status,
+    quality: next.quality,
+    staleEvidence: next.staleEvidence,
+    delta: graphDelta(before?.graph || emptyGraph(), next.graph),
+  });
+}
+
+export function reconstructAnalysisSnapshot(
+  before: Pick<Analysis, 'revision' | 'sequence' | 'graph'> | undefined,
+  input: unknown
+): Pick<Analysis, 'revision' | 'sequence' | 'status' | 'quality' | 'durationMs' | 'analyzedAt' | 'staleEvidence' | 'graph'> {
+  const update = GraphUpdateSchema.parse(input);
+  const graph = applyGraphUpdate(before, update);
+  return {
+    revision: update.revision,
+    sequence: update.sequence,
+    status: update.status,
+    quality: update.quality,
+    durationMs: update.durationMs,
+    analyzedAt: update.analyzedAt,
+    staleEvidence: update.staleEvidence,
+    graph,
+  };
+}
+
+export function deleteNodeWithIncidentEdges(graph: Graph, nodeId: string): Graph {
+  const toDelete = new Set<string>([nodeId]);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const node of graph.nodes) {
+      if (!toDelete.has(node.id) && node.parentId && toDelete.has(node.parentId)) {
+        toDelete.add(node.id);
+        added = true;
+      }
+    }
+  }
+  const nextNodes = graph.nodes.filter(n => !toDelete.has(n.id));
+  const nextEdges = graph.edges.filter(e => !toDelete.has(e.source) && !toDelete.has(e.target));
+  const remainingEdgeIds = new Set(nextEdges.map(e => e.id));
+  const nextRequirements = graph.requirements.map(r => ({
+    ...r,
+    nodeIds: r.nodeIds.filter(id => !toDelete.has(id)),
+    edgeIds: r.edgeIds.filter(id => remainingEdgeIds.has(id)),
+  }));
+  return GraphSchema.parse({
+    schemaVersion: graph.schemaVersion,
+    nodes: nextNodes,
+    edges: nextEdges,
+    requirements: nextRequirements,
+  });
+}
+
 export function applyGraphUpdate(before:Pick<Analysis,'revision'|'sequence'|'graph'>|undefined,input:unknown):Graph {
   const update=GraphUpdateSchema.parse(input);
-  if((before?.revision||null)!==update.baseRevision)throw new Error('Graph update base revision mismatch; fetch a fresh snapshot');
-  if((before?.sequence??0)!==update.baseSequence)throw new Error('Graph update base sequence mismatch; fetch a fresh snapshot');
+  if((before?.revision||null)!==update.baseRevision)
+    throw new SnapshotReconciliationError('revision', 'Graph update base revision mismatch; fetch a fresh snapshot');
+  if((before?.sequence??0)!==update.baseSequence)
+    throw new SnapshotReconciliationError('sequence', 'Graph update base sequence mismatch; fetch a fresh snapshot');
   const graph=GraphSchema.parse(before?.graph??emptyGraph());
   const merge=<T extends {id:string}>(items:T[],changed:T[],deleted:string[])=>{
     const records=new Map(items.map(item=>[item.id,item]));
