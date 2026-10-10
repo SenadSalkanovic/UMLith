@@ -9,10 +9,14 @@ import {
  type PrismaAstConfig,
  type Schema as PrismaSchemaAst,
 } from '@mrleebo/prisma-ast';
-import {resolve,relative,basename,dirname} from 'node:path';
+import {constants} from 'node:fs';
+import {access,mkdtemp,symlink,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {resolve,relative,basename,dirname,join} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge,type KeyDefinition} from '../shared/model';
-import {captureFiles,captureSourceRevision,isRevisionIncomplete,type CaptureOptions,type CapturedRevision,scanProjectDirectory,hash,AppError} from './files';
+import {captureFiles,captureSourceRevision,isRevisionIncomplete,type CaptureOptions,type CapturedRevision,scanProjectDirectory,hash,AppError,copySnapshot} from './files';
+import {runSandbox,sandboxAvailable,type SandboxExecutor} from './sandbox';
 const idFor=(key:string)=>hash(key).slice(0,24);
 const normalize=(value:string)=>value.replace(/\s+/g,' ').trim();
 
@@ -835,10 +839,183 @@ export async function discoverAnalysisInputs(
  };
 }
 
+export type PrismaValidationStatus = 'passed' | 'failed' | 'unavailable' | 'not-applicable';
+
+export interface PrismaValidationResult {
+ status: PrismaValidationStatus;
+ reason?: string;
+ output?: string;
+ exitCode?: number;
+ diagnostics: Diagnostic[];
+}
+
+export interface PrismaValidationOptions {
+ timeoutMs?: number;
+ schemaPaths?: string[];
+ sandboxExecutor?: SandboxExecutor;
+}
+
+export async function resolveProjectPrismaValidator(root: string): Promise<string | null> {
+ const resolvedRoot = resolve(root);
+ const candidate = join(resolvedRoot, 'node_modules', '.bin', 'prisma');
+ try {
+  await access(candidate, constants.F_OK);
+  return candidate;
+ } catch {
+  if (process.platform === 'win32') {
+   const candidateCmd = join(resolvedRoot, 'node_modules', '.bin', 'prisma.cmd');
+   try {
+    await access(candidateCmd, constants.F_OK);
+    return candidateCmd;
+   } catch {}
+  }
+  return null;
+ }
+}
+
+export async function validatePrismaSchemaInIsolation(
+ root: string,
+ options?: PrismaValidationOptions
+): Promise<PrismaValidationResult> {
+ const resolvedRoot = resolve(root);
+
+ let schemas = options?.schemaPaths;
+ if (!schemas) {
+  try {
+   const discovery = await discoverAnalysisInputs(resolvedRoot);
+   schemas = discovery.prismaSchemas;
+  } catch {
+   schemas = [];
+  }
+ }
+ if (!schemas || schemas.length === 0) {
+  return {
+   status: 'not-applicable',
+   diagnostics: [],
+  };
+ }
+
+ const validator = await resolveProjectPrismaValidator(resolvedRoot);
+ if (!validator) {
+  return {
+   status: 'unavailable',
+   reason: 'Project-version Prisma validator is not available (node_modules/.bin/prisma not found). Global Prisma CLI will not be substituted.',
+   diagnostics: [],
+  };
+ }
+
+ const isolated = await sandboxAvailable();
+ if (!isolated) {
+  return {
+   status: 'unavailable',
+   reason: 'Bubblewrap isolation is unavailable. Original project files cannot be protected during integrated execution.',
+   diagnostics: [],
+  };
+ }
+
+ const isolatedDir = await mkdtemp(join(tmpdir(), 'architect-prisma-val-'));
+ try {
+  await copySnapshot(resolvedRoot, isolatedDir);
+
+  const origNodeModules = join(resolvedRoot, 'node_modules');
+  const destNodeModules = join(isolatedDir, 'node_modules');
+  try {
+   await access(origNodeModules, constants.F_OK);
+   await symlink(origNodeModules, destNodeModules, 'dir');
+  } catch {}
+
+  const isolatedValidator = join(destNodeModules, '.bin', 'prisma');
+  const timeoutMs = options?.timeoutMs ?? 30000;
+
+  let combinedOutput = '';
+  let allPassed = true;
+  let exitCode = 0;
+
+  for (const schemaPath of schemas) {
+   const args = ['validate', '--schema', schemaPath];
+   const res = options?.sandboxExecutor
+    ? await options.sandboxExecutor(isolatedValidator, args, isolatedDir, {
+       writable: true,
+       network: false,
+       timeoutMs,
+       env: {
+        PATH: process.env.PATH,
+        HOME: isolatedDir,
+        TMPDIR: '/tmp',
+        CI: '1',
+        NODE_ENV: 'test',
+       },
+      })
+    : await runSandbox(isolatedValidator, args, isolatedDir, {
+       writable: true,
+       network: false,
+       timeoutMs,
+       env: {
+        PATH: process.env.PATH,
+        HOME: isolatedDir,
+        TMPDIR: '/tmp',
+        CI: '1',
+        NODE_ENV: 'test',
+       },
+      });
+
+   combinedOutput += (combinedOutput ? '\n' : '') + res.output;
+   if (res.code !== 0) {
+    allPassed = false;
+    exitCode = res.code;
+    break;
+   }
+  }
+
+  if (allPassed) {
+   return {
+    status: 'passed',
+    output: combinedOutput,
+    exitCode: 0,
+    diagnostics: [],
+   };
+  } else {
+   const errorMsg = combinedOutput.trim() || `Exit code ${exitCode}`;
+   return {
+    status: 'failed',
+    output: combinedOutput,
+    exitCode,
+    reason: 'Project-version Prisma validation failed.',
+    diagnostics: [
+     {
+      severity: 'error',
+      message: 'Project-version Prisma validation failed: ' + errorMsg,
+      code: 'prisma-validation',
+     },
+    ],
+   };
+  }
+ } catch (error: any) {
+  const msg = error?.message || String(error);
+  return {
+   status: 'failed',
+   output: msg,
+   exitCode: -1,
+   reason: 'Project-version Prisma validation encountered an error: ' + msg,
+   diagnostics: [
+    {
+     severity: 'error',
+     message: 'Project-version Prisma validation failed: ' + msg,
+     code: 'prisma-validation',
+    },
+   ],
+  };
+ } finally {
+  await rm(isolatedDir, { recursive: true, force: true }).catch(() => {});
+ }
+}
+
 export interface AnalyzeOptions {
  capturedRevision?: CapturedRevision | Record<string, Buffer>;
  captureOptions?: CaptureOptions;
  prismaParserConfig?: PrismaAstConfig['parser'];
+ validatePrisma?: boolean;
+ prismaValidationOptions?: PrismaValidationOptions;
 }
 
 export class Analyzer {
@@ -849,6 +1026,7 @@ export class Analyzer {
  public readonly compilerVersion = ts.version;
  public readonly prismaParserConfig: PrismaAstConfig['parser'];
  public lastDiscovery?: AnalysisInputDiscovery;
+ public lastPrismaValidation?: PrismaValidationResult;
  private programs=new Map<string,ts.Program>();
  private sourceCache=new Map<string,{hash:string;source:ts.SourceFile}>();
  private sequence=0;
@@ -861,6 +1039,11 @@ export class Analyzer {
 
  async discoverInputs(root:string, capturedFiles?: Record<string, Buffer | { hash: string; text: string }>):Promise<AnalysisInputDiscovery>{
   return discoverAnalysisInputs(resolve(root), capturedFiles);
+ }
+ async validatePrisma(root:string, options?: PrismaValidationOptions):Promise<PrismaValidationResult>{
+  const res = await validatePrismaSchemaInIsolation(root, options);
+  this.lastPrismaValidation = res;
+  return res;
  }
  async analyze(root:string, options?: AnalyzeOptions):Promise<Analysis>{
   const start=performance.now();root=resolve(root);
@@ -1910,10 +2093,27 @@ export class Analyzer {
     diagnostics.push({severity:'error',message:'Prisma schema extraction failed: '+(error as Error).message,path,code:'prisma-extract-error'});
    }
   }
+  const prismaFiles = eligible.filter(p => p.endsWith('.prisma'));
+  let prismaValidationStatus: PrismaValidationStatus = 'not-applicable';
+  if (prismaFiles.length === 0) {
+   prismaValidationStatus = 'not-applicable';
+  } else if (options?.validatePrisma === false) {
+   prismaValidationStatus = 'unavailable';
+  } else {
+   const valRes = await validatePrismaSchemaInIsolation(root, {
+    schemaPaths: prismaFiles,
+    ...options?.prismaValidationOptions,
+   });
+   this.lastPrismaValidation = valRes;
+   prismaValidationStatus = valRes.status;
+   if (valRes.status === 'failed') {
+    diagnostics.push(...valRes.diagnostics);
+   }
+  }
   const dedup=Array.from(new Map(diagnostics.map(d=>[JSON.stringify(d),d])).values());
   const graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id)),requirements:[]};
   const isCurrent = !isIncomplete && !dedup.some(d=>d.severity!=='info');
   const status: 'current' | 'partial' = isCurrent ? 'current' : 'partial';
-  return {revision,sequence:++this.sequence,analyzedAt:new Date().toISOString(),status,graph,files,durationMs:performance.now()-start,quality:{eligibleFiles:eligible.length,analyzedFiles:analyzed,unresolvedReferences:unresolved,unsupportedConstructs:unsupported,inferredItems:0,prismaValidation:eligible.some(p=>p.endsWith('.prisma'))?'unavailable':'not-applicable',diagnostics:dedup}};
+  return {revision,sequence:++this.sequence,analyzedAt:new Date().toISOString(),status,graph,files,durationMs:performance.now()-start,quality:{eligibleFiles:eligible.length,analyzedFiles:analyzed,unresolvedReferences:unresolved,unsupportedConstructs:unsupported,inferredItems:0,prismaValidation:prismaValidationStatus,diagnostics:dedup}};
  }
 }
