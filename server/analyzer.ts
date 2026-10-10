@@ -253,6 +253,134 @@ export function extractPrismaKeysAndIndexes(model: Model): {
  };
 }
 
+export function extractPrismaRelationName(attribute: any): string | undefined {
+ if (!attribute || !attribute.args || !attribute.args.length) return undefined;
+ const namedArg = extractAttributeArgumentValue(attribute, 'name');
+ if (namedArg) return namedArg;
+ const first = attribute.args[0];
+ const val = first?.value !== undefined ? first.value : first;
+ if (typeof val === 'string') {
+  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+   if (val.length >= 2) return val.slice(1, -1);
+  }
+  return val;
+ }
+ return undefined;
+}
+
+export function extractPrismaRelationFields(attribute: any): {
+ fields: string[];
+ references: string[];
+ name?: string;
+ map?: string;
+} {
+ if (!attribute || !attribute.args) {
+  return { fields: [], references: [] };
+ }
+ const name = extractPrismaRelationName(attribute);
+ const map = extractAttributeArgumentValue(attribute, 'map');
+
+ const extractList = (key: string): string[] => {
+  for (const argItem of attribute.args) {
+   const val = argItem?.value !== undefined ? argItem.value : argItem;
+   if (val?.type === 'keyValue' && val.key === key) {
+    const innerVal = val.value;
+    if (innerVal?.type === 'array' && Array.isArray(innerVal.args)) {
+     return innerVal.args.map((x: any) => {
+      const str = typeof x === 'string' ? x : (x && typeof x === 'object' && typeof x.name === 'string') ? x.name : String(x);
+      if ((str.startsWith('"') && str.endsWith('"')) || (str.startsWith("'") && str.endsWith("'"))) {
+       return str.length >= 2 ? str.slice(1, -1) : str;
+      }
+      return str;
+     });
+    }
+   }
+  }
+  return [];
+ };
+
+ const fields = extractList('fields');
+ const references = extractList('references');
+
+ return {
+  fields,
+  references,
+  ...(name ? { name } : {}),
+  ...(map ? { map } : {}),
+ };
+}
+
+export function findPrismaInverseRelationField(
+ model: Model,
+ field: Field,
+ modelsByName: Map<string, Model>
+): { inverse?: Field; ambiguous: boolean } {
+ const targetModel = modelsByName.get(String(field.fieldType));
+ if (!targetModel) {
+  return { inverse: undefined, ambiguous: false };
+ }
+ const fieldRelAttr = field.attributes?.find((a: any) => a.name === 'relation');
+ const fieldRelName = extractPrismaRelationName(fieldRelAttr);
+
+ const candidates = targetModel.properties.filter(
+  (p): p is Field =>
+   p.type === 'field' &&
+   String(p.fieldType) === model.name &&
+   !(model.name === targetModel.name && p.name === field.name)
+ );
+
+ if (candidates.length === 0) {
+  return { inverse: undefined, ambiguous: false };
+ }
+
+ if (fieldRelName) {
+  const matching = candidates.filter((p) => {
+   const rel = p.attributes?.find((a: any) => a.name === 'relation');
+   return extractPrismaRelationName(rel) === fieldRelName;
+  });
+  if (matching.length === 1) {
+   return { inverse: matching[0], ambiguous: false };
+  }
+  if (matching.length > 1) {
+   return { inverse: matching[0], ambiguous: true };
+  }
+  return { inverse: undefined, ambiguous: false };
+ }
+
+ const matchingUnnamed = candidates.filter((p) => {
+  const rel = p.attributes?.find((a: any) => a.name === 'relation');
+  return !extractPrismaRelationName(rel);
+ });
+
+ if (matchingUnnamed.length === 1) {
+  return { inverse: matchingUnnamed[0], ambiguous: false };
+ }
+ if (matchingUnnamed.length > 1) {
+  return { inverse: matchingUnnamed[0], ambiguous: true };
+ }
+
+ return { inverse: undefined, ambiguous: false };
+}
+
+export function computePrismaRelationCardinality(
+ field: Field,
+ inverse?: Field
+): 'one → many' | 'many → one' | 'many → many' | 'one → one' | 'one → zero or one' {
+ if (field.array && inverse?.array) {
+  return 'many → many';
+ }
+ if (inverse?.array) {
+  return 'many → one';
+ }
+ if (field.array) {
+  return 'one → many';
+ }
+ if (field.optional) {
+  return 'one → zero or one';
+ }
+ return 'one → one';
+}
+
 export function findPrismaBlockEnd(text: string, startOffset: number): number {
  const openBrace = text.indexOf('{', startOffset);
  if (openBrace === -1) return startOffset;
@@ -1623,14 +1751,115 @@ export class Analyzer {
     }
     for(const model of models){
      for(const f of model.properties.filter((p):p is Field=>p.type==='field')){
-      if(!modelsByName.has(String(f.fieldType)))continue;
-      const other=String(f.fieldType);
-      const inverse=modelsByName.get(other)!.properties.find((p):p is Field=>p.type==='field'&&String(p.fieldType)===model.name);
-      const relation=attr(f,'relation');const foreign=strings(arg(relation,'fields'));
-      const named=relation?.args?.[0]?.value;const group=typeof named==='string'?named:'';
-      const pair=[model.name,other].sort().join(':')+(model.name===other?':'+f.name:'');
-      const id=idFor('relation:'+path+':'+pair+':'+group);
-      if(!edges.has(id)||foreign.length)edges.set(id,{id,source:idFor('entity:'+path+':'+model.name),target:idFor('entity:'+path+':'+other),kind:'relates-to',label:(inverse?.array?'many':'one')+' → '+(f.array?'many':f.optional?'zero or one':'one')+(foreign.length?' · '+foreign.join(', '):''),provenance:'extracted',uncertain:!inverse});
+      const relAttr = attr(f, 'relation');
+      const isKnownModel = modelsByName.has(String(f.fieldType));
+      if (!isKnownModel && !relAttr) continue;
+
+      const other = String(f.fieldType);
+      const targetModel = modelsByName.get(other);
+
+      const location = model.location;
+      const startOffset = location?.startOffset ?? files[path].text.indexOf('model ' + model.name);
+      const blockEnd = findPrismaBlockEnd(files[path].text, startOffset);
+      const end = blockEnd > startOffset ? blockEnd : (location?.endOffset ?? startOffset) + 1;
+      const modelText = files[path].text.slice(startOffset, end);
+      const escapedName = f.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp('(^|\\n)[ \\t]*(' + escapedName + ')\\b');
+      const match = re.exec(modelText);
+      let fLine: number | undefined = undefined;
+      if (match) {
+       const matchStart = match.index + match[1].length;
+       const nameStart = modelText.indexOf(match[2], matchStart);
+       const fStart = startOffset + nameStart;
+       fLine = files[path].text.slice(0, fStart).split('\n').length;
+      }
+
+      if (!targetModel) {
+       unresolved++;
+       diagnostics.push({
+        severity: 'error',
+        message: `Unresolved relation target model '${other}' on field '${model.name}.${f.name}'`,
+        path,
+        line: fLine,
+        code: 'unresolved-relation',
+       });
+       const id = idFor('relation:' + path + ':' + model.name + ':' + other + ':' + f.name);
+       edges.set(id, {
+        id,
+        source: idFor('entity:' + path + ':' + model.name),
+        target: idFor('entity:' + path + ':' + other),
+        kind: 'relates-to',
+        label: 'relates-to',
+        provenance: 'extracted',
+        uncertain: true,
+       });
+       continue;
+      }
+
+      const { inverse, ambiguous } = findPrismaInverseRelationField(model, f, modelsByName);
+      const relInfo = extractPrismaRelationFields(relAttr);
+      const foreign = relInfo.fields;
+      const referenced = relInfo.references;
+      const group = relInfo.name ?? '';
+
+      if (ambiguous) {
+       diagnostics.push({
+        severity: 'error',
+        message: `Ambiguous relation between '${model.name}' and '${other}' on field '${model.name}.${f.name}': multiple matching relation fields found without distinguishing relation names`,
+        path,
+        line: fLine,
+        code: 'unresolved-relation',
+       });
+      }
+
+      let hasBrokenFields = false;
+      for (const fk of foreign) {
+       const hasLocal = model.properties.some(p => p.type === 'field' && p.name === fk);
+       if (!hasLocal) {
+        unresolved++;
+        hasBrokenFields = true;
+        diagnostics.push({
+         severity: 'error',
+         message: `Unresolved foreign key field '${fk}' on model '${model.name}' in relation '${model.name}.${f.name}'`,
+         path,
+         line: fLine,
+         code: 'unresolved-relation',
+        });
+       }
+      }
+
+      for (const ref of referenced) {
+       const hasTarget = targetModel.properties.some(p => p.type === 'field' && p.name === ref);
+       if (!hasTarget) {
+        unresolved++;
+        hasBrokenFields = true;
+        diagnostics.push({
+         severity: 'error',
+         message: `Unresolved referenced field '${ref}' on model '${other}' in relation '${model.name}.${f.name}'`,
+         path,
+         line: fLine,
+         code: 'unresolved-relation',
+        });
+       }
+      }
+
+      const pair = [model.name, other].sort().join(':') + (model.name === other && !group ? ':' + f.name : '');
+      const id = idFor('relation:' + path + ':' + pair + ':' + group);
+      const cardinality = computePrismaRelationCardinality(f, inverse);
+      const edgeLabel = cardinality + (foreign.length ? ' · ' + foreign.join(', ') : '');
+      const isUncertain = !inverse || ambiguous || hasBrokenFields;
+
+      if (!edges.has(id) || foreign.length) {
+       edges.set(id, {
+        id,
+        source: idFor('entity:' + path + ':' + model.name),
+        target: idFor('entity:' + path + ':' + other),
+        kind: 'relates-to',
+        label: edgeLabel,
+        provenance: 'extracted',
+        uncertain: isUncertain,
+       });
+      }
      }
     }
     for(const block of schema.list)if(block.type==='enum'){

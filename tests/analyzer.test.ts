@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd,SCHEMA_DERIVED_NOTICE,extractPrismaDefault,extractPrismaMapping,extractAttributeFieldList,extractAttributeArgumentValue,extractPrismaKeysAndIndexes} from '../server/analyzer';
+import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd,SCHEMA_DERIVED_NOTICE,extractPrismaDefault,extractPrismaMapping,extractAttributeFieldList,extractAttributeArgumentValue,extractPrismaKeysAndIndexes,extractPrismaRelationName,extractPrismaRelationFields,findPrismaInverseRelationField,computePrismaRelationCardinality} from '../server/analyzer';
 import {GraphSchema,resolveSourceEvidence,type AgentJob} from '../shared/model';
 import {getMappedTableName} from '../src/components/ErEditor';
 import {hash,captureSourceRevision,captureFiles,hashes} from '../server/files';
@@ -2857,4 +2857,287 @@ it('compares extracted Prisma ER graph with keys and mappings against a known ex
  expect(a.graph.nodes.length).toBe(expectedGraph.nodes.length);
  expect(a.graph.edges.length).toBe(expectedGraph.edges.length);
  expect(a.graph).toEqual(expectedGraph);
+});
+
+it('verifies Prisma relation parser helpers (T042 checklist & AC 1, 2)', () => {
+ // 1. extractPrismaRelationName
+ expect(extractPrismaRelationName(undefined)).toBeUndefined();
+ expect(extractPrismaRelationName({})).toBeUndefined();
+ expect(extractPrismaRelationName({ args: [] })).toBeUndefined();
+ // Positional string name
+ expect(extractPrismaRelationName({ args: [{ value: '"AuthoredPosts"' }] })).toBe('AuthoredPosts');
+ expect(extractPrismaRelationName({ args: [{ value: 'SimpleName' }] })).toBe('SimpleName');
+ // Named key-value name: @relation(name: "ReviewedPosts")
+ expect(
+  extractPrismaRelationName({
+   args: [{ value: { type: 'keyValue', key: 'name', value: '"ReviewedPosts"' } }],
+  })
+ ).toBe('ReviewedPosts');
+ // Unnamed relation: @relation(fields: [id], references: [id])
+ expect(
+  extractPrismaRelationName({
+   args: [{ value: { type: 'keyValue', key: 'fields', value: { type: 'array', args: ['id'] } } }],
+  })
+ ).toBeUndefined();
+
+ // 2. extractPrismaRelationFields
+ expect(extractPrismaRelationFields(undefined)).toEqual({ fields: [], references: [] });
+ const fullRel = {
+  args: [
+   { value: '"AuthoredPosts"' },
+   { value: { type: 'keyValue', key: 'fields', value: { type: 'array', args: ['authorId'] } } },
+   { value: { type: 'keyValue', key: 'references', value: { type: 'array', args: ['id'] } } },
+   { value: { type: 'keyValue', key: 'map', value: '"fk_post_author"' } },
+  ],
+ };
+ expect(extractPrismaRelationFields(fullRel)).toEqual({
+  fields: ['authorId'],
+  references: ['id'],
+  name: 'AuthoredPosts',
+  map: 'fk_post_author',
+ });
+
+ // 3. computePrismaRelationCardinality
+ expect(computePrismaRelationCardinality({ array: true } as any, { array: true } as any)).toBe('many → many');
+ expect(computePrismaRelationCardinality({ array: false, optional: false } as any, { array: true } as any)).toBe('many → one');
+ expect(computePrismaRelationCardinality({ array: true } as any, { array: false, optional: false } as any)).toBe('one → many');
+ expect(computePrismaRelationCardinality({ array: false, optional: false } as any, { array: false, optional: false } as any)).toBe('one → one');
+ expect(computePrismaRelationCardinality({ array: false, optional: true } as any, { array: false, optional: false } as any)).toBe('one → zero or one');
+
+ // 4. findPrismaInverseRelationField
+ const mockUser = {
+  name: 'User',
+  properties: [
+   { type: 'field', name: 'id', fieldType: 'Int' },
+   {
+    type: 'field',
+    name: 'manager',
+    fieldType: 'User',
+    attributes: [{ name: 'relation', args: [{ value: '"UserManagement"' }] }],
+   },
+   {
+    type: 'field',
+    name: 'reports',
+    fieldType: 'User',
+    array: true,
+    attributes: [{ name: 'relation', args: [{ value: '"UserManagement"' }] }],
+   },
+  ],
+ } as any;
+ const modelsByName = new Map<string, any>([['User', mockUser]]);
+ const managerField = mockUser.properties[1];
+ const reportsField = mockUser.properties[2];
+
+ const inverseOfManager = findPrismaInverseRelationField(mockUser, managerField, modelsByName);
+ expect(inverseOfManager.inverse).toBe(reportsField);
+ expect(inverseOfManager.ambiguous).toBe(false);
+
+ const inverseOfReports = findPrismaInverseRelationField(mockUser, reportsField, modelsByName);
+ expect(inverseOfReports.inverse).toBe(managerField);
+ expect(inverseOfReports.ambiguous).toBe(false);
+});
+
+it('extracts Prisma relationships, cardinalities, self-relations, and distinct named relations (T042 concrete scenario 1 & AC 1, 2)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-relations');
+ const expectedPath = resolve('tests/fixtures/prisma-relations.expected.json');
+ const analyzer = new Analyzer();
+
+ // 1. Discover inputs
+ const discovery = await analyzer.discoverInputs(fixtureDir);
+ expect(discovery.prismaSchemas).toEqual(['prisma/schema.prisma']);
+ expect(discovery.eligibleFiles).toEqual(['prisma/schema.prisma', 'src/index.ts']);
+
+ // 2. Analyze
+ const a = await analyzer.analyze(fixtureDir);
+ expect(a.status).toBe('current');
+ expect(a.quality.unresolvedReferences).toBe(0);
+ expect(a.quality.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+
+ const user = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'User')!;
+ const profile = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Profile')!;
+ const post = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Post')!;
+ const tag = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Tag')!;
+ expect(user).toBeDefined();
+ expect(profile).toBeDefined();
+ expect(post).toBeDefined();
+ expect(tag).toBeDefined();
+
+ // 3. Self-relation: User relates to User via "UserManagement"
+ const selfEdges = a.graph.edges.filter(e => e.source === user.id && e.target === user.id && e.kind === 'relates-to');
+ expect(selfEdges.length).toBe(1);
+ const selfEdge = selfEdges[0];
+ expect(selfEdge.label).toBe('many → one · managerId');
+ expect(selfEdge.uncertain).toBe(false);
+
+ // 4. Distinct named relations between User and Post
+ const authoredEdge = a.graph.edges.find(e => e.source === post.id && e.target === user.id && e.label === 'many → one · authorId');
+ const reviewedEdge = a.graph.edges.find(e => e.source === post.id && e.target === user.id && e.label === 'many → one · reviewerId');
+ expect(authoredEdge).toBeDefined();
+ expect(reviewedEdge).toBeDefined();
+ expect(authoredEdge?.id).not.toBe(reviewedEdge?.id);
+ expect(authoredEdge?.uncertain).toBe(false);
+ expect(reviewedEdge?.uncertain).toBe(false);
+
+ // 5. One-to-one relation: Profile relates to User
+ const profileEdge = a.graph.edges.find(e => e.source === profile.id && e.target === user.id && e.kind === 'relates-to');
+ expect(profileEdge).toBeDefined();
+ expect(profileEdge?.label).toBe('one → one · userId');
+ expect(profileEdge?.uncertain).toBe(false);
+
+ // 6. Implicit Many-to-Many relation: Post relates to Tag
+ const postTagEdge = a.graph.edges.find(e => ((e.source === post.id && e.target === tag.id) || (e.source === tag.id && e.target === post.id)) && e.kind === 'relates-to');
+ expect(postTagEdge).toBeDefined();
+ expect(postTagEdge?.label).toBe('many → many');
+ expect(postTagEdge?.uncertain).toBe(false);
+
+ // 7. Total edges in graph: exactly 5 relates-to edges
+ const relatesEdges = a.graph.edges.filter(e => e.kind === 'relates-to');
+ expect(relatesEdges.length).toBe(5);
+
+ // 8. Compare against known expected graph fixture (R31)
+ try {
+  await readFile(expectedPath, 'utf8');
+ } catch {
+  await writeFile(expectedPath, JSON.stringify(a.graph, null, 2), 'utf8');
+ }
+
+ const expectedContent = await readFile(expectedPath, 'utf8');
+ const expectedGraph = JSON.parse(expectedContent);
+ expect(GraphSchema.safeParse(expectedGraph).success).toBe(true);
+ expect(a.graph.schemaVersion).toBe(expectedGraph.schemaVersion);
+ expect(a.graph.nodes.length).toBe(expectedGraph.nodes.length);
+ expect(a.graph.edges.length).toBe(expectedGraph.edges.length);
+ expect(a.graph).toEqual(expectedGraph);
+});
+
+it('breaks a referenced field and inspects unresolved-relation diagnostics and partial status (T042 concrete scenario 2 & AC 3)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-relations');
+ const tempDir = await mkdtemp(join(tmpdir(), 'architect-prisma-break-ref-'));
+
+ try {
+  await cp(fixtureDir, tempDir, { recursive: true });
+
+  // Break referenced field: references: [nonExistentKey] on author User
+  const schemaPath = join(tempDir, 'prisma', 'schema.prisma');
+  const originalSchema = await readFile(schemaPath, 'utf8');
+  const brokenSchema = originalSchema.replace(
+   'author     User     @relation("AuthoredPosts", fields: [authorId], references: [id])',
+   'author     User     @relation("AuthoredPosts", fields: [authorId], references: [nonExistentKey])'
+  );
+  expect(brokenSchema).not.toBe(originalSchema);
+  await writeFile(schemaPath, brokenSchema, 'utf8');
+
+  const analyzer = new Analyzer();
+  const a = await analyzer.analyze(tempDir);
+
+  // Status must be partial
+  expect(a.status).toBe('partial');
+
+  // Unresolved references counter incremented
+  expect(a.quality.unresolvedReferences).toBeGreaterThan(0);
+
+  // Diagnostic emitted with code 'unresolved-relation' and referencing nonExistentKey
+  const breakDiag = a.quality.diagnostics.find(
+   d => d.code === 'unresolved-relation' && d.severity === 'error' && d.message.includes('nonExistentKey')
+  );
+  expect(breakDiag).toBeDefined();
+  expect(breakDiag?.path).toBe('prisma/schema.prisma');
+  expect(breakDiag?.line).toBeDefined();
+
+  // Edge remains visible in the graph but marked uncertain: true
+  const user = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'User')!;
+  const post = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Post')!;
+  const brokenEdge = a.graph.edges.find(
+   e => e.source === post.id && e.target === user.id && e.label.includes('authorId')
+  );
+  expect(brokenEdge).toBeDefined();
+  expect(brokenEdge?.uncertain).toBe(true);
+ } finally {
+  await rm(tempDir, { recursive: true, force: true });
+ }
+});
+
+it('breaks a local foreign key field, target model, and emits unresolved-relation diagnostics (T042 AC 3 & checklist)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-relations');
+ const tempDir = await mkdtemp(join(tmpdir(), 'architect-prisma-break-fk-'));
+
+ try {
+  await cp(fixtureDir, tempDir, { recursive: true });
+
+  // 1. Break local foreign key: fields: [missingFk]
+  const schemaPath = join(tempDir, 'prisma', 'schema.prisma');
+  const originalSchema = await readFile(schemaPath, 'utf8');
+  const brokenSchema = originalSchema.replace(
+   'author     User     @relation("AuthoredPosts", fields: [authorId], references: [id])',
+   'author     User     @relation("AuthoredPosts", fields: [missingFk], references: [id])'
+  );
+  await writeFile(schemaPath, brokenSchema, 'utf8');
+
+  const analyzer = new Analyzer();
+  const a = await analyzer.analyze(tempDir);
+
+  expect(a.status).toBe('partial');
+  expect(a.quality.unresolvedReferences).toBeGreaterThan(0);
+  const fkDiag = a.quality.diagnostics.find(
+   d => d.code === 'unresolved-relation' && d.severity === 'error' && d.message.includes('missingFk')
+  );
+  expect(fkDiag).toBeDefined();
+
+  // 2. Unknown target model
+  const brokenModelSchema = originalSchema.replace(
+   'profile       Profile?',
+   'profile       UnknownModel? @relation(fields: [profileId], references: [id])\n  profileId     Int?'
+  );
+  await writeFile(schemaPath, brokenModelSchema, 'utf8');
+  const aUnknownModel = await new Analyzer().analyze(tempDir);
+  expect(aUnknownModel.status).toBe('partial');
+  const modelDiag = aUnknownModel.quality.diagnostics.find(
+   d => d.code === 'unresolved-relation' && d.severity === 'error' && d.message.includes('UnknownModel')
+  );
+  expect(modelDiag).toBeDefined();
+ } finally {
+  await rm(tempDir, { recursive: true, force: true });
+ }
+});
+
+it('detects ambiguous relations between models without distinguishing relation names (T042 checklist)', async () => {
+ const tempDir = await mkdtemp(join(tmpdir(), 'architect-prisma-ambiguous-'));
+
+ try {
+  await mkdir(join(tempDir, 'prisma'), { recursive: true });
+  await mkdir(join(tempDir, 'src'), { recursive: true });
+  await writeFile(join(tempDir, 'package.json'), JSON.stringify({ name: 'ambiguous-test', private: true }));
+  await writeFile(join(tempDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' }, include: ['src/**/*'] }));
+  await writeFile(join(tempDir, 'src', 'index.ts'), 'export const x = 1;\n');
+
+  // Schema with two unnamed relations from User to Post
+  const schemaText = `
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id     Int    @id
+  posts  Post[]
+  drafts Post[]
+}
+
+model Post {
+  id       Int  @id
+  authorId Int
+  author   User @relation(fields: [authorId], references: [id])
+}
+`;
+  await writeFile(join(tempDir, 'prisma', 'schema.prisma'), schemaText, 'utf8');
+
+  const a = await new Analyzer().analyze(tempDir);
+  // Status should be partial due to ambiguous relation error
+  expect(a.status).toBe('partial');
+  const ambigDiag = a.quality.diagnostics.find(
+   d => d.code === 'unresolved-relation' && d.severity === 'error' && d.message.includes('Ambiguous relation')
+  );
+  expect(ambigDiag).toBeDefined();
+ } finally {
+  await rm(tempDir, { recursive: true, force: true });
+ }
 });
