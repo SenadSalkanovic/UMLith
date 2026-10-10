@@ -3,21 +3,355 @@ import {getSchema,PrismaParser,VisitorClassFactory,type Field,type Model} from '
 import {resolve,relative,basename,dirname} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge} from '../shared/model';
-import {captureFiles,hash,AppError} from './files';
+import {captureFiles,scanProjectDirectory,hash,AppError} from './files';
 const idFor=(key:string)=>hash(key).slice(0,24);
 const normalize=(value:string)=>value.replace(/\s+/g,' ').trim();
+
+export const TYPESCRIPT_PIN = '6.0.3';
+
+export function checkCompilerPin(): { pinned: string; installed: string; compatible: boolean } {
+ return {
+  pinned: TYPESCRIPT_PIN,
+  installed: ts.version,
+  compatible: ts.version === TYPESCRIPT_PIN,
+ };
+}
+
+export function isTypeScriptVersionCompatible(range: string, pin = TYPESCRIPT_PIN): boolean {
+ const cleaned = range.trim();
+ if (cleaned === '*' || cleaned === 'latest' || cleaned === pin) return true;
+ const match = cleaned.match(/^[\^~>=<]?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+ if (match) {
+  const major = parseInt(match[1], 10);
+  const pinMajor = parseInt(pin.split('.')[0], 10);
+  if (cleaned.startsWith('<') && !cleaned.startsWith('<=')) {
+   if (major <= pinMajor) return false;
+  }
+  if (major !== pinMajor && !cleaned.includes('>=')) {
+   return false;
+  }
+ }
+ return true;
+}
+
+export type InputCategory =
+ | 'typescript-source'
+ | 'prisma-schema'
+ | 'typescript-declaration'
+ | 'typescript-config'
+ | 'dependency-manifest'
+ | 'dependency-lockfile'
+ | 'configuration'
+ | 'non-analysis-asset';
+
+export type ExclusionCategory =
+ | 'ignored-directory'
+ | 'sensitive-file'
+ | 'declaration'
+ | 'non-analysis-asset'
+ | 'unsupported-language'
+ | 'symlink';
+
+export interface DiscoveredInclusion {
+ category: InputCategory;
+ reason: string;
+ eligible: boolean;
+ requiredForResolution: boolean;
+ participatesInRevision: boolean;
+}
+
+export interface DiscoveredExclusion {
+ category: ExclusionCategory;
+ reason: string;
+}
+
+export interface IncompatibleInputDiagnostic {
+ path: string;
+ message: string;
+ code?: string;
+ severity: 'error' | 'warning';
+}
+
+export interface AnalysisInputDiscovery {
+ compilerPin: { pinned: string; installed: string; compatible: boolean };
+ eligibleFiles: string[];
+ configuredSourceFiles: string[];
+ unconfiguredSourceFiles: string[];
+ prismaSchemas: string[];
+ configurationFiles: string[];
+ manifestFiles: string[];
+ lockfiles: string[];
+ declarationFiles: string[];
+ dependencyInputs: string[];
+ trackingInputs: string[];
+ inclusions: Record<string, DiscoveredInclusion>;
+ exclusions: Record<string, DiscoveredExclusion>;
+ incompatibleInputs: IncompatibleInputDiagnostic[];
+ denominator: number;
+}
+
+export async function discoverAnalysisInputs(
+ root: string,
+ capturedFiles?: Record<string, Buffer | { hash: string; text: string }>,
+ scannedExclusions?: Array<{ path: string; reason: 'ignored-directory' | 'sensitive-file' | 'symlink' }>
+): Promise<AnalysisInputDiscovery> {
+ const compilerPin = checkCompilerPin();
+ let files: Record<string, { hash: string; text: string }>;
+ let diskExclusions = scannedExclusions;
+
+ if (capturedFiles) {
+  files = Object.fromEntries(
+   Object.entries(capturedFiles).map(([path, data]) => [
+    path,
+    Buffer.isBuffer(data) ? { hash: hash(data), text: data.toString('utf8') } : data,
+   ])
+  );
+ } else {
+  let scanResult: { includedFiles: string[]; excludedEntries: Array<{ path: string; reason: 'ignored-directory' | 'sensitive-file' | 'symlink' }> } | undefined;
+  try {
+   scanResult = await scanProjectDirectory(root);
+   diskExclusions = scanResult.excludedEntries;
+  } catch {
+   diskExclusions = [];
+  }
+  const captured = await captureFiles(root);
+  files = Object.fromEntries(
+   Object.entries(captured).map(([path, data]) => [
+    path,
+    { hash: hash(data), text: data.toString('utf8') },
+   ])
+  );
+ }
+
+ if (!diskExclusions) {
+  try {
+   const scan = await scanProjectDirectory(root);
+   diskExclusions = scan.excludedEntries;
+  } catch {
+   diskExclusions = [];
+  }
+ }
+
+ const inclusions: Record<string, DiscoveredInclusion> = {};
+ const exclusions: Record<string, DiscoveredExclusion> = {};
+ const incompatibleInputs: IncompatibleInputDiagnostic[] = [];
+
+ for (const entry of diskExclusions) {
+  exclusions[entry.path] = {
+   category: entry.reason,
+   reason:
+    entry.reason === 'ignored-directory'
+     ? `Ignored directory (${entry.path}) excluded from project analysis`
+     : entry.reason === 'sensitive-file'
+     ? `Sensitive credential or environment file (${entry.path}) excluded for security`
+     : `Symbolic link (${entry.path}) excluded to prevent escape or aliasing`,
+  };
+ }
+
+ const eligibleFiles: string[] = [];
+ const prismaSchemas: string[] = [];
+ const declarationFiles: string[] = [];
+ const configurationFiles: string[] = [];
+ const manifestFiles: string[] = [];
+ const lockfiles: string[] = [];
+ const otherConfigs: string[] = [];
+
+ const allCapturedPaths = Object.keys(files).sort();
+
+ for (const p of allCapturedPaths) {
+  if (/\.prisma$/i.test(p)) {
+   prismaSchemas.push(p);
+   eligibleFiles.push(p);
+   inclusions[p] = {
+    category: 'prisma-schema',
+    reason: 'Eligible Prisma schema for entity and relationship extraction',
+    eligible: true,
+    requiredForResolution: true,
+    participatesInRevision: true,
+   };
+  } else if (/\.d\.[cm]?ts$/i.test(p)) {
+   declarationFiles.push(p);
+   inclusions[p] = {
+    category: 'typescript-declaration',
+    reason: 'TypeScript declaration file (excluded from code structure; required for type resolution)',
+    eligible: false,
+    requiredForResolution: true,
+    participatesInRevision: true,
+   };
+   exclusions[p] = {
+    category: 'declaration',
+    reason: 'Declaration file excluded from code-structure analysis',
+   };
+  } else if (/\.(?:[cm]?ts|tsx)$/i.test(p)) {
+   eligibleFiles.push(p);
+   inclusions[p] = {
+    category: 'typescript-source',
+    reason: 'Eligible TypeScript source file for code architecture analysis',
+    eligible: true,
+    requiredForResolution: true,
+    participatesInRevision: true,
+   };
+  } else if (/(?:^|\/)tsconfig[^/]*\.json$/i.test(p)) {
+   configurationFiles.push(p);
+   inclusions[p] = {
+    category: 'typescript-config',
+    reason: 'TypeScript project configuration driving compiler options and references',
+    eligible: false,
+    requiredForResolution: true,
+    participatesInRevision: true,
+   };
+  } else if (/(?:^|\/)package\.json$/i.test(p)) {
+   manifestFiles.push(p);
+   inclusions[p] = {
+    category: 'dependency-manifest',
+    reason: 'Package dependency manifest defining dependencies and runtime metadata',
+    eligible: false,
+    requiredForResolution: true,
+    participatesInRevision: true,
+   };
+  } else if (/(?:^|\/)(?:package-lock\.json|pnpm-lock\.ya?ml|yarn\.lock|bun\.lockb?)$/i.test(p) || /lock/i.test(p)) {
+   lockfiles.push(p);
+   inclusions[p] = {
+    category: 'dependency-lockfile',
+    reason: 'Dependency lockfile pinning exact package versions',
+    eligible: false,
+    requiredForResolution: true,
+    participatesInRevision: true,
+   };
+  } else if (/\.json$/i.test(p)) {
+   otherConfigs.push(p);
+   inclusions[p] = {
+    category: 'configuration',
+    reason: 'Project JSON configuration or data input',
+    eligible: false,
+    requiredForResolution: true,
+    participatesInRevision: true,
+   };
+  } else {
+   inclusions[p] = {
+    category: 'non-analysis-asset',
+    reason: 'Non-code asset or documentation file not targeted for structural analysis',
+    eligible: false,
+    requiredForResolution: false,
+    participatesInRevision: false,
+   };
+   exclusions[p] = {
+    category: 'non-analysis-asset',
+    reason: 'Non-code asset file excluded from structural analysis',
+   };
+  }
+ }
+
+ for (const pkgPath of manifestFiles) {
+  try {
+   const pkg = JSON.parse(files[pkgPath].text);
+   const tsDep = pkg.dependencies?.typescript || pkg.devDependencies?.typescript || pkg.peerDependencies?.typescript;
+   if (tsDep && typeof tsDep === 'string') {
+    if (!isTypeScriptVersionCompatible(tsDep, TYPESCRIPT_PIN)) {
+     incompatibleInputs.push({
+      path: pkgPath,
+      message: `Project specifies TypeScript "${tsDep}" in ${pkgPath}, which differs from pinned compiler ${TYPESCRIPT_PIN}.`,
+      severity: 'warning',
+      code: 'incompatible-compiler-version',
+     });
+    }
+   }
+  } catch (e) {
+   incompatibleInputs.push({
+    path: pkgPath,
+    message: `Invalid package manifest in ${pkgPath}: ${(e as Error).message}`,
+    severity: 'error',
+    code: 'invalid-manifest',
+   });
+  }
+ }
+
+ const tsSourceFiles = eligibleFiles.filter(p => !p.endsWith('.prisma'));
+ const fullTsPaths = new Set(tsSourceFiles.map(p => resolve(root, p)));
+ const configuredSourcesSet = new Set<string>();
+
+ for (const configPath of configurationFiles) {
+  const config = ts.parseConfigFileTextToJson(configPath, files[configPath].text);
+  if (!config.error && config.config) {
+   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, resolve(root, dirname(configPath)));
+   for (const fn of parsed.fileNames) {
+    const resolvedFn = resolve(fn);
+    if (fullTsPaths.has(resolvedFn)) {
+     const rel = relative(root, resolvedFn).replaceAll('\\', '/');
+     configuredSourcesSet.add(rel);
+    }
+   }
+  }
+ }
+
+ const configuredSourceFiles = Array.from(configuredSourcesSet).sort();
+ const unconfiguredSourceFiles = tsSourceFiles.filter(p => !configuredSourcesSet.has(p)).sort();
+
+ const dependencyInputs = [
+  ...configurationFiles,
+  ...manifestFiles,
+  ...lockfiles,
+  ...declarationFiles,
+  ...otherConfigs,
+ ].sort();
+
+ const trackingInputs = [
+  ...eligibleFiles,
+  ...dependencyInputs,
+ ].sort();
+
+ return {
+  compilerPin,
+  eligibleFiles: eligibleFiles.sort(),
+  configuredSourceFiles,
+  unconfiguredSourceFiles,
+  prismaSchemas: prismaSchemas.sort(),
+  configurationFiles: configurationFiles.sort(),
+  manifestFiles: manifestFiles.sort(),
+  lockfiles: lockfiles.sort(),
+  declarationFiles: declarationFiles.sort(),
+  dependencyInputs,
+  trackingInputs,
+  inclusions,
+  exclusions,
+  incompatibleInputs,
+  denominator: eligibleFiles.length,
+ };
+}
+
 export class Analyzer {
+ public static readonly COMPILER_PIN = TYPESCRIPT_PIN;
+ public readonly compilerPin = TYPESCRIPT_PIN;
+ public readonly compilerVersion = ts.version;
+ public lastDiscovery?: AnalysisInputDiscovery;
  private programs=new Map<string,ts.Program>();
  private sourceCache=new Map<string,{hash:string;source:ts.SourceFile}>();
  private sequence=0;
+ async discoverInputs(root:string):Promise<AnalysisInputDiscovery>{
+  return discoverAnalysisInputs(resolve(root));
+ }
  async analyze(root:string):Promise<Analysis>{
   const start=performance.now();root=resolve(root);
+  let diskExclusions:Array<{path:string;reason:'ignored-directory'|'sensitive-file'|'symlink'}>=[];
+  try{
+   const scan=await scanProjectDirectory(root);
+   diskExclusions=scan.excludedEntries;
+  }catch{
+   diskExclusions=[];
+  }
   const captured=await captureFiles(root);
   const files=Object.fromEntries(Object.entries(captured).map(([path,data])=>[path,{hash:hash(data),text:data.toString('utf8')}]));
-  const eligible=Object.keys(files).filter(p=>/\.(tsx?|prisma)$/.test(p)&&!p.endsWith('.d.ts'));
-  const inputs=Object.keys(files).filter(p=>/\.(tsx?|prisma|json)$/.test(p)||/lock/.test(p));
-  const revision=hash(inputs.map(p=>p+':'+files[p].hash).join('\n'));
+  const discovery=await discoverAnalysisInputs(root,captured,diskExclusions);
+  this.lastDiscovery=discovery;
+  const eligible=discovery.eligibleFiles;
+  const revision=hash(discovery.trackingInputs.map(p=>p+':'+files[p].hash).join('\n'));
   const diagnostics:Diagnostic[]=[];let unsupported=0,unresolved=0,analyzed=0;
+  for(const item of discovery.incompatibleInputs){
+   diagnostics.push({severity:item.severity,message:item.message,path:item.path,code:item.code});
+  }
+  if(ts.version!==TYPESCRIPT_PIN){
+   diagnostics.push({severity:'error',message:`Analyzer compiler is pinned to TypeScript ${TYPESCRIPT_PIN}, but ${ts.version} is installed.`,code:'compiler-pin-mismatch'});
+  }
   const nodes=new Map<string,ProgramNode>();const edges=new Map<string,ProgramEdge>();
   const rootId='project';
   nodes.set(rootId,NodeSchema.parse({id:rootId,kind:'system',name:basename(root),provenance:'extracted'}));

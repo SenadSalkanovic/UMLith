@@ -11,6 +11,15 @@ export function isPathExcluded(path:string):boolean {
  const parts=path.replace(/\\/g,'/').split('/').filter(Boolean);
  return parts.some(part=>excluded(part)||ignoredDirs.has(part));
 }
+export function getExclusionReason(path:string):'ignored-directory'|'sensitive-file'|null {
+ if(!path) return null;
+ const parts=path.replace(/\\/g,'/').split('/').filter(Boolean);
+ for(const part of parts){
+  if(ignoredDirs.has(part))return 'ignored-directory';
+  if(excluded(part))return 'sensitive-file';
+ }
+ return null;
+}
 export async function atomicJson(path:string,value:unknown) {
  await mkdir(dirname(path),{recursive:true});
  const temp=path+'.'+randomUUID()+'.tmp';
@@ -89,6 +98,31 @@ async function walkFiles(directory:FileHandle):Promise<string[]> {
  await walk(directory,'');return result.sort();
 }
 export async function listFiles(root:string):Promise<string[]> {return inRoot(root,walkFiles);}
+export async function scanProjectDirectory(root:string):Promise<{
+ includedFiles:string[];
+ excludedEntries:Array<{path:string;reason:'ignored-directory'|'sensitive-file'|'symlink'}>;
+}> {
+ return inRoot(root,async directory=>{
+  const included:string[]=[];
+  const excludedList:Array<{path:string;reason:'ignored-directory'|'sensitive-file'|'symlink'}>=[];
+  async function walk(parent:FileHandle,dir:string) {
+   for(const entry of await readdir(descriptor(parent),{withFileTypes:true})){
+    const path=dir?dir+'/'+entry.name:entry.name;
+    if(entry.isSymbolicLink()){excludedList.push({path,reason:'symlink'});continue;}
+    if(ignoredDirs.has(entry.name)){excludedList.push({path,reason:'ignored-directory'});continue;}
+    if(excluded(entry.name)){excludedList.push({path,reason:'sensitive-file'});continue;}
+    projectParts(path);
+    if(entry.isDirectory())await inDirectory(parent,[entry.name],false,child=>walk(child,path));
+    else if(entry.isFile()){
+     included.push(path);
+     if(included.length>20000)throw new AppError('Project exceeds 20,000 included files. Import a narrower folder.');
+    }
+   }
+  }
+  await walk(directory,'');
+  return {includedFiles:included.sort(),excludedEntries:excludedList.sort((a,b)=>a.path.localeCompare(b.path))};
+ });
+}
 async function captureDirectory(directory:FileHandle) {
  // File names such as __proto__ must remain ordinary captured entries.
  const files:Record<string,Buffer>=Object.create(null);
