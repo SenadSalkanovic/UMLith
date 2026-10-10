@@ -1,11 +1,12 @@
 import {it,expect} from 'vitest';
 import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN} from '../server/analyzer';
-import {GraphSchema,resolveSourceEvidence} from '../shared/model';
-import {hash,captureSourceRevision} from '../server/files';
+import {GraphSchema,resolveSourceEvidence,type AgentJob} from '../shared/model';
+import {hash,captureSourceRevision,captureFiles,hashes} from '../server/files';
 import {mkdtemp,writeFile,readFile,cp,rm,mkdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {ProjectStore} from '../server/store';
+import {freezeNode,evaluateFreeze,validateCandidate,protectionIssues} from '../server/review';
 it('extracts source-backed symbols, calls, workflows and Prisma relationships',async()=>{
  const a=await new Analyzer().analyze(resolve('examples/shop'));
  expect(a.graph.schemaVersion).toBe(1);
@@ -864,5 +865,318 @@ it('imported code changes only the implemented graph, preserving human-authored 
   expect(reloaded.analysis!.graph.nodes.some(n => n.name === 'TaskService')).toBe(true);
  } finally {
   await rm(tempDir, { recursive: true, force: true });
+ }
+});
+
+it('extracts optional, generic, and overloaded signatures, and interface member shapes (T035 concrete scenario 1)', async () => {
+ const fixtureDir = resolve('tests/fixtures/typescript-contracts');
+ const analyzer = new Analyzer();
+ const analysis = await analyzer.analyze(fixtureDir);
+
+ // Schema validity and successful analysis
+ expect(analysis.graph.schemaVersion).toBe(1);
+ expect(GraphSchema.safeParse(analysis.graph).success).toBe(true);
+ expect(analysis.status).toBe('current');
+ expect(analysis.quality.diagnostics).toEqual([]);
+ expect(analysis.quality.unresolvedReferences).toBe(0);
+
+ const nodes = analysis.graph.nodes;
+ const edges = analysis.graph.edges;
+
+ // 1. Generic interface with index signature and optional properties
+ const identifiable = nodes.find(n => n.kind === 'interface' && n.name === 'Identifiable')!;
+ expect(identifiable).toBeDefined();
+ expect(identifiable.contract).toContain('[key: string]: unknown');
+ expect(identifiable.contract).toContain('displayName?: string');
+ expect(identifiable.contract).toContain('id: TKey');
+ expect(identifiable.contract).toContain('metadata?: Record<string, unknown>');
+
+ // 2. Generic interface with overloaded methods
+ const queryable = nodes.find(n => n.kind === 'interface' && n.name === 'Queryable')!;
+ expect(queryable).toBeDefined();
+ expect(queryable.contract).toContain('query: {');
+ expect(queryable.contract).toContain('(id: string): Promise<T | null>;');
+ expect(queryable.contract).toContain('(ids: string[]): Promise<T[]>;');
+ expect(queryable.contract).toContain('(filter: { tag: string; }, limit?: number): Promise<T[]>;');
+
+ const queryableQuery = nodes.find(n => n.kind === 'function' && n.name === 'query' && n.parentId === queryable.id)!;
+ expect(queryableQuery).toBeDefined();
+ const queryableQueryLines = queryableQuery.contract.split('\n');
+ expect(queryableQueryLines).toContain('query(id: string): Promise<T | null>');
+ expect(queryableQueryLines).toContain('query(ids: string[]): Promise<T[]>');
+ expect(queryableQueryLines).toContain('query(filter: { tag: string; }, limit?: number): Promise<T[]>');
+
+ // 3. Call signature on interface
+ const transformer = nodes.find(n => n.kind === 'interface' && n.name === 'Transformer')!;
+ expect(transformer).toBeDefined();
+ expect(transformer.contract).toContain('(input: TInput, options?: { strict?: boolean; }): TOutput');
+
+ // 4. Construct signature on interface
+ const builder = nodes.find(n => n.kind === 'interface' && n.name === 'Builder')!;
+ expect(builder).toBeDefined();
+ expect(builder.contract).toContain('new (initialConfig?: Record<string, unknown>): TInstance');
+
+ // 5. Standalone overloaded function
+ const formatValueFn = nodes.find(n => n.kind === 'function' && n.name === 'formatValue')!;
+ expect(formatValueFn).toBeDefined();
+ const formatLines = formatValueFn.contract.split('\n');
+ expect(formatLines).toContain('formatValue(value: string): string');
+ expect(formatLines).toContain('formatValue(value: number, precision?: number): string');
+ expect(formatLines).toContain('formatValue(value: string | number, precision?: number): string');
+
+ // 6. Generic function with constraint, optional parameter, default parameter, and Promise return type
+ const processBatchFn = nodes.find(n => n.kind === 'function' && n.name === 'processBatch')!;
+ expect(processBatchFn).toBeDefined();
+ expect(processBatchFn.contract).toContain('processBatch<T extends Identifiable<string>>');
+ expect(processBatchFn.contract).toContain('items: T[]');
+ expect(processBatchFn.contract).toContain('batchSize?: number');
+ expect(processBatchFn.contract).toContain('options?: { dryRun?: boolean; }');
+ expect(processBatchFn.contract).toContain('Promise<{ processed: T[]; count: number; }>');
+
+ // 7. Generic arrow function with optional parameter
+ const transformListFn = nodes.find(n => n.kind === 'function' && n.name === 'transformList')!;
+ expect(transformListFn).toBeDefined();
+ expect(transformListFn.contract).toContain('transformList<T, R>');
+ expect(transformListFn.contract).toContain('list: T[]');
+ expect(transformListFn.contract).toContain('mapper?: (item: T) => R');
+ expect(transformListFn.contract).toContain('R[]');
+
+ // 8. Interface inheritance
+ const item = nodes.find(n => n.kind === 'interface' && n.name === 'Item')!;
+ expect(item).toBeDefined();
+ expect(item.contract).toContain('id: string');
+ expect(item.contract).toContain('name: string');
+ expect(item.contract).toContain('price?: number');
+
+ const itemInheritsIdentifiable = edges.find(
+  e => e.source === item.id && e.target === identifiable.id && e.kind === 'inherits'
+ );
+ expect(itemInheritsIdentifiable).toBeDefined();
+
+ // 9. Class implementing Queryable<Item>
+ const itemService = nodes.find(n => n.kind === 'class' && n.name === 'ItemService')!;
+ expect(itemService).toBeDefined();
+ const itemServiceImplementsQueryable = edges.find(
+  e => e.source === itemService.id && e.target === queryable.id && e.kind === 'implements'
+ );
+ expect(itemServiceImplementsQueryable).toBeDefined();
+
+ const itemServiceCtor = nodes.find(n => n.kind === 'function' && n.name === 'constructor' && n.parentId === itemService.id)!;
+ expect(itemServiceCtor).toBeDefined();
+ expect(itemServiceCtor.contract).toContain('constructor(region?: string');
+ expect(itemServiceCtor.contract).toContain('): ItemService');
+
+ const itemServiceActive = nodes.find(n => n.kind === 'function' && n.name === 'active' && n.parentId === itemService.id)!;
+ expect(itemServiceActive).toBeDefined();
+ const activeLines = itemServiceActive.contract.split('\n');
+ expect(activeLines).toContain('active(): boolean');
+ expect(activeLines).toContain('active(val: boolean): void');
+
+ const itemServiceQuery = nodes.find(n => n.kind === 'function' && n.name === 'query' && n.parentId === itemService.id)!;
+ expect(itemServiceQuery).toBeDefined();
+ const serviceQueryLines = itemServiceQuery.contract.split('\n');
+ expect(serviceQueryLines).toContain('query(id: string): Promise<Item | null>');
+ expect(serviceQueryLines).toContain('query(ids: string[]): Promise<Item[]>');
+ expect(serviceQueryLines).toContain('query(filter: { tag: string; }, limit?: number): Promise<Item[]>');
+ expect(serviceQueryLines).toContain('query(arg: string | string[] | { tag: string; }, limit?: number): Promise<Item | null | Item[]>');
+
+ const itemServiceValidate = nodes.find(n => n.kind === 'function' && n.name === 'validateItem' && n.parentId === itemService.id)!;
+ expect(itemServiceValidate).toBeDefined();
+ expect(itemServiceValidate.contract).toContain('validateItem(item: Item, checkPrice?: boolean): boolean');
+
+ // 10. Acceptance Criterion 3: Extracted signatures remain source-backed
+ for (const node of [formatValueFn, processBatchFn, transformListFn, itemServiceQuery, queryableQuery, identifiable, queryable, itemService]) {
+  expect(node.source).toBeDefined();
+  expect(node.source?.path).toBe('src/contracts.ts');
+  expect(node.source?.hash).toBe(analysis.files['src/contracts.ts'].hash);
+  expect(node.source?.revision).toBe(analysis.revision);
+  const evidence = resolveSourceEvidence(node.source, analysis, analysis.revision);
+  expect(evidence.status).toBe('current');
+  if (evidence.status === 'current') {
+   expect(evidence.text.length).toBe(node.source!.end - node.source!.start);
+  }
+ }
+});
+
+it('imports an unresolved parameter type and observes incomplete evidence (T035 concrete scenario 2 & AC 2)', async () => {
+ const dir = await mkdtemp(join(tmpdir(), 'architect-contracts-unresolved-'));
+ try {
+  await mkdir(join(dir, 'src'), { recursive: true });
+  await writeFile(
+   join(dir, 'package.json'),
+   JSON.stringify({ name: 'test-unresolved', version: '1.0.0', dependencies: { typescript: '6.0.3' } })
+  );
+  await writeFile(
+   join(dir, 'tsconfig.json'),
+   JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', strict: true, skipLibCheck: true, noEmit: true }, include: ['src/**/*'] })
+  );
+  await writeFile(
+   join(dir, 'src', 'service.ts'),
+   `export function syncOrder(order: NonExistentOrderType, timeout?: number): Promise<boolean> {
+  return Promise.resolve(true);
+}
+export interface OrderHandler {
+  handle(payload: MissingPayload): void;
+}
+`
+  );
+
+  const analyzer = new Analyzer();
+  const a = await analyzer.analyze(dir);
+
+  // Status is incomplete / partial, never labeled current
+  expect(a.status).toBe('partial');
+  expect(a.status).not.toBe('current');
+
+  // Diagnostics are attached to unresolved contract evidence
+  expect(a.quality.diagnostics.length).toBeGreaterThan(0);
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: 'unresolved-type',
+    severity: 'error',
+    message: expect.stringContaining('syncOrder'),
+   })
+  );
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: 'unresolved-type',
+    severity: 'error',
+    message: expect.stringContaining('OrderHandler'),
+   })
+  );
+  // Compiler TS2304 is also present
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: '2304',
+    severity: 'error',
+   })
+  );
+
+  // Unresolved references counter reflects the incomplete contract types
+  expect(a.quality.unresolvedReferences).toBeGreaterThanOrEqual(2);
+
+  // Extracted signatures remain source-backed in the implemented model
+  const syncFn = a.graph.nodes.find(n => n.name === 'syncOrder')!;
+  expect(syncFn).toBeDefined();
+  expect(syncFn.contract).toContain('syncOrder(order: NonExistentOrderType, timeout?: number): Promise<boolean>');
+  expect(syncFn.source).toBeDefined();
+  expect(syncFn.source?.path).toBe('src/service.ts');
+
+  const handlerIface = a.graph.nodes.find(n => n.name === 'OrderHandler')!;
+  expect(handlerIface).toBeDefined();
+  expect(handlerIface.source).toBeDefined();
+  expect(handlerIface.source?.path).toBe('src/service.ts');
+
+  // AC 2: Unresolved types never count as verified contracts
+  // 1. evaluateFreeze rejects freezing the contract because evidence is partial
+  const freezeEval = evaluateFreeze(syncFn, 'frozen-contract', a);
+  expect(freezeEval.allowed).toBe(false);
+  expect(freezeEval.reason).toContain('Freeze contract cannot be verified due to compiler/type errors');
+
+  // 2. freezeNode throws because evidence is not current
+  expect(() => freezeNode(syncFn, 'frozen-contract', a)).toThrow();
+
+  // 3. In protection review, unverified contracts are flagged
+  const store = new ProjectStore(dir);
+  const project = await store.create({ name: 'UnresolvedContractTest', root: dir });
+  // Manually define a frozen-contract specification requiring verified contract
+  const frozenSpecNode = {
+   ...syncFn,
+   policy: 'frozen-contract' as const,
+   baseline: { source: syncFn.source, contract: syncFn.contract },
+  };
+  project.specification = { schemaVersion: 1, nodes: [frozenSpecNode], edges: [], requirements: [] };
+  const issues = protectionIssues(project, a);
+  expect(issues).toContainEqual(
+   expect.objectContaining({
+    code: 'unverified-contract',
+    nodeId: syncFn.id,
+    message: expect.stringContaining('syncOrder'),
+   })
+  );
+ } finally {
+  await rm(dir, { recursive: true, force: true });
+ }
+});
+
+it('ensures interface changes are structurally visible while internal edits preserve frozen contracts (T035 AC 1)', async () => {
+ const dir = await mkdtemp(join(tmpdir(), 'architect-contracts-structural-'));
+ try {
+  const fixtureDir = resolve('tests/fixtures/typescript-contracts');
+  const projectDir = join(dir, 'project');
+  const candidateDir = join(dir, 'candidate');
+  await cp(fixtureDir, projectDir, { recursive: true });
+
+  const store = new ProjectStore(dir);
+  const project = await store.create({ name: 'StructuralReviewTest', root: projectDir });
+  const analyzer = new Analyzer();
+  const initialAnalysis = await analyzer.analyze(projectDir);
+  await store.updateAnalysis(project.id, initialAnalysis);
+
+  const queryableNode = initialAnalysis.graph.nodes.find(n => n.name === 'Queryable' && n.kind === 'interface')!;
+  const itemServiceNode = initialAnalysis.graph.nodes.find(n => n.name === 'ItemService' && n.kind === 'class')!;
+
+  // Freeze the interface contract
+  const frozenQueryable = freezeNode({ ...queryableNode, parentId: undefined }, 'frozen-contract', initialAnalysis);
+  const frozenService = freezeNode({ ...itemServiceNode, parentId: undefined }, 'frozen-contract', initialAnalysis);
+
+  await store.updateSpec(project.id, 0, {
+   nodes: [frozenQueryable, frozenService],
+   edges: [],
+  });
+
+  await cp(projectDir, candidateDir, { recursive: true });
+
+  const job: AgentJob = {
+   id: 'job-1',
+   projectId: project.id,
+   kind: 'implementation',
+   status: 'review',
+   createdAt: new Date().toISOString(),
+   specRevision: 1,
+   sourceHashes: hashes(await captureFiles(projectDir)),
+   task: 'Internal change only',
+   scope: ['src/contracts.ts'],
+   workspace: candidateDir,
+   events: [],
+  };
+
+  // Case A: Internal implementation change only in ItemService body
+  // Modifying query implementation return value while preserving all interface contracts
+  const originalCode = await readFile(join(candidateDir, 'src', 'contracts.ts'), 'utf8');
+  const internalEditCode = originalCode.replace('return null;', 'return { id: "custom", name: "Internal Edit" } as any;');
+  await writeFile(join(candidateDir, 'src', 'contracts.ts'), internalEditCode);
+
+  const reportInternal = await validateCandidate(await store.get(project.id), job);
+  // Internal edits preserve frozen contract
+  expect(reportInternal.issues.filter(i => i.code === 'frozen-contract')).toHaveLength(0);
+  expect(reportInternal.passed).toBe(true);
+
+  // Case B: Structural interface change (changing method signature parameter type)
+  // query(id: string) -> query(id: number)
+  const interfaceEditCode = originalCode.replace('query(id: string): Promise<T | null>;', 'query(id: number): Promise<T | null>;');
+  await writeFile(join(candidateDir, 'src', 'contracts.ts'), interfaceEditCode);
+
+  const reportInterfaceEdit = await validateCandidate(await store.get(project.id), job);
+  expect(reportInterfaceEdit.passed).toBe(false);
+  expect(reportInterfaceEdit.issues).toContainEqual(
+   expect.objectContaining({
+    code: 'frozen-contract',
+    message: expect.stringContaining('Queryable'),
+   })
+  );
+
+  // Case C: Structural interface change (changing optionality or member shape)
+  // displayName?: string -> displayName: string (optional property becomes required)
+  const optionalityEditCode = originalCode.replace('displayName?: string;', 'displayName: string;');
+  await writeFile(join(candidateDir, 'src', 'contracts.ts'), optionalityEditCode);
+
+  const candidateAnalysis = await analyzer.analyze(candidateDir);
+  const changedIdentifiable = candidateAnalysis.graph.nodes.find(n => n.name === 'Identifiable')!;
+  // Interface change is structurally visible in the contract property string
+  expect(changedIdentifiable.contract).toContain('displayName: string');
+  expect(changedIdentifiable.contract).not.toContain('displayName?:');
+ } finally {
+  await rm(dir, { recursive: true, force: true });
  }
 });

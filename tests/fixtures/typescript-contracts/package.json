@@ -1,0 +1,7 @@
+{
+  "name": "fixture-typescript-contracts",
+  "version": "1.0.0",
+  "dependencies": {
+    "typescript": "6.0.3"
+  }
+}

@@ -61,6 +61,14 @@ export function evaluateFreeze(
     };
   }
   if (policy === 'frozen-contract') {
+    if (node.source && analysis && analysis.quality.diagnostics.some(d => d.severity === 'error' && (!d.path || d.path === node.source?.path))) {
+      return {
+        allowed: false,
+        policy,
+        reason: 'Freeze contract cannot be verified due to compiler/type errors: ' + node.name,
+        unresolvedEvidence: 'Analysis contains compiler diagnostics preventing contract verification.',
+      };
+    }
     if (node.contract && node.contract.trim()) {
       return {
         allowed: true,
@@ -164,6 +172,9 @@ export function freezeNode(
     });
   }
   let contract = target.contract;
+  if (node.source && analysis && analysis.quality.diagnostics.some(d => d.severity === 'error' && (!d.path || d.path === node.source?.path))) {
+    throw new AppError('Compiler errors prevent verifying the protected interface: ' + node.name);
+  }
   if (!contract.trim()) {
     if (!node.source) {
       throw new AppError('Freeze contract requires an explicit interface or valid, current source evidence.');

@@ -646,23 +646,167 @@ export class Analyzer {
    const path=relative(root,sf.fileName).replaceAll('\\','/');const checker=program.getTypeChecker();const mid=idFor('module:'+path);
    if((sf as unknown as {parseDiagnostics:ts.Diagnostic[]}).parseDiagnostics.length)throw new AppError('Invalid TypeScript syntax in '+path+'. The last valid graph is retained.');
    const flags=ts.TypeFormatFlags.NoTruncation;
-   function functionContract(n:ts.SignatureDeclaration,name:string){
-    const signature=checker.getSignatureFromDeclaration(n);
-    return name+(signature?checker.signatureToString(signature,n,flags):n.getText(sf).split('{')[0]);
+   function isErrorType(type: ts.Type | undefined, visited = new Set<ts.Type>()): boolean {
+    if (!type || visited.has(type)) return false;
+    visited.add(type);
+    if ((type as any).intrinsicName === 'error') return true;
+    if ((type.flags & ts.TypeFlags.Any) && (type as any).intrinsicName === 'error') return true;
+    if (type.isUnionOrIntersection()) {
+     return type.types.some(t => isErrorType(t, visited));
+    }
+    const typeArgs = checker.getTypeArguments?.(type as ts.TypeReference) || (type as ts.TypeReference).typeArguments;
+    if (typeArgs && typeArgs.some(t => isErrorType(t, visited))) return true;
+    const aliasArgs = type.aliasTypeArguments;
+    if (aliasArgs && aliasArgs.some(t => isErrorType(t, visited))) return true;
+    return false;
    }
-   function shape(n:ts.Node){
+   function checkSignatureUnresolved(sig: ts.Signature, declNode: ts.Node, symbolName: string) {
+    const retType = checker.getReturnTypeOfSignature(sig);
+    if (isErrorType(retType)) {
+     unresolved++;
+     diagnostics.push({
+      severity: 'error',
+      message: `Unresolved return type in contract for ${symbolName}`,
+      path,
+      line: sf.getLineAndCharacterOfPosition(declNode.getStart(sf)).line + 1,
+      code: 'unresolved-type',
+     });
+    }
+    for (const p of sig.parameters) {
+     const decl = p.valueDeclaration || p.declarations?.[0] || declNode;
+     const pt = checker.getTypeOfSymbolAtLocation(p, decl);
+     if (isErrorType(pt)) {
+      unresolved++;
+      diagnostics.push({
+       severity: 'error',
+       message: `Unresolved parameter type in contract for ${symbolName} (${p.getName()})`,
+       path,
+       line: sf.getLineAndCharacterOfPosition(decl.getStart(sf)).line + 1,
+       code: 'unresolved-type',
+      });
+     }
+    }
+    for (const tp of sig.typeParameters || []) {
+     const constraint = checker.getBaseConstraintOfType(tp);
+     if (constraint && isErrorType(constraint)) {
+      unresolved++;
+      diagnostics.push({
+       severity: 'error',
+       message: `Unresolved generic constraint in contract for ${symbolName} (${tp.symbol?.getName() || 'type parameter'})`,
+       path,
+       line: sf.getLineAndCharacterOfPosition(declNode.getStart(sf)).line + 1,
+       code: 'unresolved-type',
+      });
+     }
+     const def = (tp as any).getDefault ? (tp as any).getDefault() : undefined;
+     if (def && isErrorType(def)) {
+      unresolved++;
+      diagnostics.push({
+       severity: 'error',
+       message: `Unresolved default type parameter in contract for ${symbolName} (${tp.symbol?.getName() || 'type parameter'})`,
+       path,
+       line: sf.getLineAndCharacterOfPosition(declNode.getStart(sf)).line + 1,
+       code: 'unresolved-type',
+      });
+     }
+    }
+   }
+   function functionContract(n:ts.SignatureDeclaration,name:string,symbolName:string){
+    const signature=checker.getSignatureFromDeclaration(n);
+    if(signature){
+     checkSignatureUnresolved(signature,n,symbolName);
+     return name+checker.signatureToString(signature,n,flags);
+    }
+    return name+n.getText(sf).split('{')[0];
+   }
+   function shape(n:ts.Node,symbolName:string){
     const type=checker.getTypeAtLocation(n);
-    return checker.getPropertiesOfType(type).map(p=>{
+    const members: string[] = [];
+    if(ts.isInterfaceDeclaration(n)||ts.isTypeAliasDeclaration(n)){
+     for(const sig of checker.getSignaturesOfType(type, ts.SignatureKind.Call)){
+      checkSignatureUnresolved(sig, n, symbolName);
+      members.push(checker.signatureToString(sig, n, flags));
+     }
+     for(const sig of checker.getSignaturesOfType(type, ts.SignatureKind.Construct)){
+      checkSignatureUnresolved(sig, n, symbolName);
+      members.push('new ' + checker.signatureToString(sig, n, flags));
+     }
+    }
+    for(const info of checker.getIndexInfosOfType(type)){
+     if(isErrorType(info.keyType) || isErrorType(info.type)){
+      unresolved++;
+      diagnostics.push({
+       severity: 'error',
+       message: `Unresolved index signature type in contract for ${symbolName}`,
+       path,
+       line: sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1,
+       code: 'unresolved-type',
+      });
+     }
+     const keyStr = info.keyType ? checker.typeToString(info.keyType, n, flags) : 'string';
+     members.push(`[key: ${keyStr}]: ${checker.typeToString(info.type, n, flags)}`);
+    }
+    for(const p of checker.getPropertiesOfType(type)){
      const decl=p.valueDeclaration||p.declarations?.[0]||n;
-     return p.getName()+(p.flags&ts.SymbolFlags.Optional?'?':'')+': '+checker.typeToString(checker.getTypeOfSymbolAtLocation(p,decl),decl,flags);
-    }).sort().join('; ');
+     const propType=checker.getTypeOfSymbolAtLocation(p,decl);
+     if(isErrorType(propType)){
+      unresolved++;
+      diagnostics.push({
+       severity: 'error',
+       message: `Unresolved property type in contract for ${symbolName} (${p.getName()})`,
+       path,
+       line: sf.getLineAndCharacterOfPosition(decl.getStart(sf)).line + 1,
+       code: 'unresolved-type',
+      });
+     }
+     for(const sig of checker.getSignaturesOfType(propType, ts.SignatureKind.Call)){
+      checkSignatureUnresolved(sig, decl, symbolName + '.' + p.getName());
+     }
+     for(const sig of checker.getSignaturesOfType(propType, ts.SignatureKind.Construct)){
+      checkSignatureUnresolved(sig, decl, symbolName + '.' + p.getName());
+     }
+     members.push(p.getName()+(p.flags&ts.SymbolFlags.Optional?'?':'')+': '+checker.typeToString(propType,decl,flags));
+    }
+    if((ts.isClassDeclaration(n)||ts.isInterfaceDeclaration(n))&&n.heritageClauses){
+     for(const clause of n.heritageClauses){
+      for(const t of clause.types){
+       const heritageType=checker.getTypeAtLocation(t);
+       if(isErrorType(heritageType)){
+        unresolved++;
+        diagnostics.push({
+         severity: 'error',
+         message: `Unresolved base type in contract for ${symbolName} (${t.expression.getText(sf)})`,
+         path,
+         line: sf.getLineAndCharacterOfPosition(t.getStart(sf)).line + 1,
+         code: 'unresolved-type',
+        });
+       }
+      }
+     }
+    }
+    return members.sort().join('; ');
    }
    function visit(n:ts.Node,parentId:string,qualified:string){
     let id:string|undefined;let name:string|undefined;let kind:ProgramNode['kind']|undefined;let contract='';
     let enumFields:{name:string;type:string}[]=[];
     if(ts.isClassDeclaration(n)||ts.isInterfaceDeclaration(n)||ts.isTypeAliasDeclaration(n)){
-     name=n.name?.text||'default';kind=ts.isClassDeclaration(n)?'class':'interface';contract=shape(n);
-     if(ts.isTypeAliasDeclaration(n))contract=checker.typeToString(checker.getTypeAtLocation(n),n,flags|ts.TypeFormatFlags.InTypeAlias);
+     name=n.name?.text||'default';kind=ts.isClassDeclaration(n)?'class':'interface';
+     const symbolName=qualified?qualified+'.'+name:name;
+     contract=shape(n,symbolName);
+     if(ts.isTypeAliasDeclaration(n)){
+      const aliasType=checker.getTypeAtLocation(n);
+      if(isErrorType(aliasType)){
+       unresolved++;
+       diagnostics.push({
+        severity: 'error',
+        message: `Unresolved type alias in contract for ${symbolName}`,
+        path,
+        line: sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1,
+        code: 'unresolved-type',
+       });
+      }
+      contract=checker.typeToString(aliasType,n,flags|ts.TypeFormatFlags.InTypeAlias);
+     }
     }else if(ts.isEnumDeclaration(n)){
      name=n.name.text;kind='enum';contract='enum '+name+' { '+n.members.map(m=>m.getText(sf)).join(', ')+' }';
      enumFields=n.members.map(m=>({name:m.name.getText(sf),type:'enum'}));
@@ -670,16 +814,25 @@ export class Analyzer {
      name=n.name.text;kind='module';contract='namespace '+name;
     }else if(ts.isFunctionDeclaration(n)||ts.isMethodDeclaration(n)||ts.isMethodSignature(n)||ts.isConstructorDeclaration(n)||ts.isGetAccessorDeclaration(n)||ts.isSetAccessorDeclaration(n)){
      name=ts.isConstructorDeclaration(n)?'constructor':n.name?.getText(sf)||'default';
-     kind='function';contract=functionContract(n,name);
+     const symbolName=qualified?qualified+'.'+name:name;
+     kind='function';contract=functionContract(n,name,symbolName);
     }else if((ts.isVariableDeclaration(n)||ts.isPropertyDeclaration(n))&&n.initializer&&(ts.isArrowFunction(n.initializer)||ts.isFunctionExpression(n.initializer))){
-     name=n.name.getText(sf);kind='function';contract=functionContract(n.initializer,name);
+     name=n.name.getText(sf);kind='function';
+     const symbolName=qualified?qualified+'.'+name:name;
+     contract=functionContract(n.initializer,name,symbolName);
     }else if((ts.isVariableDeclaration(n)||ts.isPropertyDeclaration(n))&&n.initializer&&(ts.isClassDeclaration(n.initializer)||ts.isClassExpression(n.initializer))){
-     name=n.name.getText(sf);kind='class';contract=shape(n.initializer);
+     name=n.name.getText(sf);kind='class';
+     const symbolName=qualified?qualified+'.'+name:name;
+     contract=shape(n.initializer,symbolName);
     }else if(ts.isExportAssignment(n)){
      if(ts.isArrowFunction(n.expression)||ts.isFunctionExpression(n.expression)){
-      name='default';kind='function';contract=functionContract(n.expression,name);
+      name='default';kind='function';
+      const symbolName=qualified?qualified+'.'+name:name;
+      contract=functionContract(n.expression,name,symbolName);
      }else if(ts.isClassExpression(n.expression)){
-      name=n.expression.name?.text||'default';kind='class';contract=shape(n.expression);
+      name=n.expression.name?.text||'default';kind='class';
+      const symbolName=qualified?qualified+'.'+name:name;
+      contract=shape(n.expression,symbolName);
      }
     }
     if(kind&&name){
