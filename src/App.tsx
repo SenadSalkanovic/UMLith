@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import type { Project, Graph, Layout } from '../shared/model';
-import type { CreateProjectRequest } from '../shared/api';
+import type { CreateProjectRequest, RevisionRecord } from '../shared/api';
 import type { ViewState, SpecificationState, AnalysisState, WorkspaceError, SyncStatus } from './types';
 import * as api from './api';
 import { Header } from './components/Header';
@@ -16,7 +16,8 @@ import { ArchitectureEditor } from './components/ArchitectureEditor';
 import { ErEditor } from './components/ErEditor';
 import { FunctionEditor } from './components/FunctionEditor';
 import { WorkflowEditor } from './components/WorkflowEditor';
-import { Loader2 } from 'lucide-react';
+import { RevisionHistory, type SpecificationConflictState } from './components/RevisionHistory';
+import { Loader2, Clock, AlertTriangle } from 'lucide-react';
 
 export interface AppProps {
   initialProject?: Project;
@@ -60,6 +61,12 @@ export const App: React.FC<AppProps> = ({
   const [workflowEditorTab, setWorkflowEditorTab] = useState<'steps' | 'connect' | 'opaque' | 'overview' | 'remove'>('steps');
   const [workflowEditorFunctionId, setWorkflowEditorFunctionId] = useState<string | null>(null);
 
+  // Revision History & Conflict State (T028)
+  const [isRevisionHistoryOpen, setIsRevisionHistoryOpen] = useState<boolean>(false);
+  const [activeHistoricalRevision, setActiveHistoricalRevision] = useState<number | null>(null);
+  const [conflictState, setConflictState] = useState<SpecificationConflictState | null>(null);
+  const [revisionsList, setRevisionsList] = useState<RevisionRecord[]>([]);
+
   // 3. Specification State (Persistent & Versioned Intent)
   const [specificationState, setSpecificationState] = useState<SpecificationState>(() => ({
     project: initialProject || null,
@@ -93,6 +100,17 @@ export const App: React.FC<AppProps> = ({
     },
   });
 
+  // Fetch specification history
+  const fetchRevisionsList = useCallback(async (projectId: string) => {
+    if (!projectId || projectId.startsWith('/test')) return;
+    try {
+      const history = await api.getSpecificationHistory(projectId, apiBaseUrl);
+      setRevisionsList(history);
+    } catch {
+      // In-memory or offline fallback
+    }
+  }, [apiBaseUrl]);
+
   // Load project by ID
   const loadProjectById = useCallback(async (id: string) => {
     setIsLoading(true);
@@ -112,7 +130,9 @@ export const App: React.FC<AppProps> = ({
         lastChecked: Date.now(),
       });
 
-      // Reset selection and scope for newly loaded project
+      // Reset selection, scope, historical view, and conflict state on project load
+      setActiveHistoricalRevision(null);
+      setConflictState(null);
       setViewState(prev => ({
         ...prev,
         selectedId: null,
@@ -120,6 +140,9 @@ export const App: React.FC<AppProps> = ({
         activeScope: null,
         searchQuery: '',
       }));
+
+      // Fetch saved revisions
+      await fetchRevisionsList(proj.id);
     } catch (err: any) {
       const actionableSteps = err instanceof api.ApiConnectionError && err.actionableSteps
         ? err.actionableSteps
@@ -214,9 +237,15 @@ export const App: React.FC<AppProps> = ({
     }));
   };
 
+  const historicalRecord = activeHistoricalRevision !== null
+    ? revisionsList.find(r => r.revision === activeHistoricalRevision) || null
+    : null;
+
+  const isHistoricalActive = activeHistoricalRevision !== null && activeHistoricalRevision !== specificationState.specRevision;
+
   const activeGraph = viewState.graphContext === 'implemented'
     ? (analysisState.analysis?.graph || null)
-    : specificationState.specification;
+    : (historicalRecord ? historicalRecord.graph : specificationState.specification);
 
   const handleSelectNode = (id: string | null) => {
     if (!id) {
@@ -354,6 +383,15 @@ export const App: React.FC<AppProps> = ({
   };
 
   const handleDeleteNode = async (id: string) => {
+    if (isHistoricalActive) {
+      setError({
+        title: 'Action Blocked in Historical View',
+        message: 'Historical specification snapshots are read-only. Edits cannot overwrite newer data implicitly.',
+        actionableSteps: ['Exit the historical view or restore this revision as a new forward revision.'],
+      });
+      return;
+    }
+
     const currentSpec = specificationState.specification;
     if (!currentSpec) return;
 
@@ -468,22 +506,45 @@ export const App: React.FC<AppProps> = ({
   };
 
   const handleUpdateSpecification = async (nextGraph: Graph) => {
+    if (isHistoricalActive) {
+      throw new Error('Historical view is read-only. Cannot overwrite newer data implicitly.');
+    }
+
     const nextRevision = specificationState.specRevision + 1;
 
     // Persist to server
     if (specificationState.project && !specificationState.project.root?.startsWith('/test')) {
-      const updatedProject = await api.updateSpecification(
-        specificationState.project.id,
-        specificationState.specRevision,
-        nextGraph,
-        apiBaseUrl
-      );
-      setSpecificationState(prev => ({
-        ...prev,
-        specRevision: updatedProject.specRevision,
-        specification: updatedProject.specification,
-        project: updatedProject,
-      }));
+      try {
+        const updatedProject = await api.updateSpecification(
+          specificationState.project.id,
+          specificationState.specRevision,
+          nextGraph,
+          apiBaseUrl
+        );
+        setSpecificationState(prev => ({
+          ...prev,
+          specRevision: updatedProject.specRevision,
+          specification: updatedProject.specification,
+          project: updatedProject,
+        }));
+        setConflictState(null);
+        await fetchRevisionsList(updatedProject.id);
+      } catch (err: any) {
+        if (err?.statusCode === 409 || err?.message?.includes('conflict') || err?.message?.includes('Specification changed')) {
+          // Strictly preserve draft and surface actionable conflict recovery!
+          const currentRev = err?.currentRevision ?? (specificationState.project.specRevision + 1);
+          setConflictState({
+            projectId: specificationState.project.id,
+            expectedRevision: specificationState.specRevision,
+            currentRevision: currentRev,
+            draftGraph: nextGraph,
+            errorMessage: err?.message || 'Specification conflict: draft based on stale revision',
+            timestamp: Date.now(),
+          });
+          return;
+        }
+        throw err;
+      }
     } else {
       // Local fallback for in-memory or isolated test projects
       setSpecificationState(prev => ({
@@ -499,6 +560,90 @@ export const App: React.FC<AppProps> = ({
           : null,
       }));
     }
+  };
+
+  // Restore a historical revision as an explicit forward mutation
+  const handleRestoreRevision = async (targetRevision: RevisionRecord) => {
+    if (!specificationState.project) return;
+    const currentRev = specificationState.project.specRevision;
+    const nextRevision = currentRev + 1;
+
+    if (!specificationState.project.root?.startsWith('/test')) {
+      try {
+        const updated = await api.updateSpecification(
+          specificationState.project.id,
+          currentRev,
+          targetRevision.graph,
+          apiBaseUrl
+        );
+        setSpecificationState(prev => ({
+          ...prev,
+          specRevision: updated.specRevision,
+          specification: updated.specification,
+          project: updated,
+        }));
+        setActiveHistoricalRevision(null);
+        await fetchRevisionsList(updated.id);
+      } catch (err: any) {
+        setError({
+          title: 'Failed to Restore Revision',
+          message: err?.message || 'Conflict occurred while attempting to restore historical revision.',
+          actionableSteps: ['Reload the latest specification and retry restoring.'],
+        });
+      }
+    } else {
+      // In-memory test fallback
+      setSpecificationState(prev => ({
+        ...prev,
+        specRevision: nextRevision,
+        specification: targetRevision.graph,
+        project: prev.project
+          ? {
+              ...prev.project,
+              specRevision: nextRevision,
+              specification: targetRevision.graph,
+            }
+          : null,
+      }));
+      setActiveHistoricalRevision(null);
+    }
+  };
+
+  const handleResolveConflictReload = async () => {
+    if (!specificationState.project) return;
+    await loadProjectById(specificationState.project.id);
+    setConflictState(null);
+  };
+
+  const handleResolveConflictApply = async () => {
+    if (!conflictState || !specificationState.project) return;
+    try {
+      const freshProject = await api.getProject(specificationState.project.id, apiBaseUrl);
+      const updated = await api.updateSpecification(
+        freshProject.id,
+        freshProject.specRevision,
+        conflictState.draftGraph,
+        apiBaseUrl
+      );
+      setSpecificationState(prev => ({
+        ...prev,
+        specRevision: updated.specRevision,
+        specification: updated.specification,
+        project: updated,
+      }));
+      setConflictState(null);
+      await fetchRevisionsList(updated.id);
+    } catch (err: any) {
+      setError({
+        title: 'Failed to Apply Conflict Draft',
+        message: err?.message || 'Could not apply draft on top of latest revision.',
+        actionableSteps: ['Inspect conflict diff and review changes before retrying.'],
+      });
+    }
+  };
+
+  const handleResolveConflictDiscard = () => {
+    setConflictState(null);
   };
 
   // Reconcile removed items or deleted nodes/edges to prevent stale selections
@@ -648,7 +793,79 @@ export const App: React.FC<AppProps> = ({
         onOpenErEditor={() => handleOpenErEditor('entities')}
         onOpenFunctionEditor={() => handleOpenFunctionEditor('details')}
         onOpenWorkflowEditor={() => handleOpenWorkflowEditor('steps')}
+        onOpenRevisionHistory={() => setIsRevisionHistoryOpen(true)}
       />
+
+      {/* Workspace Conflict Alert Banner */}
+      {conflictState && (
+        <div className="workspace-conflict-banner alert alert-warning" data-testid="workspace-conflict-banner">
+          <AlertTriangle size={16} />
+          <div className="conflict-banner-text">
+            <span>
+              <strong>Specification Conflict:</strong> Your draft based on Revision {conflictState.expectedRevision} was rejected because the server is at Revision {conflictState.currentRevision}. Your draft has been preserved.
+            </span>
+          </div>
+          <div className="conflict-banner-buttons">
+            <button
+              type="button"
+              className="btn btn-secondary btn-xs"
+              onClick={handleResolveConflictReload}
+              data-testid="workspace-conflict-reload-btn"
+            >
+              Reload Latest
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-xs"
+              onClick={() => setIsRevisionHistoryOpen(true)}
+              data-testid="workspace-conflict-review-btn"
+            >
+              Review & Resolve
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-xs"
+              onClick={handleResolveConflictApply}
+              data-testid="workspace-conflict-apply-btn"
+            >
+              Apply Draft as Rev {conflictState.currentRevision + 1}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Historical View Warning Banner */}
+      {isHistoricalActive && (
+        <div className="workspace-historical-banner alert alert-info" data-testid="historical-view-banner">
+          <Clock size={16} />
+          <div className="historical-banner-text">
+            <span>
+              Viewing historical specification <strong>Revision {activeHistoricalRevision} (Read-Only)</strong>. Current committed revision is <strong>Revision {specificationState.specRevision}</strong>.
+            </span>
+          </div>
+          <div className="historical-banner-buttons">
+            <button
+              type="button"
+              className="btn btn-secondary btn-xs"
+              onClick={() => setActiveHistoricalRevision(null)}
+              data-testid="exit-historical-view-btn"
+            >
+              Exit Historical View
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-xs"
+              onClick={() => {
+                const record = revisionsList.find(r => r.revision === activeHistoricalRevision);
+                if (record) handleRestoreRevision(record);
+              }}
+              data-testid="restore-historical-revision-btn"
+            >
+              Restore as Rev {specificationState.specRevision + 1}
+            </button>
+          </div>
+        </div>
+      )}
 
       <main className="workspace-main" data-testid="workspace-main">
         {/* Panel 1: Project Tree */}
@@ -735,6 +952,8 @@ export const App: React.FC<AppProps> = ({
                 onSelectNode={handleSelectNode}
                 onSelectEdge={handleSelectEdge}
                 apiBaseUrl={apiBaseUrl}
+                onOpenRevisionHistory={() => setIsRevisionHistoryOpen(true)}
+                isReadOnly={isHistoricalActive}
               />
             </div>
           )}
@@ -808,6 +1027,25 @@ export const App: React.FC<AppProps> = ({
         selectedFunctionId={workflowEditorFunctionId || viewState.selectedId}
         onSelectFunction={id => setWorkflowEditorFunctionId(id)}
         initialTab={workflowEditorTab}
+        mode="modal"
+      />
+
+      <RevisionHistory
+        isOpen={isRevisionHistoryOpen}
+        onClose={() => setIsRevisionHistoryOpen(false)}
+        project={specificationState.project}
+        currentRevision={specificationState.specRevision}
+        currentGraph={specificationState.specification}
+        revisions={revisionsList}
+        activeHistoricalRevision={activeHistoricalRevision}
+        onSelectHistoricalRevision={rev => setActiveHistoricalRevision(rev)}
+        onRestoreRevision={handleRestoreRevision}
+        conflict={conflictState}
+        onResolveConflictReload={handleResolveConflictReload}
+        onResolveConflictReview={() => setIsRevisionHistoryOpen(true)}
+        onResolveConflictApply={handleResolveConflictApply}
+        onResolveConflictDiscard={handleResolveConflictDiscard}
+        apiBaseUrl={apiBaseUrl}
         mode="modal"
       />
     </div>

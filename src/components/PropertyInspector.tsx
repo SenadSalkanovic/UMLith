@@ -31,6 +31,7 @@ import {
   RefreshCw,
   Cpu,
   ShieldAlert,
+  Clock,
 } from 'lucide-react';
 
 export interface NodeDraft {
@@ -76,6 +77,8 @@ export interface PropertyInspectorProps {
   apiBaseUrl?: string;
   isEditing?: boolean;
   initialTab?: 'overview' | 'edit' | 'requirements';
+  onOpenRevisionHistory?: () => void;
+  isReadOnly?: boolean;
 }
 
 /**
@@ -505,6 +508,8 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   apiBaseUrl,
   isEditing = false,
   initialTab,
+  onOpenRevisionHistory,
+  isReadOnly = false,
 }) => {
   const selectedNode = viewState.selectedId
     ? graph?.nodes.find(n => n.id === viewState.selectedId) || null
@@ -648,6 +653,10 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   const handleSaveProperties = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!graph) return;
+    if (isReadOnly) {
+      setGeneralError('Historical snapshot is read-only. Cannot overwrite newer data implicitly.');
+      return;
+    }
 
     setGeneralError(null);
     setSaveSuccess(false);
@@ -974,6 +983,13 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
       )}
 
       <div className="panel-content inspector-content">
+        {isReadOnly && (
+          <div className="alert alert-warning historical-readonly-alert" data-testid="inspector-historical-readonly-alert">
+            <Clock size={14} />
+            <span>Historical snapshot is read-only. Edits cannot overwrite newer data implicitly.</span>
+          </div>
+        )}
+
         {activeTab === 'edit' && (selectedNode || selectedEdge) ? (
           <div className="inspector-edit-mode" data-testid="inspector-edit-form">
             <div className="inspector-section">
@@ -997,7 +1013,39 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             {revisionConflict && (
               <div className="alert alert-warning revision-conflict-alert" data-testid="revision-conflict-error">
                 <AlertTriangle size={14} />
-                <span>{revisionConflict}</span>
+                <div className="conflict-alert-content-inner">
+                  <span>{revisionConflict}</span>
+                  <div className="conflict-draft-saved-note" data-testid="conflict-draft-saved-note">
+                    Your unsaved draft text has been preserved.
+                  </div>
+                  <div className="conflict-inspector-actions">
+                    {project && (
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-secondary"
+                        onClick={() => {
+                          setBaseRevision(project.specRevision);
+                          setRevisionConflict(null);
+                        }}
+                        data-testid="inspector-conflict-reload-btn"
+                        title="Acknowledge latest server revision and keep your current draft"
+                      >
+                        Acknowledge & Sync Base Rev
+                      </button>
+                    )}
+                    {onOpenRevisionHistory && (
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-secondary"
+                        onClick={onOpenRevisionHistory}
+                        data-testid="inspector-conflict-review-btn"
+                        title="Open revision history to review conflicts and recover"
+                      >
+                        Review History & Conflicts
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
 

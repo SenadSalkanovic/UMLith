@@ -2,6 +2,7 @@ import type {
   CreateProjectRequest,
   LayoutResponse,
   ApiErrorResponse,
+  RevisionRecord,
 } from '../shared/api';
 import type { Graph, Layout, Project } from '../shared/model';
 
@@ -9,12 +10,28 @@ export class ApiConnectionError extends Error {
   public actionableSteps: string[];
   public statusCode?: number;
   public isConnectionError: boolean;
+  public expectedRevision?: number;
+  public currentRevision?: number;
+  public projectId?: string;
+  public details?: ApiErrorResponse | null;
 
-  constructor(message: string, actionableSteps?: string[], statusCode?: number, isConnectionError = true) {
+  constructor(
+    message: string,
+    actionableSteps?: string[],
+    statusCode?: number,
+    isConnectionError = true,
+    details?: ApiErrorResponse | null
+  ) {
     super(message);
     this.name = 'ApiConnectionError';
     this.statusCode = statusCode;
     this.isConnectionError = isConnectionError;
+    this.details = details;
+    if (details) {
+      this.expectedRevision = details.expectedRevision;
+      this.currentRevision = details.currentRevision;
+      this.projectId = details.projectId;
+    }
     this.actionableSteps = actionableSteps && actionableSteps.length > 0 ? actionableSteps : [
       'Verify that the local architecture workspace service is running (`npm start` or `npm run dev`).',
       'Check that the service is listening on loopback at http://127.0.0.1:4317.',
@@ -83,7 +100,8 @@ async function request<T>(path: string, options: RequestInit = {}, baseUrl?: str
       message,
       steps,
       res.status,
-      false
+      false,
+      errorData
     );
   }
 
@@ -155,6 +173,13 @@ export async function updateSpecification(
     method: 'PUT',
     body: JSON.stringify({ expectedRevision, graph }),
   }, baseUrl);
+}
+
+export async function getSpecificationHistory(
+  id: string,
+  baseUrl?: string
+): Promise<RevisionRecord[]> {
+  return request<RevisionRecord[]>(`/projects/${id}/revisions`, { method: 'GET' }, baseUrl);
 }
 
 export async function getLayout(id: string, baseUrl?: string): Promise<LayoutResponse> {

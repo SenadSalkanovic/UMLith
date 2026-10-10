@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Project } from '../../shared/model';
 import type { SyncStatus, ViewState } from '../types';
-import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database, Terminal, Workflow } from 'lucide-react';
+import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database, Terminal, Workflow, History } from 'lucide-react';
 
 interface HeaderProps {
   project: Project | null;
@@ -14,6 +14,7 @@ interface HeaderProps {
   onOpenErEditor?: () => void;
   onOpenFunctionEditor?: () => void;
   onOpenWorkflowEditor?: () => void;
+  onOpenRevisionHistory?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -27,6 +28,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenErEditor,
   onOpenFunctionEditor,
   onOpenWorkflowEditor,
+  onOpenRevisionHistory,
 }) => {
   const getStatusBadge = () => {
     switch (syncStatus) {
@@ -59,9 +61,21 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="project-target" title={`Target: ${project.target}`}>
               {project.target}
             </span>
-            <span className="project-revision" title={`Specification Revision ${project.specRevision}`}>
-              {`Rev ${project.specRevision}`}
-            </span>
+            {onOpenRevisionHistory ? (
+              <button
+                type="button"
+                className="project-revision btn-revision"
+                onClick={onOpenRevisionHistory}
+                title={`Specification Revision ${project.specRevision} — Click to inspect history`}
+                data-testid="header-revision-badge"
+              >
+                {`Rev ${project.specRevision}`}
+              </button>
+            ) : (
+              <span className="project-revision" title={`Specification Revision ${project.specRevision}`}>
+                {`Rev ${project.specRevision}`}
+              </span>
+            )}
             {getStatusBadge()}
           </>
         ) : (
@@ -135,6 +149,18 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Workflow size={16} />
             <span>Workflows</span>
+          </button>
+        )}
+
+        {onOpenRevisionHistory && (
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenRevisionHistory}
+            title="Inspect Specification Revisions & History"
+            data-testid="header-open-history"
+          >
+            <History size={16} />
+            <span>History</span>
           </button>
         )}
 
