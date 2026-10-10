@@ -28,5 +28,8 @@ export class AnalysisWorker {
  analyzeAndReport(root:string,options?:any):Promise<{analysis:Analysis;report:ImportQualityReport}>{
   return new Promise((resolve,reject)=>{const id=++this.next;this.pending.set(id,{resolve,reject});this.worker.postMessage({id,action:'analyzeAndReport',root,options});});
  }
+ invalidate(reason?:string,paths?:string[]):Promise<void>{
+  return new Promise((resolve,reject)=>{const id=++this.next;this.pending.set(id,{resolve,reject});this.worker.postMessage({id,action:'invalidate',reason,paths});});
+ }
  async close(){for(const t of this.pending.values())t.reject(new Error('Analysis closed'));this.pending.clear();await this.worker.terminate();}
 }

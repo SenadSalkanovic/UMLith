@@ -3,9 +3,12 @@ import {register} from 'tsx/esm/api';
 register();
 const {Analyzer}=await import('./analyzer.ts');
 const analyzer=new Analyzer();
-parentPort.on('message',async({id,action,root,options})=>{
+parentPort.on('message',async({id,action,root,options,reason,paths})=>{
  try{
-  if(action==='analyzeAndReport'){
+  if(action==='invalidate'){
+   analyzer.invalidate(reason,paths);
+   parentPort.postMessage({id,result:true});
+  }else if(action==='analyzeAndReport'){
    const result=await analyzer.analyzeAndReport(root,options);
    parentPort.postMessage({id,result});
   }else{

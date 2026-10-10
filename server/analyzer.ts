@@ -1011,6 +1011,25 @@ export async function validatePrismaSchemaInIsolation(
  }
 }
 
+export interface InvalidationRecord {
+ scope: 'broader' | 'local';
+ reason: string;
+ changedInputs: string[];
+ nonlocalInputs: string[];
+ timestamp: string;
+}
+
+export interface IncrementalAnalysisInfo {
+ isWarm: boolean;
+ scope: 'broader' | 'local';
+ changedInputs: string[];
+ nonlocalInputs: string[];
+ affectedFiles: string[];
+ invalidationReason?: string;
+ reusedPrograms: string[];
+ rebuiltPrograms: string[];
+}
+
 export interface AnalyzeOptions {
  capturedRevision?: CapturedRevision | Record<string, Buffer>;
  captureOptions?: CaptureOptions;
@@ -1019,6 +1038,8 @@ export interface AnalyzeOptions {
  prismaValidationOptions?: PrismaValidationOptions;
  inferredItems?: number;
  aiInferences?: Array<{ id?: string; kind?: string; description?: string }>;
+ invalidate?: boolean;
+ invalidationReason?: string;
 }
 
 export class Analyzer {
@@ -1033,14 +1054,82 @@ export class Analyzer {
  public lastPrismaValidation?: PrismaValidationResult;
  public lastAnalysis?: Analysis;
  public lastReport?: ImportQualityReport;
+ public lastChangedInputs: string[] = [];
+ public lastAffectedFiles: string[] = [];
+ public lastInvalidation?: InvalidationRecord;
+ public lastInvalidationReason?: string;
+ public lastIncrementalInfo?: IncrementalAnalysisInfo;
+ private builderPrograms=new Map<string,ts.SemanticDiagnosticsBuilderProgram>();
  private programs=new Map<string,ts.Program>();
  private sourceCache=new Map<string,{hash:string;source:ts.SourceFile}>();
+ private lastFiles?: Record<string, { hash: string; text: string }>;
  private sequence=0;
 
  constructor(options?: { prismaParserConfig?: PrismaAstConfig['parser'] }) {
   this.prismaParserConfig = options?.prismaParserConfig
    ? { ...PRISMA_PARSER_CONFIG, ...options.prismaParserConfig }
    : PRISMA_PARSER_CONFIG;
+ }
+
+ public getBuilderProgram(key = 'unconfigured'): ts.SemanticDiagnosticsBuilderProgram | undefined {
+  return this.builderPrograms.get(key);
+ }
+
+ public getBuilderPrograms(): ReadonlyMap<string, ts.SemanticDiagnosticsBuilderProgram> {
+  return this.builderPrograms;
+ }
+
+ public invalidate(reason = 'Explicit broader invalidation', paths: string[] = []): void {
+  this.builderPrograms.clear();
+  this.programs.clear();
+  this.sourceCache.clear();
+  this.lastInvalidationReason = reason;
+  this.lastInvalidation = {
+   scope: 'broader',
+   reason,
+   changedInputs: paths,
+   nonlocalInputs: paths,
+   timestamp: new Date().toISOString(),
+  };
+ }
+
+ public getAffectedClosure(changedPaths: string[], targetGraph?: Graph): string[] {
+  const g = targetGraph || this.lastAnalysis?.graph;
+  const result = new Set<string>(changedPaths.map(p => p.replace(/\\/g, '/')));
+  if (!g) return Array.from(result).sort();
+
+  const modulePathsById = new Map<string, string>();
+  for (const n of g.nodes) {
+   if (n.kind === 'module' && n.outputPath) {
+    modulePathsById.set(n.id, n.outputPath.replace(/\\/g, '/'));
+   }
+  }
+
+  const nodeModulePath = new Map<string, string>();
+  for (const n of g.nodes) {
+   if (n.kind === 'module' && n.outputPath) {
+    nodeModulePath.set(n.id, n.outputPath.replace(/\\/g, '/'));
+   } else if (n.parentId && modulePathsById.has(n.parentId)) {
+    nodeModulePath.set(n.id, modulePathsById.get(n.parentId)!);
+   } else if (n.source?.path) {
+    nodeModulePath.set(n.id, n.source.path.replace(/\\/g, '/'));
+   }
+  }
+
+  let expanded = true;
+  while (expanded) {
+   expanded = false;
+   for (const e of g.edges) {
+    const targetMod = nodeModulePath.get(e.target);
+    const sourceMod = nodeModulePath.get(e.source);
+    if (targetMod && sourceMod && result.has(targetMod) && !result.has(sourceMod)) {
+     result.add(sourceMod);
+     expanded = true;
+    }
+   }
+  }
+
+  return Array.from(result).sort();
  }
 
  async discoverInputs(root:string, capturedFiles?: Record<string, Buffer | { hash: string; text: string }>):Promise<AnalysisInputDiscovery>{
@@ -1086,6 +1175,72 @@ export class Analyzer {
   this.lastDiscovery=discovery;
   const eligible=discovery.eligibleFiles;
   const revision=hash(discovery.trackingInputs.map(p=>p+':'+files[p].hash).join('\n'));
+  const prevFiles = this.lastFiles;
+  let isWarm = false;
+  let changedInputs: string[] = [];
+  let nonlocalInputs: string[] = [];
+  let isBroaderInvalidation = false;
+
+  const isNonlocal = (p: string): boolean => {
+   return (
+    discovery.dependencyInputs.includes(p) ||
+    (this.lastDiscovery?.dependencyInputs.includes(p) ?? false) ||
+    /tsconfig[^/]*\.json$/i.test(p) ||
+    /package\.json$/i.test(p) ||
+    /lock/i.test(p) ||
+    /\.d\.[cm]?ts$/i.test(p) ||
+    (/\.json$/i.test(p) && !p.endsWith('.prisma'))
+   );
+  };
+
+  if (prevFiles) {
+   isWarm = true;
+   const currKeys = new Set(Object.keys(files));
+   const prevKeys = new Set(Object.keys(prevFiles));
+
+   for (const k of currKeys) {
+    if (!prevKeys.has(k) || files[k].hash !== prevFiles[k].hash) {
+     changedInputs.push(k);
+     if (isNonlocal(k)) nonlocalInputs.push(k);
+    }
+   }
+   for (const k of prevKeys) {
+    if (!currKeys.has(k)) {
+     changedInputs.push(k);
+     if (isNonlocal(k)) nonlocalInputs.push(k);
+    }
+   }
+   changedInputs.sort();
+   nonlocalInputs.sort();
+  } else {
+   changedInputs = Object.keys(files).sort();
+  }
+
+  if (options?.invalidate || nonlocalInputs.length > 0) {
+   isBroaderInvalidation = true;
+   const reason = options?.invalidationReason || (
+    nonlocalInputs.length > 0
+     ? 'Broader invalidation triggered by nonlocal input change: ' + nonlocalInputs.join(', ')
+     : 'Explicit broader invalidation requested'
+   );
+   this.invalidate(reason, nonlocalInputs.length > 0 ? nonlocalInputs : changedInputs);
+  } else if (prevFiles) {
+   const currKeys = new Set(Object.keys(files));
+   for (const k of Object.keys(prevFiles)) {
+    if (!currKeys.has(k)) {
+     this.sourceCache.delete(k);
+     this.sourceCache.delete(resolve(root, k));
+    }
+   }
+   this.lastInvalidation = {
+    scope: 'local',
+    reason: 'Warm incremental update of local inputs: ' + changedInputs.join(', '),
+    changedInputs,
+    nonlocalInputs: [],
+    timestamp: new Date().toISOString(),
+   };
+   this.lastInvalidationReason = undefined;
+  }
   const diagnostics:Diagnostic[]=[];let unsupported=0,unresolved=0,analyzed=0;
   const unsupportedLocations=new Set<string>();
   const recordUnsupported=(locKey:string,d:Diagnostic)=>{
@@ -1147,8 +1302,13 @@ export class Analyzer {
   const visited=new Set<string>();
   const capturedPaths=Object.keys(files);
   const programHosts=new Map<ts.Program,ts.CompilerHost>();
+  const reusedPrograms: string[] = [];
+  const rebuiltPrograms: string[] = [];
+  const builderAffectedFiles = new Set<string>();
+
   for(const setting of settings){
-   const host=ts.createCompilerHost(setting.options);
+   const host=ts.createIncrementalCompilerHost(setting.options);
+   const origGetSourceFile=host.getSourceFile.bind(host);
    const originalRead=host.readFile.bind(host);
    const originalFileExists=host.fileExists.bind(host);
    const originalDirectoryExists=host.directoryExists ? host.directoryExists.bind(host) : (d:string)=>ts.sys.directoryExists(d);
@@ -1223,14 +1383,71 @@ export class Analyzer {
    };
 
    host.getSourceFile=(file,languageVersion)=>{
-    const text=host.readFile(file);if(text===undefined)return undefined;
-    const digest=hash(text);const old=this.sourceCache.get(file);
-    if(old?.hash===digest)return old.source;
-    const sf=ts.createSourceFile(file,text,languageVersion,true);this.sourceCache.set(file,{hash:digest,source:sf});return sf;
+    const rel = getRel(file);
+    if(rel !== null && rel in files){
+     const text = files[rel].text;
+     const digest = files[rel].hash || hash(text);
+     const old = this.sourceCache.get(file);
+     if(old && old.hash === digest){
+      if((old.source as any).version === undefined){
+       (old.source as any).version = digest;
+      }
+      return old.source;
+     }
+     const sf = ts.createSourceFile(file, text, languageVersion, true);
+     (sf as any).version = digest;
+     this.sourceCache.set(file, { hash: digest, source: sf });
+     return sf;
+    }
+    const text=host.readFile(file);
+    if(text===undefined)return undefined;
+    const digest=hash(text);
+    const old=this.sourceCache.get(file);
+    if(old && old.hash===digest){
+     if((old.source as any).version === undefined){
+      (old.source as any).version = digest;
+     }
+     return old.source;
+    }
+    const sf=origGetSourceFile(file, languageVersion) || ts.createSourceFile(file, text, languageVersion, true);
+    (sf as any).version = digest;
+    this.sourceCache.set(file, { hash: digest, source: sf });
+    return sf;
    };
-   const program=ts.createProgram({rootNames:setting.rootNames,options:setting.options,projectReferences:setting.references,host,oldProgram:this.programs.get(setting.key)});
-   this.programs.set(setting.key,program);
-   programHosts.set(program,host);
+
+   const oldBuilder = this.builderPrograms.get(setting.key);
+   if(oldBuilder){
+    reusedPrograms.push(setting.key);
+   }else{
+    rebuiltPrograms.push(setting.key);
+   }
+
+   const builder = ts.createSemanticDiagnosticsBuilderProgram(
+    setting.rootNames,
+    setting.options,
+    host,
+    oldBuilder,
+    undefined,
+    setting.references
+   );
+   this.builderPrograms.set(setting.key, builder);
+   const program = builder.getProgram();
+   this.programs.set(setting.key, program);
+   programHosts.set(program, host);
+
+   let aff;
+   while((aff = builder.getSemanticDiagnosticsOfNextAffectedFile())){
+    if(aff.affected){
+     const fn = (aff.affected as ts.SourceFile).fileName || (aff.affected as any).fileName;
+     if(fn){
+      const rel = relative(root, fn).replaceAll('\\', '/');
+      if(files[rel]){
+       builderAffectedFiles.add(rel);
+      }
+     }
+    }
+   }
+
    for(const d of [...program.getOptionsDiagnostics(),...program.getSyntacticDiagnostics(),...program.getSemanticDiagnostics()]){
     const diagPath=d.file?relative(root,d.file.fileName).replaceAll('\\','/'):(setting.key!=='unconfigured'?setting.key:undefined);
     if(diagPath&&(!files[diagPath]||diagPath.includes('node_modules/')))continue;
@@ -2143,6 +2360,25 @@ export class Analyzer {
     diagnostics: dedup,
    },
   };
+
+  const dependentClosure = this.getAffectedClosure(changedInputs, this.lastAnalysis?.graph);
+  const allAffected = new Set<string>([...changedInputs, ...builderAffectedFiles, ...dependentClosure]);
+  const affectedFiles = Array.from(allAffected).filter(p => !!files[p]).sort();
+
+  this.lastChangedInputs = changedInputs.sort();
+  this.lastAffectedFiles = affectedFiles;
+  this.lastFiles = files;
+  this.lastIncrementalInfo = {
+   isWarm: isWarm && !isBroaderInvalidation,
+   scope: isBroaderInvalidation ? 'broader' : 'local',
+   changedInputs: this.lastChangedInputs,
+   nonlocalInputs: nonlocalInputs.sort(),
+   affectedFiles,
+   invalidationReason: this.lastInvalidationReason,
+   reusedPrograms,
+   rebuiltPrograms,
+  };
+
   this.lastAnalysis = result;
   this.lastReport = generateImportQualityReport(result);
   return result;
