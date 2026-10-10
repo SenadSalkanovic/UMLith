@@ -95,6 +95,32 @@ export function parsePrismaSchema(
  }
 }
 
+export const SCHEMA_DERIVED_NOTICE =
+ 'Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.';
+
+export function extractPrismaDefault(attribute: any): string | undefined {
+ if (!attribute || !attribute.args || !attribute.args.length) return undefined;
+ const first = attribute.args[0];
+ const val = first?.value !== undefined ? first.value : first;
+ if (val === undefined || val === null) return undefined;
+ if (typeof val === 'object' && val.type === 'function') {
+  const params = Array.isArray(val.params)
+   ? val.params.map((p: any) => (typeof p === 'string' ? p.replace(/^"|"$/g, '') : String(p))).join(', ')
+   : '';
+  return `${val.name}(${params})`;
+ }
+ if (typeof val === 'string') {
+  if (val.startsWith('"') && val.endsWith('"') && val.length >= 2) {
+   return val.slice(1, -1);
+  }
+  return val;
+ }
+ if (typeof val === 'number' || typeof val === 'boolean') {
+  return String(val);
+ }
+ return String(val);
+}
+
 export function findPrismaBlockEnd(text: string, startOffset: number): number {
  const openBrace = text.indexOf('{', startOffset);
  if (openBrace === -1) return startOffset;
@@ -558,6 +584,7 @@ export interface AnalyzeOptions {
 export class Analyzer {
  public static readonly COMPILER_PIN = TYPESCRIPT_PIN;
  public static readonly PRISMA_PARSER_CONFIG = PRISMA_PARSER_CONFIG;
+ public static readonly SCHEMA_DERIVED_NOTICE = SCHEMA_DERIVED_NOTICE;
  public readonly compilerPin = TYPESCRIPT_PIN;
  public readonly compilerVersion = ts.version;
  public readonly prismaParserConfig: PrismaAstConfig['parser'];
@@ -1392,10 +1419,36 @@ export class Analyzer {
      const blockEnd=findPrismaBlockEnd(files[path].text,startOffset);
      const end=blockEnd > startOffset ? blockEnd : (location?.endOffset??startOffset)+1;
      const mapped=model.properties.find(p=>p.type==='attribute'&&p.name==='map') as any;
+     const modelText=files[path].text.slice(startOffset,end);
+     const extractedFields=fields.map(f=>{
+      const escapedName=f.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+      const re=new RegExp('(^|\\n)[ \\t]*('+escapedName+')\\b');
+      const match=re.exec(modelText);
+      let fieldSource:Source|undefined=undefined;
+      if(match){
+       const matchStart=match.index+match[1].length;
+       const nameStart=modelText.indexOf(match[2],matchStart);
+       let lineEnd=modelText.indexOf('\n',nameStart);
+       if(lineEnd===-1)lineEnd=modelText.length;
+       const fStart=startOffset+nameStart;
+       const fEnd=startOffset+lineEnd;
+       fieldSource=source(path,fStart,fEnd,`${model.name}.${f.name}`);
+      }
+      return {
+       name:f.name,
+       type:String(f.fieldType)+(f.array?'[]':''),
+       optional:!!f.optional,
+       key:attr(f,'id')||compound.has(f.name)?'PK':foreign.has(f.name)?'FK':attr(f,'unique')?'UNIQUE':modelsByName.has(String(f.fieldType))?'RELATION':'',
+       mappedName:attr(f,'map')?.args?.[0]?.value as string|undefined,
+       defaultValue:extractPrismaDefault(attr(f,'default')),
+       source:fieldSource,
+      };
+     });
      nodes.set(id,NodeSchema.parse({id,kind:'entity',name:model.name,parentId:mid,provenance:'extracted',source:source(path,startOffset,end,model.name),outputPath:path,
       contract:JSON.stringify(model.properties.filter(p=>p.type==='field'||p.type==='attribute').map((p:any)=>({name:p.name,fieldType:p.fieldType,optional:p.optional,array:p.array,attributes:p.attributes,args:p.args})),(key,value)=>key==='location'||key==='comment'?undefined:value),
-      description:mapped?'Database name: '+mapped.args?.[0]?.value:'',
-      fields:fields.map(f=>({name:f.name,type:String(f.fieldType)+(f.array?'[]':''),optional:!!f.optional,key:attr(f,'id')||compound.has(f.name)?'PK':foreign.has(f.name)?'FK':attr(f,'unique')?'UNIQUE':modelsByName.has(String(f.fieldType))?'RELATION':'',mappedName:attr(f,'map')?.args?.[0]?.value as string|undefined}))
+      description:mapped?'Database name: '+mapped.args?.[0]?.value+' · '+SCHEMA_DERIVED_NOTICE:SCHEMA_DERIVED_NOTICE,
+      instructions:SCHEMA_DERIVED_NOTICE,
+      fields:extractedFields,
      }));
     }
     for(const model of models){
@@ -1415,8 +1468,36 @@ export class Analyzer {
      const startOffset=enumLoc?.startOffset??files[path].text.indexOf('enum '+block.name);
      const blockEnd=findPrismaBlockEnd(files[path].text,startOffset);
      const end=blockEnd > startOffset ? blockEnd : (enumLoc?.endOffset??startOffset)+1;
+     const enumText=files[path].text.slice(startOffset,end);
      const enumId=idFor('enum:'+path+':'+block.name);
-     nodes.set(enumId,NodeSchema.parse({id:enumId,kind:'enum',name:block.name,parentId:mid,provenance:'extracted',outputPath:path,source:source(path,startOffset,end,block.name),fields:block.enumerators.filter(p=>p.type==='enumerator').map(p=>({name:p.name,type:'enum'}))}));
+     const enumeratorFields=block.enumerators.filter((p:any)=>p.type==='enumerator').map((p:any)=>{
+      const escapedName=p.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+      const re=new RegExp('(^|\\n)[ \\t]*('+escapedName+')\\b');
+      const match=re.exec(enumText);
+      let enumSource:Source|undefined=undefined;
+      if(match){
+       const matchStart=match.index+match[1].length;
+       const nameStart=enumText.indexOf(match[2],matchStart);
+       let lineEnd=enumText.indexOf('\n',nameStart);
+       if(lineEnd===-1)lineEnd=enumText.length;
+       const eStart=startOffset+nameStart;
+       const eEnd=startOffset+lineEnd;
+       enumSource=source(path,eStart,eEnd,`${block.name}.${p.name}`);
+      }
+      return {name:p.name,type:'enum',source:enumSource};
+     });
+     nodes.set(enumId,NodeSchema.parse({
+      id:enumId,
+      kind:'enum',
+      name:block.name,
+      parentId:mid,
+      provenance:'extracted',
+      outputPath:path,
+      source:source(path,startOffset,end,block.name),
+      description:SCHEMA_DERIVED_NOTICE,
+      instructions:SCHEMA_DERIVED_NOTICE,
+      fields:enumeratorFields,
+     }));
     }
     analyzed++;
    }catch(error){

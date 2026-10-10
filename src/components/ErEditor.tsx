@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import type { Graph, ProgramNode, ProgramEdge, Requirement, Project } from '../../shared/model';
+import type { Graph, ProgramNode, ProgramEdge, Requirement, Project, Source } from '../../shared/model';
 import { GraphSchema, createNodeId, validRelationship, emptyGraph } from '../../shared/model';
 import {
   Database,
@@ -27,6 +27,8 @@ export interface EntityField {
   key?: string; // e.g. 'PK', 'PK (composite)', 'UNIQUE', 'UNIQUE (composite)', 'FK', 'RELATION', or ''
   optional?: boolean; // nullability: true -> nullable, false -> non-null
   mappedName?: string; // column mapping, e.g. 'user_id' or '@map("user_id")'
+  defaultValue?: string;
+  source?: Source;
 }
 
 export type CardinalityType =
@@ -155,6 +157,8 @@ export function createEntityNode(
     key: f.key?.trim() || '',
     optional: !!f.optional,
     mappedName: f.mappedName?.trim() || undefined,
+    defaultValue: f.defaultValue?.trim() || undefined,
+    source: f.source,
   }));
 
   const newNode: ProgramNode = {
@@ -254,6 +258,8 @@ export function updateEntityNode(
         key: f.key?.trim() || '',
         optional: !!f.optional,
         mappedName: f.mappedName?.trim() || undefined,
+        defaultValue: f.defaultValue?.trim() || undefined,
+        source: f.source,
       }))
     : existingNode.fields;
 
@@ -367,6 +373,8 @@ export function addEntityField(
     key: field.key?.trim() || '',
     optional: !!field.optional,
     mappedName: field.mappedName?.trim() || undefined,
+    defaultValue: field.defaultValue?.trim() || undefined,
+    source: field.source,
   };
 
   const updatedNode: ProgramNode = {
@@ -427,6 +435,10 @@ export function updateEntityField(
     mappedName: updates.mappedName !== undefined
       ? (updates.mappedName.trim() || undefined)
       : currentField.mappedName,
+    defaultValue: updates.defaultValue !== undefined
+      ? (updates.defaultValue.trim() || undefined)
+      : currentField.defaultValue,
+    source: updates.source !== undefined ? updates.source : currentField.source,
   };
 
   const nextFields = [...entity.fields];

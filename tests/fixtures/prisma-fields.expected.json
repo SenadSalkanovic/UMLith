@@ -1,0 +1,717 @@
+{
+  "schemaVersion": 1,
+  "nodes": [
+    {
+      "id": "19f9a48d78f7012603160929",
+      "kind": "entity",
+      "name": "User",
+      "parentId": "f2f7e110ed2bc1c215d2af5f",
+      "description": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "[{\"name\":\"id\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"id\",\"kind\":\"field\"},{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"function\",\"name\":\"autoincrement\"}}]}]},{\"name\":\"email\",\"fieldType\":\"String\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"unique\",\"kind\":\"field\"}]},{\"name\":\"name\",\"fieldType\":\"String\",\"optional\":true,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":\"\\\"anonymous\\\"\"}]}]},{\"name\":\"role\",\"fieldType\":\"Role\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":\"USER\"}]}]},{\"name\":\"tags\",\"fieldType\":\"String\",\"optional\":false,\"array\":true},{\"name\":\"active\",\"fieldType\":\"Boolean\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":\"true\"}]}]},{\"name\":\"score\",\"fieldType\":\"Float\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":\"0.0\"}]}]},{\"name\":\"createdAt\",\"fieldType\":\"DateTime\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"function\",\"name\":\"now\"}}]}]},{\"name\":\"posts\",\"fieldType\":\"Post\",\"optional\":false,\"array\":true},{\"name\":\"profile\",\"fieldType\":\"Profile\",\"optional\":true,\"array\":false}]",
+      "requiredChecks": [],
+      "instructions": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "outputPath": "prisma/schema.prisma",
+      "source": {
+        "path": "prisma/schema.prisma",
+        "symbol": "User",
+        "start": 138,
+        "end": 480,
+        "line": 17,
+        "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": [
+        {
+          "name": "id",
+          "type": "Int",
+          "key": "PK",
+          "optional": false,
+          "defaultValue": "autoincrement()",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.id",
+            "start": 153,
+            "end": 201,
+            "line": 18,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "email",
+          "type": "String",
+          "key": "UNIQUE",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.email",
+            "start": 204,
+            "end": 230,
+            "line": 19,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "name",
+          "type": "String",
+          "key": "",
+          "optional": true,
+          "defaultValue": "anonymous",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.name",
+            "start": 233,
+            "end": 273,
+            "line": 20,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "role",
+          "type": "Role",
+          "key": "",
+          "optional": false,
+          "defaultValue": "USER",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.role",
+            "start": 276,
+            "end": 309,
+            "line": 21,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "tags",
+          "type": "String[]",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.tags",
+            "start": 312,
+            "end": 330,
+            "line": 22,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "active",
+          "type": "Boolean",
+          "key": "",
+          "optional": false,
+          "defaultValue": "true",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.active",
+            "start": 333,
+            "end": 366,
+            "line": 23,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "score",
+          "type": "Float",
+          "key": "",
+          "optional": false,
+          "defaultValue": "0.0",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.score",
+            "start": 369,
+            "end": 401,
+            "line": 24,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "createdAt",
+          "type": "DateTime",
+          "key": "",
+          "optional": false,
+          "defaultValue": "now()",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.createdAt",
+            "start": 404,
+            "end": 438,
+            "line": 25,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "posts",
+          "type": "Post[]",
+          "key": "RELATION",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.posts",
+            "start": 441,
+            "end": 457,
+            "line": 26,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "profile",
+          "type": "Profile",
+          "key": "RELATION",
+          "optional": true,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "User.profile",
+            "start": 460,
+            "end": 478,
+            "line": 27,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        }
+      ]
+    },
+    {
+      "id": "1ce6b96420a4501f02773392",
+      "kind": "module",
+      "name": "src/index.ts",
+      "parentId": "project",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "src/index.ts",
+      "source": {
+        "path": "src/index.ts",
+        "start": 0,
+        "end": 253,
+        "line": 1,
+        "hash": "fad4fafe12d7f5ca4df88fd2937e73bb095057223343267b1f95a6d2d7886dec",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": []
+    },
+    {
+      "id": "1db26678143c7bb82fba9d68",
+      "kind": "enum",
+      "name": "PublishStatus",
+      "parentId": "f2f7e110ed2bc1c215d2af5f",
+      "description": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "outputPath": "prisma/schema.prisma",
+      "source": {
+        "path": "prisma/schema.prisma",
+        "symbol": "PublishStatus",
+        "start": 83,
+        "end": 136,
+        "line": 11,
+        "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": [
+        {
+          "name": "DRAFT",
+          "type": "enum",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "PublishStatus.DRAFT",
+            "start": 106,
+            "end": 111,
+            "line": 12,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "PUBLISHED",
+          "type": "enum",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "PublishStatus.PUBLISHED",
+            "start": 114,
+            "end": 123,
+            "line": 13,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "ARCHIVED",
+          "type": "enum",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "PublishStatus.ARCHIVED",
+            "start": 126,
+            "end": 134,
+            "line": 14,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        }
+      ]
+    },
+    {
+      "id": "34d06a94f74af08e424e1d14",
+      "kind": "entity",
+      "name": "Post",
+      "parentId": "f2f7e110ed2bc1c215d2af5f",
+      "description": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "[{\"name\":\"id\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"id\",\"kind\":\"field\"},{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"function\",\"name\":\"autoincrement\"}}]}]},{\"name\":\"title\",\"fieldType\":\"String\",\"optional\":false,\"array\":false},{\"name\":\"content\",\"fieldType\":\"String\",\"optional\":true,\"array\":false},{\"name\":\"status\",\"fieldType\":\"PublishStatus\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":\"DRAFT\"}]}]},{\"name\":\"viewCount\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":\"0\"}]}]},{\"name\":\"publishedAt\",\"fieldType\":\"DateTime\",\"optional\":true,\"array\":false},{\"name\":\"authorId\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false},{\"name\":\"author\",\"fieldType\":\"User\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"relation\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"keyValue\",\"key\":\"fields\",\"value\":{\"type\":\"array\",\"args\":[\"authorId\"]}}},{\"type\":\"attributeArgument\",\"value\":{\"type\":\"keyValue\",\"key\":\"references\",\"value\":{\"type\":\"array\",\"args\":[\"id\"]}}}]}]}]",
+      "requiredChecks": [],
+      "instructions": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "outputPath": "prisma/schema.prisma",
+      "source": {
+        "path": "prisma/schema.prisma",
+        "symbol": "Post",
+        "start": 685,
+        "end": 1002,
+        "line": 38,
+        "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": [
+        {
+          "name": "id",
+          "type": "Int",
+          "key": "PK",
+          "optional": false,
+          "defaultValue": "autoincrement()",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Post.id",
+            "start": 700,
+            "end": 755,
+            "line": 39,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "title",
+          "type": "String",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Post.title",
+            "start": 758,
+            "end": 776,
+            "line": 40,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "content",
+          "type": "String",
+          "key": "",
+          "optional": true,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Post.content",
+            "start": 779,
+            "end": 798,
+            "line": 41,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "status",
+          "type": "PublishStatus",
+          "key": "",
+          "optional": false,
+          "defaultValue": "DRAFT",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Post.status",
+            "start": 801,
+            "end": 842,
+            "line": 42,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "viewCount",
+          "type": "Int",
+          "key": "",
+          "optional": false,
+          "defaultValue": "0",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Post.viewCount",
+            "start": 845,
+            "end": 882,
+            "line": 43,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "publishedAt",
+          "type": "DateTime",
+          "key": "",
+          "optional": true,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Post.publishedAt",
+            "start": 885,
+            "end": 906,
+            "line": 44,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "authorId",
+          "type": "Int",
+          "key": "FK",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Post.authorId",
+            "start": 909,
+            "end": 924,
+            "line": 45,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "author",
+          "type": "User",
+          "key": "RELATION",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Post.author",
+            "start": 927,
+            "end": 1000,
+            "line": 46,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        }
+      ]
+    },
+    {
+      "id": "5e51d1ca843e0dc6b9772f13",
+      "kind": "entity",
+      "name": "Profile",
+      "parentId": "f2f7e110ed2bc1c215d2af5f",
+      "description": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "[{\"name\":\"id\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"id\",\"kind\":\"field\"},{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"function\",\"name\":\"autoincrement\"}}]}]},{\"name\":\"bio\",\"fieldType\":\"String\",\"optional\":true,\"array\":false},{\"name\":\"avatarUrl\",\"fieldType\":\"String\",\"optional\":true,\"array\":false},{\"name\":\"userId\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"unique\",\"kind\":\"field\"}]},{\"name\":\"user\",\"fieldType\":\"User\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"relation\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"keyValue\",\"key\":\"fields\",\"value\":{\"type\":\"array\",\"args\":[\"userId\"]}}},{\"type\":\"attributeArgument\",\"value\":{\"type\":\"keyValue\",\"key\":\"references\",\"value\":{\"type\":\"array\",\"args\":[\"id\"]}}}]}]}]",
+      "requiredChecks": [],
+      "instructions": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "outputPath": "prisma/schema.prisma",
+      "source": {
+        "path": "prisma/schema.prisma",
+        "symbol": "Profile",
+        "start": 482,
+        "end": 683,
+        "line": 30,
+        "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": [
+        {
+          "name": "id",
+          "type": "Int",
+          "key": "PK",
+          "optional": false,
+          "defaultValue": "autoincrement()",
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Profile.id",
+            "start": 500,
+            "end": 547,
+            "line": 31,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "bio",
+          "type": "String",
+          "key": "",
+          "optional": true,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Profile.bio",
+            "start": 550,
+            "end": 567,
+            "line": 32,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "avatarUrl",
+          "type": "String",
+          "key": "",
+          "optional": true,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Profile.avatarUrl",
+            "start": 570,
+            "end": 587,
+            "line": 33,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "userId",
+          "type": "Int",
+          "key": "FK",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Profile.userId",
+            "start": 590,
+            "end": 615,
+            "line": 34,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "user",
+          "type": "User",
+          "key": "RELATION",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Profile.user",
+            "start": 618,
+            "end": 681,
+            "line": 35,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        }
+      ]
+    },
+    {
+      "id": "6a33edb887ef6669003f5d14",
+      "kind": "step",
+      "name": "return `${user.id}: ${user.name ?? 'anonymous'} <${user.email}> [${user.role}]`;",
+      "parentId": "a21fbb004c5583df2713565b",
+      "description": "return `${user.id}: ${user.name ?? 'anonymous'} <${user.email}> [${user.role}]`;",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "src/index.ts",
+        "start": 170,
+        "end": 250,
+        "line": 10,
+        "hash": "fad4fafe12d7f5ca4df88fd2937e73bb095057223343267b1f95a6d2d7886dec",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": [],
+      "stepType": "return"
+    },
+    {
+      "id": "a21fbb004c5583df2713565b",
+      "kind": "function",
+      "name": "formatUserDTO",
+      "parentId": "1ce6b96420a4501f02773392",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "formatUserDTO(user: UserDTO): string",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "src/index.ts",
+      "source": {
+        "path": "src/index.ts",
+        "symbol": "formatUserDTO",
+        "start": 113,
+        "end": 252,
+        "line": 9,
+        "hash": "fad4fafe12d7f5ca4df88fd2937e73bb095057223343267b1f95a6d2d7886dec",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": []
+    },
+    {
+      "id": "da5988694bab5ab0e9ae9942",
+      "kind": "interface",
+      "name": "UserDTO",
+      "parentId": "1ce6b96420a4501f02773392",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "active: boolean; email: string; id: number; name?: string | undefined; role: string",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "src/index.ts",
+      "source": {
+        "path": "src/index.ts",
+        "symbol": "UserDTO",
+        "start": 0,
+        "end": 111,
+        "line": 1,
+        "hash": "fad4fafe12d7f5ca4df88fd2937e73bb095057223343267b1f95a6d2d7886dec",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": []
+    },
+    {
+      "id": "f2f7e110ed2bc1c215d2af5f",
+      "kind": "module",
+      "name": "prisma/schema.prisma",
+      "parentId": "project",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "prisma/schema.prisma",
+      "source": {
+        "path": "prisma/schema.prisma",
+        "start": 0,
+        "end": 1003,
+        "line": 1,
+        "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": []
+    },
+    {
+      "id": "fcedac96a55e780b9efe2d78",
+      "kind": "enum",
+      "name": "Role",
+      "parentId": "f2f7e110ed2bc1c215d2af5f",
+      "description": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "outputPath": "prisma/schema.prisma",
+      "source": {
+        "path": "prisma/schema.prisma",
+        "symbol": "Role",
+        "start": 41,
+        "end": 81,
+        "line": 5,
+        "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+        "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+      },
+      "fields": [
+        {
+          "name": "USER",
+          "type": "enum",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Role.USER",
+            "start": 55,
+            "end": 59,
+            "line": 6,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "ADMIN",
+          "type": "enum",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Role.ADMIN",
+            "start": 62,
+            "end": 67,
+            "line": 7,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        },
+        {
+          "name": "MODERATOR",
+          "type": "enum",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "prisma/schema.prisma",
+            "symbol": "Role.MODERATOR",
+            "start": 70,
+            "end": 79,
+            "line": 8,
+            "hash": "dae9d0d217031a9ea29c20fbcd5357fc2934000b5a15f74f33e6e0e365692ade",
+            "revision": "684bedde62f3c7582e83795af6d132758634574aee251d767427779e5e2cb913"
+          }
+        }
+      ]
+    },
+    {
+      "id": "project",
+      "kind": "system",
+      "name": "prisma-fields",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "fields": []
+    }
+  ],
+  "edges": [
+    {
+      "id": "09eb747f3960e480800d9c62",
+      "source": "5e51d1ca843e0dc6b9772f13",
+      "target": "19f9a48d78f7012603160929",
+      "kind": "relates-to",
+      "label": "one → one · userId",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "5691d0dfb740d5cb4f397615",
+      "source": "34d06a94f74af08e424e1d14",
+      "target": "19f9a48d78f7012603160929",
+      "kind": "relates-to",
+      "label": "many → one · authorId",
+      "provenance": "extracted",
+      "uncertain": false
+    }
+  ],
+  "requirements": []
+}

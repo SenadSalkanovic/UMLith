@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd} from '../server/analyzer';
+import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd,SCHEMA_DERIVED_NOTICE,extractPrismaDefault} from '../server/analyzer';
 import {GraphSchema,resolveSourceEvidence,type AgentJob} from '../shared/model';
 import {hash,captureSourceRevision,captureFiles,hashes} from '../server/files';
 import {mkdtemp,writeFile,readFile,cp,rm,mkdir} from 'node:fs/promises';
@@ -2223,4 +2223,286 @@ it('ensures schema failures never imply successful validation in review checks (
  } finally {
   await rm(dir, { recursive: true, force: true });
  }
+});
+
+it('extracts Prisma entities, scalar fields, nullability, lists, enums, defaults, and field schema evidence (T040 concrete scenario 1 & AC 1)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-fields');
+ const analyzer = new Analyzer();
+
+ // 1. Input discovery
+ const discovery = await analyzer.discoverInputs(fixtureDir);
+ expect(discovery.prismaSchemas).toEqual(['prisma/schema.prisma']);
+ expect(discovery.eligibleFiles).toEqual(['prisma/schema.prisma', 'src/index.ts']);
+
+ // 2. Full analysis
+ const a = await analyzer.analyze(fixtureDir);
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+ expect(a.status).toBe('current');
+ expect(a.quality.eligibleFiles).toBe(2);
+ expect(a.quality.analyzedFiles).toBe(2);
+ expect(a.quality.diagnostics).toEqual([]);
+
+ // 3. Verify Enums
+ const roleEnum = a.graph.nodes.find(n => n.kind === 'enum' && n.name === 'Role')!;
+ const statusEnum = a.graph.nodes.find(n => n.kind === 'enum' && n.name === 'PublishStatus')!;
+ expect(roleEnum).toBeDefined();
+ expect(statusEnum).toBeDefined();
+
+ expect(roleEnum.outputPath).toBe('prisma/schema.prisma');
+ expect(roleEnum.provenance).toBe('extracted');
+ expect(roleEnum.fields.map(f => f.name)).toEqual(['USER', 'ADMIN', 'MODERATOR']);
+ expect(roleEnum.fields.every(f => f.type === 'enum')).toBe(true);
+
+ // Enum enumerators have schema evidence
+ for (const f of roleEnum.fields) {
+  expect(f.source).toBeDefined();
+  expect(f.source?.path).toBe('prisma/schema.prisma');
+  expect(f.source?.symbol).toBe(`Role.${f.name}`);
+  const evidence = resolveSourceEvidence(f.source, a, a.revision);
+  expect(evidence.status).toBe('current');
+  if (evidence.status === 'current') {
+   expect(evidence.text.trim()).toBe(f.name);
+  }
+ }
+
+ expect(statusEnum.fields.map(f => f.name)).toEqual(['DRAFT', 'PUBLISHED', 'ARCHIVED']);
+ expect(statusEnum.fields.every(f => f.type === 'enum')).toBe(true);
+
+ // 4. Verify Entities and Field Types (scalars, lists, nullability, defaults, keys)
+ const user = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'User')!;
+ const profile = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Profile')!;
+ const post = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Post')!;
+
+ expect(user).toBeDefined();
+ expect(profile).toBeDefined();
+ expect(post).toBeDefined();
+
+ expect(user.outputPath).toBe('prisma/schema.prisma');
+ expect(user.provenance).toBe('extracted');
+
+ // User field types & nullability & defaults
+ const userFieldsByName = new Map(user.fields.map(f => [f.name, f]));
+
+ const userId = userFieldsByName.get('id')!;
+ expect(userId.type).toBe('Int');
+ expect(userId.optional).toBe(false);
+ expect(userId.key).toBe('PK');
+ expect(userId.defaultValue).toBe('autoincrement()');
+
+ const userEmail = userFieldsByName.get('email')!;
+ expect(userEmail.type).toBe('String');
+ expect(userEmail.optional).toBe(false);
+ expect(userEmail.key).toBe('UNIQUE');
+ expect(userEmail.defaultValue).toBeUndefined();
+
+ const userName = userFieldsByName.get('name')!;
+ expect(userName.type).toBe('String');
+ expect(userName.optional).toBe(true);
+ expect(userName.defaultValue).toBe('anonymous');
+
+ const userRole = userFieldsByName.get('role')!;
+ expect(userRole.type).toBe('Role');
+ expect(userRole.optional).toBe(false);
+ expect(userRole.defaultValue).toBe('USER');
+
+ const userTags = userFieldsByName.get('tags')!;
+ expect(userTags.type).toBe('String[]');
+ expect(userTags.optional).toBe(false);
+ expect(userTags.defaultValue).toBeUndefined();
+
+ const userActive = userFieldsByName.get('active')!;
+ expect(userActive.type).toBe('Boolean');
+ expect(userActive.optional).toBe(false);
+ expect(userActive.defaultValue).toBe('true');
+
+ const userScore = userFieldsByName.get('score')!;
+ expect(userScore.type).toBe('Float');
+ expect(userScore.optional).toBe(false);
+ expect(userScore.defaultValue).toBe('0.0');
+
+ const userCreatedAt = userFieldsByName.get('createdAt')!;
+ expect(userCreatedAt.type).toBe('DateTime');
+ expect(userCreatedAt.optional).toBe(false);
+ expect(userCreatedAt.defaultValue).toBe('now()');
+
+ const userPosts = userFieldsByName.get('posts')!;
+ expect(userPosts.type).toBe('Post[]');
+ expect(userPosts.optional).toBe(false);
+ expect(userPosts.key).toBe('RELATION');
+
+ const userProfile = userFieldsByName.get('profile')!;
+ expect(userProfile.type).toBe('Profile');
+ expect(userProfile.optional).toBe(true);
+ expect(userProfile.key).toBe('RELATION');
+
+ // Field schema evidence attached to User fields
+ for (const f of user.fields) {
+  expect(f.source).toBeDefined();
+  expect(f.source?.path).toBe('prisma/schema.prisma');
+  expect(f.source?.symbol).toBe(`User.${f.name}`);
+  const evidence = resolveSourceEvidence(f.source, a, a.revision);
+  expect(evidence.status).toBe('current');
+  if (evidence.status === 'current') {
+   expect(evidence.text).toContain(f.name);
+  }
+ }
+
+ // Profile fields
+ const profileFieldsByName = new Map(profile.fields.map(f => [f.name, f]));
+ expect(profileFieldsByName.get('bio')?.optional).toBe(true);
+ expect(profileFieldsByName.get('avatarUrl')?.optional).toBe(true);
+ expect(profileFieldsByName.get('userId')?.optional).toBe(false);
+ expect(profileFieldsByName.get('userId')?.key).toBe('FK');
+ expect(profileFieldsByName.get('user')?.key).toBe('RELATION');
+
+ // Post fields
+ const postFieldsByName = new Map(post.fields.map(f => [f.name, f]));
+ expect(postFieldsByName.get('title')?.type).toBe('String');
+ expect(postFieldsByName.get('title')?.optional).toBe(false);
+ expect(postFieldsByName.get('content')?.optional).toBe(true);
+ expect(postFieldsByName.get('status')?.type).toBe('PublishStatus');
+ expect(postFieldsByName.get('status')?.defaultValue).toBe('DRAFT');
+ expect(postFieldsByName.get('viewCount')?.defaultValue).toBe('0');
+ expect(postFieldsByName.get('publishedAt')?.optional).toBe(true);
+ expect(postFieldsByName.get('authorId')?.key).toBe('FK');
+ expect(postFieldsByName.get('author')?.key).toBe('RELATION');
+});
+
+it('ensures enums and nullability survive graph persistence (T040 AC 2)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-fields');
+ const dir = await mkdtemp(join(tmpdir(), 'architect-persistence-check-'));
+
+ try {
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'PrismaPersistence', root: fixtureDir });
+
+  // 1. Fetch saved project from persistent store
+  const reloaded = await store.get(p.id);
+  expect(reloaded.analysis).toBeDefined();
+
+  const graph = reloaded.analysis!.graph;
+  expect(GraphSchema.safeParse(graph).success).toBe(true);
+
+  // 2. Enums survived persistence
+  const role = graph.nodes.find(n => n.kind === 'enum' && n.name === 'Role')!;
+  expect(role).toBeDefined();
+  expect(role.fields.map(f => f.name)).toEqual(['USER', 'ADMIN', 'MODERATOR']);
+  expect(role.fields.every(f => f.type === 'enum')).toBe(true);
+  expect(role.fields[0].source?.path).toBe('prisma/schema.prisma');
+
+  const pubStatus = graph.nodes.find(n => n.kind === 'enum' && n.name === 'PublishStatus')!;
+  expect(pubStatus).toBeDefined();
+  expect(pubStatus.fields.map(f => f.name)).toEqual(['DRAFT', 'PUBLISHED', 'ARCHIVED']);
+
+  // 3. Nullability and field types survived persistence
+  const user = graph.nodes.find(n => n.kind === 'entity' && n.name === 'User')!;
+  expect(user).toBeDefined();
+  const userName = user.fields.find(f => f.name === 'name')!;
+  expect(userName.optional).toBe(true);
+  expect(userName.defaultValue).toBe('anonymous');
+
+  const userEmail = user.fields.find(f => f.name === 'email')!;
+  expect(userEmail.optional).toBe(false);
+
+  const userProfile = user.fields.find(f => f.name === 'profile')!;
+  expect(userProfile.optional).toBe(true);
+
+  const post = graph.nodes.find(n => n.kind === 'entity' && n.name === 'Post')!;
+  expect(post).toBeDefined();
+  const postContent = post.fields.find(f => f.name === 'content')!;
+  expect(postContent.optional).toBe(true);
+  const postPublishedAt = post.fields.find(f => f.name === 'publishedAt')!;
+  expect(postPublishedAt.optional).toBe(true);
+  const postTitle = post.fields.find(f => f.name === 'title')!;
+  expect(postTitle.optional).toBe(false);
+  const postStatus = post.fields.find(f => f.name === 'status')!;
+  expect(postStatus.type).toBe('PublishStatus');
+  expect(postStatus.defaultValue).toBe('DRAFT');
+
+  // 4. Round-trip through JSON and GraphSchema validation
+  const serialized = JSON.stringify(graph);
+  const deserialized = GraphSchema.parse(JSON.parse(serialized));
+  expect(deserialized).toEqual(graph);
+ } finally {
+  await rm(dir, { recursive: true, force: true });
+ }
+});
+
+it('explicitly labels schema-derived data and makes no database-introspection claim (T040 AC 3 & checklist 4)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-fields');
+ const analyzer = new Analyzer();
+ const a = await analyzer.analyze(fixtureDir);
+
+ // 1. No database-introspection claim is made
+ expect(a.quality.prismaValidation).toBe('unavailable');
+ expect(a.quality.prismaValidation).not.toBe('passed');
+
+ // 2. All entities and enums have provenance: 'extracted'
+ const entities = a.graph.nodes.filter(n => n.kind === 'entity');
+ const enums = a.graph.nodes.filter(n => n.kind === 'enum');
+ expect(entities.length).toBeGreaterThan(0);
+ expect(enums.length).toBeGreaterThan(0);
+
+ for (const entity of entities) {
+  expect(entity.provenance).toBe('extracted');
+  expect(entity.outputPath).toBe('prisma/schema.prisma');
+  // Explicitly labeled schema-derived data and unverified database state
+  expect(entity.description).toContain(SCHEMA_DERIVED_NOTICE);
+  expect(entity.instructions).toContain(SCHEMA_DERIVED_NOTICE);
+  expect(entity.instructions).toContain('unverified');
+ }
+
+ for (const enumNode of enums) {
+  expect(enumNode.provenance).toBe('extracted');
+  expect(enumNode.outputPath).toBe('prisma/schema.prisma');
+  expect(enumNode.description).toContain(SCHEMA_DERIVED_NOTICE);
+  expect(enumNode.instructions).toContain(SCHEMA_DERIVED_NOTICE);
+ }
+
+ // 3. Candidate review retains unverified notice and no introspection claim
+ const dir = await mkdtemp(join(tmpdir(), 'architect-review-er-'));
+ try {
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'CandidateER', root: fixtureDir });
+  const candidateDir = join(dir, 'candidate');
+  await cp(fixtureDir, candidateDir, { recursive: true });
+
+  const job: AgentJob = {
+   id: 'er-job',
+   projectId: p.id,
+   kind: 'implementation',
+   status: 'review',
+   createdAt: new Date().toISOString(),
+   specRevision: p.specRevision,
+   sourceHashes: hashes(await captureFiles(p.root)),
+   task: 'Verify ER import',
+   scope: ['.'],
+   workspace: candidateDir,
+   events: [],
+  };
+
+  const report = await validateCandidate(p, job);
+  expect(report.candidate?.quality.prismaValidation).toBe('unavailable');
+  expect(report.candidate?.quality.prismaValidation).not.toBe('passed');
+  expect(report.warnings).toContain('Prisma schema parsed; project-version semantic validation is not yet available.');
+ } finally {
+  await rm(dir, { recursive: true, force: true });
+ }
+});
+
+it('compares extracted Prisma ER graph against a known expected graph fixture (T040 concrete scenario 2)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-fields');
+ const expectedPath = resolve('tests/fixtures/prisma-fields.expected.json');
+
+ const analyzer = new Analyzer();
+ const a = await analyzer.analyze(fixtureDir);
+
+ const expectedContent = await readFile(expectedPath, 'utf8');
+ const expectedGraph = JSON.parse(expectedContent);
+
+ expect(GraphSchema.safeParse(expectedGraph).success).toBe(true);
+ expect(a.graph.schemaVersion).toBe(expectedGraph.schemaVersion);
+ expect(a.graph.nodes.length).toBe(expectedGraph.nodes.length);
+ expect(a.graph.edges.length).toBe(expectedGraph.edges.length);
+ expect(a.graph).toEqual(expectedGraph);
 });

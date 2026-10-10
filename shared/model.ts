@@ -9,6 +9,16 @@ export const SourceSchema = z.object({
   line: z.number().int().min(1), hash: z.string().refine(value=>!!value.trim()),
   revision: z.string().refine(value=>!!value.trim()),
 }).refine(source=>source.end>=source.start,{path:['end'],message:'Source range ends before it starts'});
+export const NodeFieldSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+  key: z.string().default(''),
+  optional: z.boolean().default(false),
+  mappedName: z.string().optional(),
+  defaultValue: z.string().optional(),
+  source: SourceSchema.optional(),
+});
+export type NodeField = z.infer<typeof NodeFieldSchema>;
 export const NodeSchema = z.object({
   id: z.string().min(1), kind: z.enum(nodeKinds), name: z.string().min(1),
   parentId: z.string().min(1).optional(), description: z.string().default(''),
@@ -19,7 +29,7 @@ export const NodeSchema = z.object({
   errors: z.string().optional(), scenarios: z.array(z.string()).optional(),
   requiredChecks: z.array(z.string().refine(value=>!!value.trim(),{message:'Required check reference must not be blank'})).default([]), instructions: z.string().default(''),
   outputPath: z.string().default(''), source: SourceSchema.optional(),
-  fields: z.array(z.object({ name:z.string(), type:z.string(), key:z.string().default(''), optional:z.boolean().default(false), mappedName:z.string().optional() })).default([]),
+  fields: z.array(NodeFieldSchema).default([]),
   stepType: z.enum(['operation','call','condition','loop','try','throw','return','opaque']).optional(),
   baseline: z.object({ text:z.string().optional(), contract:z.string().optional(), source:SourceSchema.optional() }).optional(),
 }).superRefine((node,ctx)=>{
