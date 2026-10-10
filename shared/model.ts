@@ -320,6 +320,7 @@ export const GraphUpdateSchema=AnalysisMetadataSchema.extend({
 });
 export type Diagnostic=z.infer<typeof DiagnosticSchema>;
 export type Quality=z.infer<typeof QualitySchema>;
+export type StaleEvidence=z.infer<typeof StaleEvidenceSchema>;
 export type Analysis=z.infer<typeof AnalysisSchema>;
 export type GraphDelta=z.infer<typeof GraphDeltaSchema>;
 export type GraphUpdate=z.infer<typeof GraphUpdateSchema>;

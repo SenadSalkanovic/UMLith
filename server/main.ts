@@ -566,7 +566,8 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     const { id } = ProjectIdParamSchema.parse(request.params);
     const project = await store.get(id);
     const active = activeAnalyses.get(id);
-    if (active) {
+    const isUpdating = Boolean(active) || sync.isUpdating(id);
+    if (isUpdating) {
       return reply.send({
         projectId: id,
         status: 'updating',
@@ -574,6 +575,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
         sequence: project.analysis?.sequence ?? 0,
         quality: project.analysis?.quality,
         diagnostics: project.analysis?.quality?.diagnostics ?? [],
+        staleEvidence: project.analysis?.staleEvidence,
       });
     }
     if (!project.analysis) {
@@ -826,6 +828,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
             sequence: updateSequence,
             diagnostics: payload.quality?.diagnostics ?? [],
             quality: payload.quality,
+            staleEvidence: payload.staleEvidence,
             timestamp: new Date().toISOString(),
           };
           writeSseMessage('status', statusEventId, statusData);

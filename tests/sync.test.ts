@@ -10,7 +10,8 @@ import {
  areHashesEqual,
 } from '../server/sync';
 import {AnalysisWorker} from '../server/worker';
-import {AnalysisSchema,GraphUpdateSchema,applyGraphUpdate} from '../shared/model';
+import {AnalysisSchema,GraphUpdateSchema,applyGraphUpdate,resolveSourceEvidence} from '../shared/model';
+import {getOutdatedPortions} from '../src/components/AnalysisStatus';
 
 it('updates the implemented graph while preserving human intent and retains a stale model on invalid saves',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-sync-'));
@@ -1079,6 +1080,333 @@ describe('T052: Discard out-of-order and superseded analysis results', () => {
    expect(AnalysisSchema.safeParse(res).success).toBe(true);
   } finally {
    await worker.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+});
+
+describe('T058: Show updating, current, partial, and stale analysis states', () => {
+ it('Concrete Scenario 1: introduces invalid intermediate syntax and then fixes it while retaining last valid evidence (AC 1 & AC 2)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t058-syntax-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'SyntaxLifecycleTest' });
+  const sync = new SyncService(store, { watch: false });
+
+  const notifications: any[] = [];
+  const statusEvents: any[] = [];
+  sync.on('notification', (_id, ev) => notifications.push(ev));
+  sync.on('status', (_id, ev) => statusEvents.push(ev));
+
+  try {
+   // 1. Valid initial code
+   await writeFile(
+    join(p.root, 'main.ts'),
+    'export function calculateSum(a: number, b: number): number {\n  return a + b;\n}\n'
+   );
+   await sync.start(p.id);
+
+   const initialProject = await store.get(p.id);
+   const initialAnalysis = initialProject.analysis!;
+   expect(initialAnalysis.status).toBe('current');
+   expect(initialAnalysis.sequence).toBe(1);
+   expect(initialAnalysis.revision.length).toBeGreaterThan(0);
+
+   const initialNode = initialAnalysis.graph.nodes.find(n => n.name === 'calculateSum');
+   expect(initialNode).toBeDefined();
+   expect(initialNode?.source?.path).toBe('main.ts');
+
+   // Evidence initially current
+   const initialEvidence = resolveSourceEvidence(
+    initialNode?.source,
+    initialAnalysis,
+    initialAnalysis.revision
+   );
+   expect(initialEvidence.status).toBe('current');
+   if (initialEvidence.status === 'current') {
+    expect(initialEvidence.text).toContain('return a + b;');
+   }
+
+   // 2. Introduce invalid intermediate syntax
+   await writeFile(
+    join(p.root, 'main.ts'),
+    'export function calculateSum(a: number, {\n  // syntax error broken function\n'
+   );
+   await sync.request(p.id);
+
+   const staleProject = await store.get(p.id);
+   const staleAnalysis = staleProject.analysis!;
+
+   // AC 1: Failed analysis does not masquerade as fresh empty success
+   expect(staleAnalysis.status).toBe('stale');
+   expect(staleAnalysis.status).not.toBe('current');
+
+   // AC 2: Old hashes/ranges remain tied to original evidence
+   expect(staleAnalysis.revision).toBe(initialAnalysis.revision);
+   expect(staleAnalysis.sequence).toBe(initialAnalysis.sequence);
+   expect(staleAnalysis.files['main.ts'].text).toContain('return a + b;');
+   expect(staleAnalysis.files['main.ts'].hash).toBe(initialAnalysis.files['main.ts'].hash);
+   expect(staleAnalysis.graph).toEqual(initialAnalysis.graph);
+
+   // Source evidence resolves to 'stale' without breaking range or hash binding
+   const staleEvidenceRes = resolveSourceEvidence(
+    initialNode?.source,
+    staleAnalysis,
+    staleAnalysis.revision
+   );
+   expect(staleEvidenceRes.status).toBe('stale');
+   if (staleEvidenceRes.status === 'stale') {
+    expect(staleEvidenceRes.text).toContain('return a + b;');
+   }
+
+   // Identifies outdated portions and diagnostic reason
+   expect(staleAnalysis.staleEvidence).toBeDefined();
+   expect(staleAnalysis.staleEvidence?.scope).toBe('all');
+   expect(staleAnalysis.staleEvidence?.reason).toMatch(/syntax|error|expected/i);
+   expect(
+    staleAnalysis.quality.diagnostics.some(d => d.code === 'analysis-failure' && d.severity === 'error')
+   ).toBe(true);
+
+   // 3. Fix the syntax and verify clean recovery to 'current'
+   await writeFile(
+    join(p.root, 'main.ts'),
+    'export function calculateSum(a: number, b: number): number {\n  return a + b + 10;\n}\n'
+   );
+   await sync.request(p.id);
+
+   const fixedProject = await store.get(p.id);
+   const fixedAnalysis = fixedProject.analysis!;
+
+   expect(fixedAnalysis.status).toBe('current');
+   expect(fixedAnalysis.sequence).toBe(2);
+   expect(fixedAnalysis.revision).not.toBe(initialAnalysis.revision);
+   expect(fixedAnalysis.files['main.ts'].text).toContain('return a + b + 10;');
+
+   const fixedNode = fixedAnalysis.graph.nodes.find(n => n.name === 'calculateSum');
+   expect(fixedNode).toBeDefined();
+   const fixedEvidence = resolveSourceEvidence(
+    fixedNode?.source,
+    fixedAnalysis,
+    fixedAnalysis.revision
+   );
+   expect(fixedEvidence.status).toBe('current');
+   if (fixedEvidence.status === 'current') {
+    expect(fixedEvidence.text).toContain('return a + b + 10;');
+   }
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('Concrete Scenario 2: fails one schema while retaining valid neighboring findings in partial status (AC 1 & AC 2)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t058-partial-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'PartialSchemaTest' });
+  const sync = new SyncService(store, { watch: false });
+
+  try {
+   // Schema 1: valid Prisma schema
+   await writeFile(
+    join(p.root, 'user.prisma'),
+    `datasource db {
+  provider = "postgresql"
+  url = "postgresql://localhost:5432/test"
+}
+
+model ValidUser {
+  id Int @id
+  name String
+}
+`
+   );
+
+   // Schema 2: invalid syntax in second schema
+   await writeFile(
+    join(p.root, 'broken.prisma'),
+    `model BrokenPost {
+  id Int @id
+  invalid syntax in this schema !!!
+}
+`
+   );
+
+   // Neighboring TypeScript file: valid function
+   await writeFile(
+    join(p.root, 'service.ts'),
+    'export function getUserHelper(): number { return 42; }\n'
+   );
+
+   await sync.start(p.id);
+
+   const proj = await store.get(p.id);
+   const analysis = proj.analysis!;
+
+   // Status is partial due to failed schema
+   expect(analysis.status).toBe('partial');
+   expect(analysis.sequence).toBe(1);
+
+   // Valid neighboring findings are retained in graph!
+   const userNode = analysis.graph.nodes.find(n => n.name === 'ValidUser');
+   expect(userNode).toBeDefined();
+   expect(userNode?.kind).toBe('entity');
+
+   const helperNode = analysis.graph.nodes.find(n => n.name === 'getUserHelper');
+   expect(helperNode).toBeDefined();
+   expect(helperNode?.kind).toBe('function');
+
+   // Broken model is not present in graph
+   expect(analysis.graph.nodes.some(n => n.name === 'BrokenPost')).toBe(false);
+
+   // Diagnostic reports prisma error on broken.prisma
+   const prismaErr = analysis.quality.diagnostics.find(
+    d => d.path === 'broken.prisma' && d.severity === 'error'
+   );
+   expect(prismaErr).toBeDefined();
+
+   // Outdated portion inspector identifies broken.prisma as the failed portion
+   const outdatedPortions = getOutdatedPortions(analysis);
+   expect(outdatedPortions).toBeDefined();
+   expect(outdatedPortions?.scope).toBe('paths');
+   expect(outdatedPortions?.paths).toContain('broken.prisma');
+
+   // Source evidence for valid neighboring findings remains current
+   const userEvidence = resolveSourceEvidence(
+    userNode?.source,
+    analysis,
+    analysis.revision
+   );
+   expect(userEvidence.status).toBe('current');
+
+   const helperEvidence = resolveSourceEvidence(
+    helperNode?.source,
+    analysis,
+    analysis.revision
+   );
+   expect(helperEvidence.status).toBe('current');
+
+   // Now fix broken.prisma and verify clean transition to current
+   await writeFile(
+    join(p.root, 'broken.prisma'),
+    `model RepairedPost {
+  id Int @id
+  title String
+}
+`
+   );
+   await sync.request(p.id);
+
+   const fixedProj = await store.get(p.id);
+   const fixedAnalysis = fixedProj.analysis!;
+   expect(fixedAnalysis.status).toBe('current');
+   expect(fixedAnalysis.sequence).toBe(2);
+   expect(fixedAnalysis.graph.nodes.some(n => n.name === 'RepairedPost')).toBe(true);
+   expect(fixedAnalysis.graph.nodes.some(n => n.name === 'ValidUser')).toBe(true);
+   expect(fixedAnalysis.graph.nodes.some(n => n.name === 'getUserHelper')).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('Acceptance Criterion 3: first-import failure has an honest empty/error state and does not masquerade as success', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t058-first-fail-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'FirstImportFail' });
+  const sync = new SyncService(store, { watch: false });
+
+  try {
+   // Write invalid syntax before start
+   await writeFile(join(p.root, 'main.ts'), 'export function unclosedBracket( {\n');
+   await sync.start(p.id);
+
+   const proj = await store.get(p.id);
+   const analysis = proj.analysis!;
+
+   // AC 3: Honest empty/error state
+   expect(AnalysisSchema.safeParse(analysis).success).toBe(true);
+   expect(analysis.status).toBe('stale');
+   expect(analysis.status).not.toBe('current');
+   expect(analysis.revision).toBe('');
+   expect(analysis.sequence).toBe(0);
+   expect(analysis.graph.nodes).toEqual([]);
+   expect(analysis.graph.edges).toEqual([]);
+   expect(analysis.files).toEqual({});
+   expect(analysis.staleEvidence?.scope).toBe('all');
+   expect(
+    analysis.quality.diagnostics.some(d => d.code === 'analysis-failure' && d.severity === 'error')
+   ).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('publishes explicit lifecycle transitions including updating and exposes isUpdating status', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t058-lifecycle-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'LifecyclePublishTest' });
+
+  let analyzeResolver: () => void;
+  let workerStarted: () => void;
+  const workerStartedPromise = new Promise<void>((resolve) => {
+   workerStarted = resolve;
+  });
+
+  const blockWorker = {
+   analyze: vi.fn().mockImplementation(() => {
+    workerStarted();
+    return new Promise((resolve) => {
+     analyzeResolver = () =>
+      resolve({
+       revision: 'rev-blocked',
+       sequence: 1,
+       analyzedAt: new Date().toISOString(),
+       status: 'current',
+       graph: { schemaVersion: 1, nodes: [], edges: [], requirements: [] },
+       files: {},
+       durationMs: 5,
+       quality: {
+        eligibleFiles: 0,
+        analyzedFiles: 0,
+        unresolvedReferences: 0,
+        unsupportedConstructs: 0,
+        inferredItems: 0,
+        prismaValidation: 'not-applicable',
+        diagnostics: [],
+       },
+      });
+    });
+   }),
+   close: vi.fn().mockResolvedValue(undefined),
+  };
+
+  const sync = new SyncService(store, {
+   watch: false,
+   worker: blockWorker as any,
+  });
+
+  const statuses: string[] = [];
+  sync.on('status', (_id, ev) => {
+   statuses.push(ev.status);
+  });
+
+  try {
+   const reqPromise = sync.start(p.id);
+   await workerStartedPromise;
+
+   // While in flight, status is updating and isUpdating returns true
+   expect(sync.isUpdating(p.id)).toBe(true);
+   expect(statuses).toContain('updating');
+
+   // Unblock the analysis worker
+   analyzeResolver!();
+   await reqPromise;
+
+   // Finished: isUpdating returns false and status transitioned to current
+   expect(sync.isUpdating(p.id)).toBe(false);
+   expect(statuses).toContain('current');
+  } finally {
+   await sync.close();
    await rm(dir, { recursive: true, force: true });
   }
  });

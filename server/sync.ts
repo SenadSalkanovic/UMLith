@@ -1,7 +1,7 @@
 import {EventEmitter} from 'node:events';
 import chokidar,{type FSWatcher} from 'chokidar';
 import {basename,relative} from 'node:path';
-import type {Analysis,GraphUpdate,BindingReviewRecord} from '../shared/model';
+import type {Analysis,GraphUpdate,BindingReviewRecord,Diagnostic} from '../shared/model';
 import {graphDelta,emptyGraph,GRAPH_SCHEMA_VERSION,AnalysisSchema,GraphUpdateSchema,createGraphUpdate} from '../shared/model';
 import {AnalysisWorker} from './worker';
 import {ProjectStore} from './store';
@@ -131,6 +131,12 @@ export class SyncService extends EventEmitter {
 
  hasPendingDebounce(id: string): boolean {
   return Boolean(this.sessions.get(id)?.debounce !== undefined);
+ }
+
+ isUpdating(id: string): boolean {
+  const session = this.sessions.get(id);
+  if (!session || session.closed) return false;
+  return session.inFlight.size > 0 || session.debounce !== undefined;
  }
 
  schedule(id: string, event?: string, filePath?: string): void {
@@ -283,13 +289,15 @@ export class SyncService extends EventEmitter {
 
    const p = await this.store.get(id);
    const before = p.analysis;
-   this.emit('notification', id, {
-    type: 'status',
+   const updatingStatus = {
+    type: 'status' as const,
     projectId: id,
-    status: 'updating',
+    status: 'updating' as const,
     sequence: before?.sequence || 0,
     revision: before?.revision || null,
-   });
+   };
+   this.emit('status', id, updatingStatus);
+   this.emit('notification', id, updatingStatus);
 
    let result: Analysis;
    try {
@@ -302,7 +310,31 @@ export class SyncService extends EventEmitter {
      });
      return;
     }
-    const staleEvidence = { scope: 'all' as const, paths: [], reason: (error as Error).message };
+    const err = error as any;
+    const errorMsg = (error as Error).message || String(error);
+    const errPaths: string[] = Array.isArray(err.paths)
+     ? err.paths.filter((p: any) => typeof p === 'string' && p.trim())
+     : typeof err.path === 'string' && err.path.trim()
+       ? [err.path.trim()]
+       : [];
+    const staleEvidence = {
+     scope: errPaths.length > 0 ? ('paths' as const) : ('all' as const),
+     paths: errPaths,
+     reason: errorMsg,
+    };
+    const errDiagnostics: Diagnostic[] = Array.isArray(err.diagnostics) ? err.diagnostics : [];
+    const failureDiag: Diagnostic = {
+     severity: 'error',
+     code: 'analysis-failure',
+     message: errorMsg,
+     ...(errPaths.length === 1 ? { path: errPaths[0] } : (typeof err.path === 'string' ? { path: err.path } : {})),
+     ...(typeof err.line === 'number' ? { line: err.line } : {}),
+    };
+    const mergedDiagnostics = [
+     ...(before ? before.quality.diagnostics.filter(d => d.code !== 'analysis-failure') : []),
+     failureDiag,
+     ...errDiagnostics.filter(d => d.code !== 'analysis-failure'),
+    ];
     const stale: Analysis = before
      ? {
        ...before,
@@ -310,10 +342,7 @@ export class SyncService extends EventEmitter {
        staleEvidence,
        quality: {
         ...before.quality,
-        diagnostics: [
-         ...before.quality.diagnostics.filter(d => d.code !== 'analysis-failure'),
-         { severity: 'error', code: 'analysis-failure', message: (error as Error).message },
-        ],
+        diagnostics: mergedDiagnostics,
        },
       }
      : {
@@ -332,7 +361,7 @@ export class SyncService extends EventEmitter {
         unsupportedConstructs: 0,
         inferredItems: 0,
         prismaValidation: 'unavailable',
-        diagnostics: [{ severity: 'error', code: 'analysis-failure', message: (error as Error).message }],
+        diagnostics: [failureDiag, ...errDiagnostics],
        },
       };
 
@@ -359,17 +388,19 @@ export class SyncService extends EventEmitter {
     session.committedRevision = stale.revision;
     session.committedSequence = stale.sequence;
 
-    this.emit('notification', id, {
-     type: 'status',
+    const staleStatusEvent = {
+     type: 'status' as const,
      projectId: id,
-     status: 'stale',
+     status: 'stale' as const,
      sequence: stale.sequence,
      revision: stale.revision,
      quality: stale.quality,
      diagnostics: stale.quality.diagnostics,
      staleEvidence,
-     message: (error as Error).message,
-    });
+     message: errorMsg,
+    };
+    this.emit('status', id, staleStatusEvent);
+    this.emit('notification', id, staleStatusEvent);
     return;
    }
 
@@ -422,6 +453,16 @@ export class SyncService extends EventEmitter {
    session.committedRevision = result.revision;
    session.committedSequence = result.sequence;
 
+   this.emit('status', id, {
+    type: 'status' as const,
+    projectId: id,
+    status: result.status,
+    sequence: result.sequence,
+    revision: result.revision,
+    quality: result.quality,
+    diagnostics: result.quality.diagnostics,
+    staleEvidence: result.staleEvidence,
+   });
    this.emit('notification', id, update);
 
    if (bindingReviews.length > 0) {

@@ -20,6 +20,7 @@ import { WorkflowEditor } from './components/WorkflowEditor';
 import { RevisionHistory, type SpecificationConflictState } from './components/RevisionHistory';
 import { ProtectionEditor } from './components/ProtectionEditor';
 import { ImportReview } from './components/ImportReview';
+import { AnalysisStatus } from './components/AnalysisStatus';
 import { Loader2, Clock, AlertTriangle } from 'lucide-react';
 
 export interface AppProps {
@@ -793,6 +794,7 @@ export const App: React.FC<AppProps> = ({
       <Header
         project={specificationState.project}
         syncStatus={analysisState.status}
+        analysis={analysisState.analysis}
         viewState={viewState}
         onTogglePanel={handleTogglePanel}
         onOpenNewProject={() => {
@@ -809,7 +811,29 @@ export const App: React.FC<AppProps> = ({
         onOpenWorkflowEditor={() => handleOpenWorkflowEditor('steps')}
         onOpenRevisionHistory={() => setIsRevisionHistoryOpen(true)}
         onOpenImportReview={() => setIsImportReviewOpen(true)}
+        onRefreshAnalysis={() => {
+          if (specificationState.project) {
+            void api.startAnalysis(specificationState.project.id, { async: true }, apiBaseUrl);
+          }
+        }}
       />
+
+      {/* Analysis Status Alert Banner for Stale or Partial states */}
+      {(analysisState.status === 'stale' || analysisState.status === 'partial') && (
+        <div className="workspace-analysis-banner-wrapper" data-testid="workspace-analysis-banner">
+          <AnalysisStatus
+            status={analysisState.status}
+            analysis={analysisState.analysis}
+            compact={false}
+            className="workspace-analysis-alert-banner"
+            onRefresh={() => {
+              if (specificationState.project) {
+                void api.startAnalysis(specificationState.project.id, { async: true }, apiBaseUrl);
+              }
+            }}
+          />
+        </div>
+      )}
 
       {/* Workspace Conflict Alert Banner */}
       {conflictState && (

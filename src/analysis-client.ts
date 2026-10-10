@@ -2,6 +2,7 @@ import {
   AnalysisSchema,
   AnalysisStatusSchema,
   applyGraphUpdate,
+  emptyGraph,
   SnapshotReconciliationError,
   type Analysis,
   type GraphUpdate,
@@ -349,8 +350,30 @@ export class AnalysisClient {
           this.snapshot = {
             ...this.snapshot,
             status: statusData.status,
-            quality: statusData.quality || this.snapshot.quality,
+            quality: statusData.quality || (statusData.diagnostics ? { ...this.snapshot.quality, diagnostics: statusData.diagnostics } : this.snapshot.quality),
             staleEvidence: statusData.staleEvidence ?? (statusData.status === 'stale' ? this.snapshot.staleEvidence : undefined),
+          };
+          this.options.onSnapshot?.(this.snapshot, 'snapshot');
+          this.emit('snapshot', this.snapshot, 'snapshot');
+        } else if (statusData.status === 'stale' && (statusData.revision === '' || !statusData.revision)) {
+          this.snapshot = {
+            revision: '',
+            sequence: 0,
+            analyzedAt: statusData.timestamp || new Date().toISOString(),
+            status: 'stale',
+            staleEvidence: statusData.staleEvidence || { scope: 'all', paths: [], reason: statusData.message || 'Initial analysis failed' },
+            graph: emptyGraph(),
+            files: {},
+            durationMs: 0,
+            quality: statusData.quality || {
+              eligibleFiles: 0,
+              analyzedFiles: 0,
+              unresolvedReferences: 0,
+              unsupportedConstructs: 0,
+              inferredItems: 0,
+              prismaValidation: 'unavailable',
+              diagnostics: statusData.diagnostics || (statusData.message ? [{ severity: 'error', code: 'analysis-failure', message: statusData.message }] : []),
+            },
           };
           this.options.onSnapshot?.(this.snapshot, 'snapshot');
           this.emit('snapshot', this.snapshot, 'snapshot');

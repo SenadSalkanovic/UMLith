@@ -1,11 +1,13 @@
 import React from 'react';
-import type { Project } from '../../shared/model';
+import type { Project, Analysis } from '../../shared/model';
 import type { SyncStatus, ViewState } from '../types';
+import { AnalysisStatus } from './AnalysisStatus';
 import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database, Terminal, Workflow, History } from 'lucide-react';
 
 interface HeaderProps {
   project: Project | null;
   syncStatus: SyncStatus;
+  analysis?: Analysis | null;
   viewState: ViewState;
   onTogglePanel: (panel: keyof ViewState['panels']) => void;
   onOpenNewProject: () => void;
@@ -16,11 +18,13 @@ interface HeaderProps {
   onOpenWorkflowEditor?: () => void;
   onOpenRevisionHistory?: () => void;
   onOpenImportReview?: () => void;
+  onRefreshAnalysis?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   project,
   syncStatus,
+  analysis,
   viewState,
   onTogglePanel,
   onOpenNewProject,
@@ -31,22 +35,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenWorkflowEditor,
   onOpenRevisionHistory,
   onOpenImportReview,
+  onRefreshAnalysis,
 }) => {
-  const getStatusBadge = () => {
-    switch (syncStatus) {
-      case 'updating':
-        return <span className="status-badge status-updating" data-testid="status-updating">Updating…</span>;
-      case 'current':
-        return <span className="status-badge status-current" data-testid="status-current">Current</span>;
-      case 'partial':
-        return <span className="status-badge status-partial" data-testid="status-partial">Partial</span>;
-      case 'stale':
-        return <span className="status-badge status-stale" data-testid="status-stale">Stale</span>;
-      default:
-        return <span className="status-badge status-idle">Ready</span>;
-    }
-  };
-
   return (
     <header className="workspace-header" data-testid="workspace-header">
       <div className="header-brand">
@@ -78,7 +68,12 @@ export const Header: React.FC<HeaderProps> = ({
                 {`Rev ${project.specRevision}`}
               </span>
             )}
-            {getStatusBadge()}
+            <AnalysisStatus
+              status={syncStatus}
+              analysis={analysis}
+              compact={true}
+              onRefresh={onRefreshAnalysis}
+            />
           </>
         ) : (
           <span className="no-project-label">No project active</span>
