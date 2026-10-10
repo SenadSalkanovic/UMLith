@@ -1,10 +1,19 @@
 import { it, expect, describe } from 'vitest';
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createServer, isLoopbackHost, isWildcardHost, isAllowedOrigin, DEFAULT_ALLOWED_ORIGINS } from '../server/main';
 import { ProjectStore } from '../server/store';
-import { emptyGraph, GraphSchema, type Project } from '../shared/model';
+import { emptyGraph, GraphSchema, type Project, type Analysis } from '../shared/model';
+import type { ImportQualityReport } from '../server/analyzer';
+import type { AnalysisStatusResponse, ImportQualityReportResponse } from '../shared/api';
+import {
+  startAnalysis,
+  getAnalysisStatus,
+  getAnalysisSnapshot,
+  getAnalysisReport,
+  importProject,
+} from '../src/api';
 
 describe('Project and revision API interfaces (T014)', () => {
   it('creates, reloads, and lists a new local project', async () => {
@@ -1363,5 +1372,448 @@ describe('Loopback binding and origin enforcement (T015)', () => {
     expect(isAllowedOrigin('http://192.168.1.5:5173')).toBe(false);
     expect(isAllowedOrigin('http://localhost.evil.com:5173')).toBe(false);
     expect(isAllowedOrigin('http://127.0.0.1.attacker.com')).toBe(false);
+  });
+});
+
+describe('Expose imports and analysis snapshots through local APIs (T045)', () => {
+  it('imports a known fixture via API and compares its graph (T045 concrete scenario 1)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-api-fixture-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+
+      const fixtureDir = resolve('tests/fixtures/typescript-structure');
+      const expectedPath = resolve('tests/fixtures/typescript-structure.expected.json');
+      const expectedContent = await readFile(expectedPath, 'utf8');
+      const expectedGraph = JSON.parse(expectedContent);
+
+      // 1. Create project via API pointing to the known fixture
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        payload: {
+          name: 'TypeScript Structure Fixture',
+          target: 'TypeScript library',
+          root: fixtureDir,
+        },
+      });
+      expect(createRes.statusCode).toBe(201);
+      const created = createRes.json<Project>();
+      expect(created.managed).toBe(false);
+      // AC 3: Import does not establish intended architecture automatically
+      expect(created.specRevision).toBe(0);
+      expect(created.specification).toEqual(emptyGraph());
+      expect(created.specification.nodes).toHaveLength(0);
+      expect(created.specification.edges).toHaveLength(0);
+
+      // 2. Fetch validated analysis snapshot via GET /api/projects/:id/analysis/snapshot
+      const snapshotRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${created.id}/analysis/snapshot`,
+      });
+      expect(snapshotRes.statusCode).toBe(200);
+      const snapshot = snapshotRes.json<Analysis>();
+      expect(snapshot.graph.schemaVersion).toBe(expectedGraph.schemaVersion);
+      expect(snapshot.graph.nodes.length).toBe(expectedGraph.nodes.length);
+      expect(snapshot.graph.edges.length).toBe(expectedGraph.edges.length);
+      expect(snapshot.graph).toEqual(expectedGraph);
+
+      // 3. Fetch validated import-quality report via GET /api/projects/:id/analysis/report
+      const reportRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${created.id}/analysis/report`,
+      });
+      expect(reportRes.statusCode).toBe(200);
+      const report = reportRes.json<ImportQualityReport>();
+      // AC 2: Snapshot/report revisions match
+      expect(report.revision).toBe(snapshot.revision);
+      expect(report.status).toBe(snapshot.status);
+      expect(report.eligibleFiles).toBeGreaterThan(0);
+      expect(report.analyzedFiles).toBe(report.eligibleFiles);
+      expect(report.coverage.isFullyCovered).toBe(true);
+      expect(report.behavioralLimitStatement).toBe(
+        'File coverage must not be presented as proof of behavioral completeness.'
+      );
+
+      // 4. Check analysis status endpoint
+      const statusRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${created.id}/analysis/status`,
+      });
+      expect(statusRes.statusCode).toBe(200);
+      const status = statusRes.json<any>();
+      expect(status.projectId).toBe(created.id);
+      expect(status.status).toBe('current');
+      expect(status.revision).toBe(snapshot.revision);
+      expect(status.sequence).toBe(snapshot.sequence);
+
+      // 5. Test route aliases: /snapshot, /report, and /import
+      const aliasSnapshotRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${created.id}/snapshot`,
+      });
+      expect(aliasSnapshotRes.statusCode).toBe(200);
+      expect(aliasSnapshotRes.json<Analysis>().revision).toBe(snapshot.revision);
+
+      const aliasReportRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${created.id}/report`,
+      });
+      expect(aliasReportRes.statusCode).toBe(200);
+      expect(aliasReportRes.json<ImportQualityReport>().revision).toBe(snapshot.revision);
+
+      // 6. Trigger re-analysis via POST /api/projects/:id/analysis
+      const reAnalyzeRes = await app.inject({
+        method: 'POST',
+        url: `/api/projects/${created.id}/analysis`,
+      });
+      expect(reAnalyzeRes.statusCode).toBe(200);
+      const reAnalysisData = reAnalyzeRes.json<any>();
+      expect(reAnalysisData.analysis.revision).toBe(snapshot.revision);
+      expect(reAnalysisData.report.revision).toBe(snapshot.revision);
+
+      // Verify specification remained untouched
+      const projectReloadRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${created.id}`,
+      });
+      const reloaded = projectReloadRes.json<Project>();
+      expect(reloaded.specRevision).toBe(0);
+      expect(reloaded.specification).toEqual(emptyGraph());
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('triggers parse failure while requesting project metadata (T045 concrete scenario 2)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-api-parse-fail-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+
+      const projectRoot = join(dir, 'source-repo');
+      await mkdir(projectRoot, { recursive: true });
+      await writeFile(
+        join(projectRoot, 'valid.ts'),
+        'export function validFunc(): string { return "valid"; }\n'
+      );
+
+      // 1. Create a valid project
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        payload: {
+          name: 'Responsive Metadata Test',
+          root: projectRoot,
+        },
+      });
+      expect(createRes.statusCode).toBe(201);
+      const project = createRes.json<Project>();
+      expect(project.specRevision).toBe(0);
+      expect(project.specification).toEqual(emptyGraph());
+
+      // 2. Introduce invalid syntax in a TypeScript file
+      await writeFile(
+        join(projectRoot, 'broken.ts'),
+        'export function brokenSyntax( {\n'
+      );
+
+      // 3. Concurrently trigger analysis while requesting project metadata, project list, and health
+      const [analysisRes, metaRes, listRes, healthRes] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: `/api/projects/${project.id}/analysis`,
+        }),
+        app.inject({
+          method: 'GET',
+          url: `/api/projects/${project.id}`,
+        }),
+        app.inject({
+          method: 'GET',
+          url: '/api/projects',
+        }),
+        app.inject({
+          method: 'GET',
+          url: '/api/health',
+        }),
+      ]);
+
+      // AC 1: The browser remains responsive
+      expect(metaRes.statusCode).toBe(200);
+      const meta = metaRes.json<Project>();
+      expect(meta.id).toBe(project.id);
+      expect(meta.name).toBe('Responsive Metadata Test');
+      expect(meta.specRevision).toBe(0);
+      expect(meta.specification).toEqual(emptyGraph());
+
+      expect(listRes.statusCode).toBe(200);
+      expect(listRes.json<Project[]>().some(p => p.id === project.id)).toBe(true);
+
+      expect(healthRes.statusCode).toBe(200);
+      expect(healthRes.json()).toEqual({ status: 'ok' });
+
+      // AC 1: Analysis errors are explicit
+      expect(analysisRes.statusCode).toBe(400);
+      const analysisErr = analysisRes.json<any>();
+      expect(analysisErr.error).toBe('Bad Request');
+      expect(analysisErr.message).toMatch(/syntax/i);
+      expect(analysisErr.message).toContain('broken.ts');
+      expect(analysisErr.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'error',
+          code: 'analysis-failure',
+          message: expect.stringMatching(/syntax/i),
+        }),
+      ]));
+
+      // 4. Verify analysis status endpoint reports stale state with explicit failure diagnostic
+      const statusRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/analysis/status`,
+      });
+      expect(statusRes.statusCode).toBe(200);
+      const statusData = statusRes.json<any>();
+      expect(statusData.status).toBe('stale');
+      expect(statusData.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'error',
+          code: 'analysis-failure',
+        }),
+      ]));
+
+      // 5. Subsequent project metadata request remains responsive and valid
+      const recheckMetaRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}`,
+      });
+      expect(recheckMetaRes.statusCode).toBe(200);
+      expect(recheckMetaRes.json<Project>().specification).toEqual(emptyGraph());
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('supports asynchronous analysis execution and status polling', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-api-async-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+
+      const projectRoot = join(dir, 'source-repo');
+      await mkdir(projectRoot, { recursive: true });
+      await writeFile(
+        join(projectRoot, 'service.ts'),
+        'export class AppService { run(): void {} }\n'
+      );
+
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        payload: {
+          name: 'Async Analysis Test',
+          root: projectRoot,
+        },
+      });
+      expect(createRes.statusCode).toBe(201);
+      const project = createRes.json<Project>();
+
+      // Start analysis asynchronously with ?async=true
+      const startRes = await app.inject({
+        method: 'POST',
+        url: `/api/projects/${project.id}/analysis?async=true`,
+      });
+      expect(startRes.statusCode).toBe(202);
+      expect(startRes.json()).toEqual(expect.objectContaining({
+        projectId: project.id,
+        status: 'updating',
+        message: 'Analysis started',
+      }));
+
+      // Poll status until done
+      let attempts = 0;
+      let finalStatus: any;
+      while (attempts < 50) {
+        attempts++;
+        const stRes = await app.inject({
+          method: 'GET',
+          url: `/api/projects/${project.id}/analysis/status`,
+        });
+        expect(stRes.statusCode).toBe(200);
+        finalStatus = stRes.json();
+        if (finalStatus.status !== 'updating') break;
+        await new Promise(r => setTimeout(r, 50));
+      }
+      expect(finalStatus.status).toBe('current');
+
+      // Fetch snapshot and report
+      const snapshotRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/analysis/snapshot`,
+      });
+      expect(snapshotRes.statusCode).toBe(200);
+      const snapshot = snapshotRes.json<Analysis>();
+
+      const reportRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/analysis/report`,
+      });
+      expect(reportRes.statusCode).toBe(200);
+      const report = reportRes.json<ImportQualityReport>();
+
+      // Snapshot/report revisions match
+      expect(report.revision).toBe(snapshot.revision);
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('imports multi-construct fixture with Prisma schema and unsupported constructs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-api-import-quality-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+
+      const fixtureDir = resolve('tests/fixtures/import-quality');
+
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        payload: {
+          name: 'Import Quality Fixture',
+          root: fixtureDir,
+        },
+      });
+      expect(createRes.statusCode).toBe(201);
+      const project = createRes.json<Project>();
+      expect(project.specRevision).toBe(0);
+      expect(project.specification).toEqual(emptyGraph());
+
+      // Snapshot has extracted items
+      const snapshotRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/analysis/snapshot`,
+      });
+      expect(snapshotRes.statusCode).toBe(200);
+      const snapshot = snapshotRes.json<Analysis>();
+      expect(snapshot.status).toBe('partial');
+      expect(snapshot.graph.nodes.some(n => n.kind === 'class' && n.name === 'UserService')).toBe(true);
+      expect(snapshot.graph.nodes.some(n => n.kind === 'step' && n.stepType === 'opaque')).toBe(true);
+
+      // Report has explicit diagnostics and matching revision
+      const reportRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/analysis/report`,
+      });
+      expect(reportRes.statusCode).toBe(200);
+      const report = reportRes.json<ImportQualityReport>();
+      expect(report.revision).toBe(snapshot.revision);
+      expect(report.status).toBe('partial');
+      expect(report.breakdown.parserDiagnostics).toBeGreaterThanOrEqual(1);
+      expect(report.unsupportedConstructs).toBeGreaterThanOrEqual(1);
+      expect(report.unresolvedReferences).toBeGreaterThanOrEqual(1);
+      expect(report.behavioralLimitStatement).toBe(
+        'File coverage must not be presented as proof of behavioral completeness.'
+      );
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('handles missing analysis snapshots and reports cleanly with 404', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-api-missing-analysis-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+
+      // Blank project without initial analysis
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        payload: {
+          name: 'Blank Project',
+        },
+      });
+      expect(createRes.statusCode).toBe(201);
+      const project = createRes.json<Project>();
+      expect(project.analysis).toBeUndefined();
+
+      // Snapshot returns 404
+      const snapshotRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/analysis/snapshot`,
+      });
+      expect(snapshotRes.statusCode).toBe(404);
+      expect(snapshotRes.json().message).toMatch(/not found/i);
+
+      // Report returns 404
+      const reportRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/analysis/report`,
+      });
+      expect(reportRes.statusCode).toBe(404);
+      expect(reportRes.json().message).toMatch(/not found/i);
+
+      // Status returns stale/0
+      const statusRes = await app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/analysis/status`,
+      });
+      expect(statusRes.statusCode).toBe(200);
+      expect(statusRes.json().status).toBe('stale');
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('exercises client helpers from src/api.ts over real loopback network socket', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-api-client-helpers-'));
+    try {
+      const store = new ProjectStore(dir);
+      const app = await createServer({ store });
+      await app.listen({ host: '127.0.0.1', port: 0 });
+      const address = app.server.address() as any;
+      const baseUrl = `http://127.0.0.1:${address.port}/api`;
+
+      const fixtureDir = resolve('tests/fixtures/typescript-structure');
+
+      // Create project via API
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        payload: {
+          name: 'Client Helper Test',
+          root: fixtureDir,
+        },
+      });
+      const project = createRes.json<Project>();
+
+      // Use src/api helpers
+      const status = await getAnalysisStatus(project.id, baseUrl);
+      expect(status.projectId).toBe(project.id);
+      expect(status.status).toBe('current');
+
+      const snapshot = await getAnalysisSnapshot(project.id, baseUrl);
+      expect(snapshot.graph.nodes.length).toBeGreaterThan(0);
+
+      const report = await getAnalysisReport(project.id, baseUrl);
+      expect(report.revision).toBe(snapshot.revision);
+
+      const importResult = await importProject(project.id, {}, baseUrl);
+      expect(importResult.analysis.revision).toBe(snapshot.revision);
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

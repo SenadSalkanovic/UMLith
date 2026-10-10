@@ -330,3 +330,17 @@ Validation observed:
 Independent read-only review approved T002 with no findings and verified every acceptance criterion and concrete scenario against the implementation, tests, and contract. The reviewer independently ran `npm test -- tests/model.test.ts` (90 passed) and `git diff --check HEAD` (passed). Full-suite and TypeScript evidence above came from the implementer's runs; the reviewer did not repeat them.
 
 Limits: full source rename/move reconciliation and its review UI are later T034/T056/T057 work. This task defines their reusable keys and mandatory review semantics, without claiming that the current analyzer already implements those later tasks. Live-agent and browser smoke tests were not run.
+
+## 2026-10-10 — T045 Expose imports and analysis snapshots through local APIs
+
+Scope: `shared/api.ts`, `server/analysis-worker.mjs`, `server/worker.ts`, `server/main.ts`, `src/api.ts`, `tests/api.test.ts`, and this shared contract. Added validated analysis start/status, snapshot, and report endpoints and Zod schemas; wired `AnalysisWorker` into project import; guaranteed that import runs off the browser request path in background worker threads; persisted completed analysis without mutating human-authored specifications; verified explicit error mapping and responsive browser interactions during parse failures. Task cards and the original plan remain controller-owned.
+
+| T045 requirement/scenario | Evidence |
+| --- | --- |
+| Import runs off browser request path | `AnalysisWorker` runs analysis in a background worker thread (`worker_threads`), preventing event-loop blockage so concurrent browser requests remain responsive |
+| Snapshot and report revisions match | Validated snapshots (`GET /api/projects/:id/analysis/snapshot`) and quality reports (`GET /api/projects/:id/analysis/report`) share identical source revisions matching `project.analysis.revision` |
+| Import does not establish intended architecture automatically | Project import and re-analysis update only `project.analysis` and `analysis.json`; `project.specification` remains untouched at `emptyGraph()` (revision 0) until explicit human adoption |
+| Explicit analysis errors | Parse/syntax failures return HTTP 400 with explicit error messages and failure diagnostics; the project state updates to `status: 'stale'` with diagnostic evidence |
+| Browser remains responsive during parse failures | Concurrent project metadata requests (`GET /api/projects/:id`), project listing, and health checks return HTTP 200 immediately while analysis fails |
+| Import known fixture and compare graph | Imported `tests/fixtures/typescript-structure` via API; snapshot graph strictly matches `tests/fixtures/typescript-structure.expected.json` |
+| Client helpers | `src/api.ts` provides typed helpers (`startAnalysis`, `getAnalysisStatus`, `getAnalysisSnapshot`, `getAnalysisReport`, `importProject`) tested over real loopback network socket |

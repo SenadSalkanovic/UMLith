@@ -3,8 +3,12 @@ import type {
   LayoutResponse,
   ApiErrorResponse,
   RevisionRecord,
+  StartAnalysisRequest,
+  AnalysisStatusResponse,
+  ImportQualityReportResponse,
+  AnalysisResponse,
 } from '../shared/api';
-import type { Graph, Layout, Project } from '../shared/model';
+import type { Graph, Layout, Project, Analysis } from '../shared/model';
 
 export class ApiConnectionError extends Error {
   public actionableSteps: string[];
@@ -233,4 +237,47 @@ export async function getProjectFile(
   const query = new URLSearchParams({ path });
   if (revision) query.set('revision', revision);
   return request<ProjectFileResponse>(`/projects/${id}/files?${query.toString()}`, { method: 'GET' }, baseUrl);
+}
+
+export async function startAnalysis(
+  id: string,
+  options?: StartAnalysisRequest,
+  baseUrl?: string
+): Promise<AnalysisResponse> {
+  return request<AnalysisResponse>(`/projects/${id}/analysis`, {
+    method: 'POST',
+    body: JSON.stringify(options ?? {}),
+  }, baseUrl);
+}
+
+export async function getAnalysisStatus(
+  id: string,
+  baseUrl?: string
+): Promise<AnalysisStatusResponse> {
+  return request<AnalysisStatusResponse>(`/projects/${id}/analysis/status`, { method: 'GET' }, baseUrl);
+}
+
+export async function getAnalysisSnapshot(
+  id: string,
+  baseUrl?: string
+): Promise<Analysis> {
+  return request<Analysis>(`/projects/${id}/analysis/snapshot`, { method: 'GET' }, baseUrl);
+}
+
+export async function getAnalysisReport(
+  id: string,
+  baseUrl?: string
+): Promise<ImportQualityReportResponse> {
+  return request<ImportQualityReportResponse>(`/projects/${id}/analysis/report`, { method: 'GET' }, baseUrl);
+}
+
+export async function importProject(
+  id: string,
+  options?: StartAnalysisRequest,
+  baseUrl?: string
+): Promise<AnalysisResponse> {
+  return request<AnalysisResponse>(`/projects/${id}/import`, {
+    method: 'POST',
+    body: JSON.stringify(options ?? {}),
+  }, baseUrl);
 }

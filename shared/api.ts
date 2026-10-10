@@ -4,6 +4,10 @@ import {
   LayoutSchema,
   ScopedLayoutsSchema,
   AnalysisSchema,
+  AnalysisStatusSchema,
+  DiagnosticSchema,
+  QualitySchema,
+  StaleEvidenceSchema,
   type Graph,
   type GraphInput,
   type Layout,
@@ -119,3 +123,86 @@ export const ApiErrorResponseSchema = z.object({
   issues: z.array(z.any()).optional(),
 });
 export type ApiErrorResponse = z.infer<typeof ApiErrorResponseSchema>;
+
+export const StartAnalysisRequestSchema = z.object({
+  async: z.boolean().optional(),
+  root: z.string().optional(),
+  options: z.record(z.string(), z.unknown()).optional(),
+}).optional().default({});
+export type StartAnalysisRequest = z.infer<typeof StartAnalysisRequestSchema>;
+
+export const ImportQualityReportCoverageSchema = z.object({
+  eligibleFiles: z.number().int().nonnegative(),
+  analyzedFiles: z.number().int().nonnegative(),
+  ratio: z.number().nonnegative(),
+  percentage: z.number().nonnegative(),
+  isFullyCovered: z.boolean(),
+});
+
+export const ImportQualityReportBreakdownSchema = z.object({
+  compilerDiagnostics: z.number().int().nonnegative(),
+  parserDiagnostics: z.number().int().nonnegative(),
+  errors: z.number().int().nonnegative(),
+  warnings: z.number().int().nonnegative(),
+  info: z.number().int().nonnegative(),
+  opaqueConstructs: z.number().int().nonnegative(),
+  unresolvedReferences: z.number().int().nonnegative(),
+  inferredInterpretations: z.number().int().nonnegative(),
+});
+
+export const ImportQualityReportCountsSchema = z.object({
+  eligibleFiles: z.number().int().nonnegative(),
+  analyzedFiles: z.number().int().nonnegative(),
+  unresolvedReferences: z.number().int().nonnegative(),
+  unsupportedConstructs: z.number().int().nonnegative(),
+  inferredItems: z.number().int().nonnegative(),
+  diagnostics: z.number().int().nonnegative(),
+  errors: z.number().int().nonnegative(),
+  warnings: z.number().int().nonnegative(),
+});
+
+export const ImportQualityReportSchema = z.object({
+  revision: z.string(),
+  status: AnalysisStatusSchema,
+  eligibleFiles: z.number().int().nonnegative(),
+  analyzedFiles: z.number().int().nonnegative(),
+  unresolvedReferences: z.number().int().nonnegative(),
+  unsupportedConstructs: z.number().int().nonnegative(),
+  inferredItems: z.number().int().nonnegative(),
+  prismaValidation: z.enum(['passed', 'failed', 'unavailable', 'not-applicable']),
+  diagnostics: z.array(DiagnosticSchema),
+  behavioralLimitStatement: z.string(),
+  limitStatement: z.string(),
+  coverage: ImportQualityReportCoverageSchema,
+  breakdown: ImportQualityReportBreakdownSchema,
+  counts: ImportQualityReportCountsSchema,
+  quality: QualitySchema,
+});
+export type ImportQualityReportResponse = z.infer<typeof ImportQualityReportSchema>;
+
+export const AnalysisStatusResponseSchema = z.object({
+  projectId: z.string(),
+  status: AnalysisStatusSchema,
+  revision: z.string().nullable().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+  analyzedAt: z.string().optional(),
+  durationMs: z.number().nonnegative().optional(),
+  quality: QualitySchema.optional(),
+  staleEvidence: StaleEvidenceSchema.optional(),
+  diagnostics: z.array(DiagnosticSchema).optional(),
+  error: z.string().optional(),
+  message: z.string().optional(),
+});
+export type AnalysisStatusResponse = z.infer<typeof AnalysisStatusResponseSchema>;
+
+export const AnalysisSnapshotResponseSchema = AnalysisSchema;
+export type AnalysisSnapshotResponse = Analysis;
+
+export const AnalysisResponseSchema = z.object({
+  analysis: AnalysisSchema,
+  report: ImportQualityReportSchema.optional(),
+  status: AnalysisStatusSchema.optional(),
+  revision: z.string().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+});
+export type AnalysisResponse = z.infer<typeof AnalysisResponseSchema>;

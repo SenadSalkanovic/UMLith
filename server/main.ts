@@ -7,12 +7,20 @@ import { fileURLToPath } from 'node:url';
 import { ZodError } from 'zod';
 import { ProjectStore, SpecificationConflictError } from './store';
 import { AppError, safePath, hash, isPathExcluded } from './files';
+import { AnalysisWorker } from './worker';
+import { generateImportQualityReport, type ImportQualityReport } from './analyzer';
+import { AnalysisSchema, emptyGraph, type Analysis } from '../shared/model';
 import {
   CreateProjectRequestSchema,
   UpdateSpecificationRequestSchema,
   UpdateLayoutRequestSchema,
   ProjectIdParamSchema,
   ChecksSchema,
+  StartAnalysisRequestSchema,
+  AnalysisStatusResponseSchema,
+  ImportQualityReportSchema,
+  AnalysisSnapshotResponseSchema,
+  AnalysisResponseSchema,
 } from '../shared/api';
 
 export const DEFAULT_ALLOWED_ORIGINS = [
@@ -98,6 +106,7 @@ export function isAllowedOrigin(
 export interface ServerOptions {
   store?: ProjectStore;
   storeDir?: string;
+  worker?: AnalysisWorker;
   logger?: boolean | object;
   host?: string;
   port?: number;
@@ -109,6 +118,9 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   const store = options.store ?? new ProjectStore(
     options.storeDir ?? process.env.DATA_DIR ?? process.env.ARCHITECT_DATA_DIR ?? join(process.cwd(), '.workspace-data')
   );
+
+  const ownsWorker = !options.worker;
+  const worker = options.worker ?? new AnalysisWorker();
 
   const defaultHost = options.host ?? '127.0.0.1';
   if (!isLoopbackHost(defaultHost)) {
@@ -128,6 +140,15 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   });
 
   app.decorate('store', store);
+  app.decorate('worker', worker);
+
+  const activeAnalyses = new Map<string, { startedAt: string; promise: Promise<{ analysis: Analysis; report: ImportQualityReport }> }>();
+
+  app.addHook('onClose', async () => {
+    if (ownsWorker) {
+      await worker.close();
+    }
+  });
 
   // Enforce loopback Host and precise Origin policy
   app.addHook('onRequest', async (request, reply) => {
@@ -384,6 +405,178 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     const project = await store.get(id);
     return reply.send(project.checks);
   });
+
+  // Analysis and import endpoints (T045)
+  const startAnalysisHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const body = StartAnalysisRequestSchema.parse(request.body ?? {});
+    const project = await store.get(id);
+
+    const rootPath = body.root ? await safePath(project.root, body.root) : project.root;
+    const s = await stat(rootPath);
+    if (!s.isDirectory()) {
+      throw new AppError('Project root is not a directory', 400);
+    }
+
+    const isAsync = body.async === true || request.query?.async === 'true' || request.query?.async === '1';
+
+    let active = activeAnalyses.get(id);
+    if (!active) {
+      const executeAnalysis = async () => {
+        try {
+          const result = await worker.analyzeAndReport(rootPath, body.options);
+          AnalysisSchema.parse(result.analysis);
+          await store.updateAnalysis(id, result.analysis);
+          return result;
+        } catch (err: any) {
+          const staleEvidence = { scope: 'all' as const, paths: [], reason: err.message };
+          const currentProject = await store.get(id).catch(() => project);
+          const stale: Analysis = currentProject.analysis
+            ? {
+                ...currentProject.analysis,
+                status: 'stale',
+                staleEvidence,
+                quality: {
+                  ...currentProject.analysis.quality,
+                  diagnostics: [
+                    ...currentProject.analysis.quality.diagnostics.filter(d => d.code !== 'analysis-failure'),
+                    { severity: 'error', code: 'analysis-failure', message: err.message },
+                  ],
+                },
+              }
+            : {
+                revision: '',
+                sequence: 0,
+                analyzedAt: new Date().toISOString(),
+                status: 'stale',
+                staleEvidence,
+                graph: emptyGraph(),
+                files: {},
+                durationMs: 0,
+                quality: {
+                  eligibleFiles: 0,
+                  analyzedFiles: 0,
+                  unresolvedReferences: 0,
+                  unsupportedConstructs: 0,
+                  inferredItems: 0,
+                  prismaValidation: 'unavailable',
+                  diagnostics: [{ severity: 'error', code: 'analysis-failure', message: err.message }],
+                },
+              };
+          try {
+            await store.updateAnalysis(id, stale);
+          } catch {}
+          throw err;
+        } finally {
+          activeAnalyses.delete(id);
+        }
+      };
+
+      const promise = executeAnalysis();
+      active = { startedAt: new Date().toISOString(), promise };
+      activeAnalyses.set(id, active);
+    }
+
+    if (isAsync) {
+      return reply.status(202).send({
+        projectId: id,
+        status: 'updating',
+        message: 'Analysis started',
+      });
+    }
+
+    try {
+      const { analysis, report } = await active.promise;
+      return reply.status(200).send({
+        analysis,
+        report,
+        status: analysis.status,
+        revision: analysis.revision,
+        sequence: analysis.sequence,
+      });
+    } catch (err: any) {
+      const statusCode = err instanceof AppError ? err.statusCode : (err?.statusCode || 400);
+      return reply.status(statusCode).send({
+        error: statusCode === 404 ? 'Not Found' : 'Bad Request',
+        message: err.message,
+        statusCode,
+        diagnostics: [{ severity: 'error', code: 'analysis-failure', message: err.message }],
+      });
+    }
+  };
+
+  app.post('/api/projects/:id/analysis', startAnalysisHandler);
+  app.post('/api/projects/:id/analysis/start', startAnalysisHandler);
+  app.post('/api/projects/:id/import', startAnalysisHandler);
+  app.post('/api/projects/:id/analyze', startAnalysisHandler);
+
+  const getAnalysisStatusHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const project = await store.get(id);
+    const active = activeAnalyses.get(id);
+    if (active) {
+      return reply.send({
+        projectId: id,
+        status: 'updating',
+        revision: project.analysis?.revision ?? null,
+        sequence: project.analysis?.sequence ?? 0,
+        quality: project.analysis?.quality,
+        diagnostics: project.analysis?.quality?.diagnostics ?? [],
+      });
+    }
+    if (!project.analysis) {
+      return reply.send({
+        projectId: id,
+        status: 'stale',
+        revision: null,
+        sequence: 0,
+        diagnostics: [],
+      });
+    }
+    return reply.send({
+      projectId: id,
+      status: project.analysis.status,
+      revision: project.analysis.revision,
+      sequence: project.analysis.sequence,
+      analyzedAt: project.analysis.analyzedAt,
+      durationMs: project.analysis.durationMs,
+      quality: project.analysis.quality,
+      staleEvidence: project.analysis.staleEvidence,
+      diagnostics: project.analysis.quality.diagnostics,
+    });
+  };
+
+  app.get('/api/projects/:id/analysis/status', getAnalysisStatusHandler);
+  app.get('/api/projects/:id/status', getAnalysisStatusHandler);
+
+  const getAnalysisSnapshotHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const project = await store.get(id);
+    if (!project.analysis) {
+      throw new AppError(`Analysis snapshot not found for project ${id}`, 404);
+    }
+    const snapshot = AnalysisSchema.parse(project.analysis);
+    return reply.send(snapshot);
+  };
+
+  app.get('/api/projects/:id/analysis/snapshot', getAnalysisSnapshotHandler);
+  app.get('/api/projects/:id/snapshot', getAnalysisSnapshotHandler);
+  app.get('/api/projects/:id/analysis', getAnalysisSnapshotHandler);
+
+  const getAnalysisReportHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const project = await store.get(id);
+    if (!project.analysis) {
+      throw new AppError(`Import quality report not found for project ${id}`, 404);
+    }
+    const report = generateImportQualityReport(project.analysis);
+    return reply.send(report);
+  };
+
+  app.get('/api/projects/:id/analysis/report', getAnalysisReportHandler);
+  app.get('/api/projects/:id/report', getAnalysisReportHandler);
+  app.get('/api/projects/:id/analysis/quality', getAnalysisReportHandler);
+  app.get('/api/projects/:id/quality', getAnalysisReportHandler);
 
   // Project files and source inspection endpoints (T025)
   const getFileHandler = async (request: any, reply: any) => {
