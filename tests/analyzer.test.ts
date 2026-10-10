@@ -1,6 +1,7 @@
 import {it,expect} from 'vitest';
 import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN} from '../server/analyzer';
-import {GraphSchema} from '../shared/model';
+import {GraphSchema,resolveSourceEvidence} from '../shared/model';
+import {hash,captureSourceRevision} from '../server/files';
 import {mkdtemp,writeFile,cp,rm,mkdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -263,5 +264,197 @@ it('maintains strict denominator when no eligible source files are present',asyn
   expect(a.quality.eligibleFiles).toBe(0);
   expect(a.quality.analyzedFiles).toBe(0);
   expect(a.graph.nodes.filter(n=>n.kind==='module')).toHaveLength(0);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('detects changes during capture, retries, and captures a consistent revision when stabilized',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-capture-retry-'));
+ try{
+  await writeFile(join(dir,'orders.ts'),'export function placeOrder(): number { return 1; }\n');
+  await writeFile(join(dir,'tsconfig.json'),JSON.stringify({compilerOptions:{target:'ES2022'}}));
+  let changed=false;
+  const analyzer=new Analyzer();
+  const a=await analyzer.analyze(dir,{
+   captureOptions:{
+    maxRetries:2,
+    retryDelayMs:20,
+    onCaptureFile:async(path)=>{
+     if(path==='tsconfig.json'&&!changed){
+      changed=true;
+      await writeFile(join(dir,'orders.ts'),'export function placeOrder(): number { return 2; }\n');
+      await writeFile(join(dir,'tsconfig.json'),JSON.stringify({compilerOptions:{target:'ES2020'}}));
+     }
+    },
+   },
+  });
+  expect(changed).toBe(true);
+  expect(a.status).toBe('current');
+  expect(a.quality.diagnostics.filter(d=>d.code==='incomplete-revision')).toHaveLength(0);
+  const place=a.graph.nodes.find(n=>n.name==='placeOrder')!;
+  expect(place.source).toBeDefined();
+  const evidence=resolveSourceEvidence(place.source,a,a.revision);
+  expect(evidence.status).toBe('current');
+  if(evidence.status==='current'){
+   expect(evidence.text).toContain('return 2');
+  }
+  expect(place.source?.hash).toBe(hash(a.files['orders.ts'].text));
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('detects changes during capture, marks the revision incomplete explicitly, and never labels it current',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-capture-incomplete-'));
+ try{
+  await writeFile(join(dir,'orders.ts'),'export function placeOrder(): number { return 1; }\n');
+  await writeFile(join(dir,'tsconfig.json'),JSON.stringify({compilerOptions:{target:'ES2022'}}));
+  let changed=false;
+  const captured=await captureSourceRevision(dir,{
+   maxRetries:0,
+   onCaptureFile:async(path)=>{
+    if(path==='tsconfig.json'&&!changed){
+     changed=true;
+     await writeFile(join(dir,'orders.ts'),'export function placeOrder(): number { return 999; }\n');
+     await writeFile(join(dir,'tsconfig.json'),JSON.stringify({compilerOptions:{target:'ES2020'}}));
+    }
+   },
+  });
+  expect(changed).toBe(true);
+  expect(captured.incomplete).toBe(true);
+  expect(captured.changedPaths.length).toBeGreaterThan(0);
+  expect(captured.changedPaths).toContain('orders.ts');
+
+  const analyzer=new Analyzer();
+  const a=await analyzer.analyze(dir,{capturedRevision:captured});
+  expect(a.status).not.toBe('current');
+  expect(a.status).toBe('partial');
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    severity:'warning',
+    code:'incomplete-revision',
+    message:expect.stringContaining('Source files were modified during capture'),
+   })
+  );
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('confirms source ranges slice the captured text rather than live disk and finding hashes match analyzed text',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-source-ranges-'));
+ try{
+  const originalOrders='export function calculateTotal(qty: number, price: number): number {\n  return qty * price;\n}\n';
+  await writeFile(join(dir,'tsconfig.json'),JSON.stringify({compilerOptions:{target:'ES2022'}}));
+  await writeFile(join(dir,'orders.ts'),originalOrders);
+
+  const captured=await captureSourceRevision(dir);
+  expect(captured.incomplete).toBe(false);
+
+  // Now mutate the live disk before running analysis:
+  // Prepend comments and lines, and change the code completely on disk!
+  const mutatedLiveDisk='// LIVE DISK MUTATION LINE 1\n// LIVE DISK MUTATION LINE 2\n// LIVE DISK MUTATION LINE 3\nexport function calculateTotal(qty: number, price: number): number {\n  return 0;\n}\n';
+  await writeFile(join(dir,'orders.ts'),mutatedLiveDisk);
+
+  // Run analysis using the captured revision boundary
+  const analyzer=new Analyzer();
+  const a=await analyzer.analyze(dir,{capturedRevision:captured});
+
+  const fnNode=a.graph.nodes.find(n=>n.name==='calculateTotal')!;
+  expect(fnNode).toBeDefined();
+  expect(fnNode.source).toBeDefined();
+
+  // Finding hash matches the actual analyzed text in the captured revision, NOT live disk
+  expect(fnNode.source?.hash).toBe(hash(originalOrders));
+  expect(fnNode.source?.hash).not.toBe(hash(mutatedLiveDisk));
+
+  // resolveSourceEvidence slices the captured revision text
+  const evidence=resolveSourceEvidence(fnNode.source,a,a.revision);
+  expect(evidence.status).toBe('current');
+  if(evidence.status==='current'){
+   expect(evidence.text).toContain('return qty * price');
+   expect(evidence.text).not.toContain('return 0');
+   expect(evidence.text).not.toContain('LIVE DISK MUTATION');
+  }
+
+  // If live disk was sliced at the source range start/end, it would be completely shifted/corrupted
+  const liveDiskSliced=mutatedLiveDisk.slice(fnNode.source!.start,fnNode.source!.end);
+  expect(liveDiskSliced).not.toBe(evidence.status==='current'?evidence.text:'');
+  expect(liveDiskSliced).toContain('LIVE DISK MUTATION');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('ensures configuration parsing does not silently reread newer project files from live disk',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-config-isolation-'));
+ try{
+  // Initially, tsconfig includes only src/core.ts
+  await mkdir(join(dir,'src'),{recursive:true});
+  await writeFile(
+   join(dir,'tsconfig.json'),
+   JSON.stringify({compilerOptions:{target:'ES2022'},include:['src/core.ts']})
+  );
+  await writeFile(join(dir,'src','core.ts'),'export const core = 1;\n');
+
+  const captured=await captureSourceRevision(dir);
+  expect(Object.keys(captured.files).sort()).toEqual(['src/core.ts','tsconfig.json']);
+
+  // Live disk is now modified:
+  // 1. tsconfig.json on live disk changed to include all src/**/*
+  // 2. A new file src/newer.ts is added to live disk
+  await writeFile(
+   join(dir,'tsconfig.json'),
+   JSON.stringify({compilerOptions:{target:'ES2022'},include:['src/**/*']})
+  );
+  await writeFile(join(dir,'src','newer.ts'),'export const newer = 2;\n');
+
+  // Analyze using the captured revision boundary
+  const analyzer=new Analyzer();
+  const a=await analyzer.analyze(dir,{capturedRevision:captured});
+
+  // Configuration parsing must NOT have read the newer tsconfig or newer files from live disk
+  expect(a.files['src/newer.ts']).toBeUndefined();
+  expect(a.graph.nodes.some(n=>n.name.includes('newer'))).toBe(false);
+  expect(a.graph.nodes.some(n=>n.name.includes('core'))).toBe(true);
+
+  const discovery=await analyzer.discoverInputs(dir,captured.files);
+  expect(discovery.configuredSourceFiles).toEqual(['src/core.ts']);
+  expect(discovery.eligibleFiles).toEqual(['src/core.ts']);
+  expect(discovery.eligibleFiles).not.toContain('src/newer.ts');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('ensures a mixed or unavailable input revision is never labeled current',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-unavailable-rev-'));
+ try{
+  await writeFile(join(dir,'app.ts'),'export function run(): number { return 1; }\n');
+  await writeFile(join(dir,'tsconfig.json'),JSON.stringify({compilerOptions:{target:'ES2022'}}));
+  const analyzer=new Analyzer();
+  const a=await analyzer.analyze(dir);
+  const node=a.graph.nodes.find(n=>n.name==='run')!;
+  expect(node).toBeDefined();
+
+  // 1. When source revision is compared against an unavailable revision
+  const unavailableEvidence=resolveSourceEvidence(node.source,undefined,a.revision);
+  expect(unavailableEvidence.status).toBe('unavailable');
+  expect(unavailableEvidence.status).not.toBe('current');
+
+  const mismatchedEvidence=resolveSourceEvidence(
+   node.source,
+   {revision:'diff-rev',status:'current',files:a.files},
+   'diff-rev'
+  );
+  expect(mismatchedEvidence.status).toBe('unavailable');
+  expect(mismatchedEvidence.status).not.toBe('current');
+
+  // 2. An incomplete / mixed capture is never current
+  let changed=false;
+  const incompleteRev=await captureSourceRevision(dir,{
+   maxRetries:0,
+   onCaptureFile:async(path)=>{
+    if(path==='tsconfig.json'&&!changed){
+     changed=true;
+     await writeFile(join(dir,'app.ts'),'export function run(): number { return 2; }\n');
+    }
+   },
+  });
+  expect(incompleteRev.incomplete).toBe(true);
+  const incompleteAnalysis=await analyzer.analyze(dir,{capturedRevision:incompleteRev});
+  expect(incompleteAnalysis.status).not.toBe('current');
+  expect(incompleteAnalysis.status).toBe('partial');
  }finally{await rm(dir,{recursive:true,force:true});}
 });

@@ -123,26 +123,144 @@ export async function scanProjectDirectory(root:string):Promise<{
   return {includedFiles:included.sort(),excludedEntries:excludedList.sort((a,b)=>a.path.localeCompare(b.path))};
  });
 }
-async function captureDirectory(directory:FileHandle) {
- // File names such as __proto__ must remain ordinary captured entries.
- const files:Record<string,Buffer>=Object.create(null);
- // Source, configuration, manifests and lockfiles retain bytes; analyzers choose eligible source from this capture.
- for(const path of await walkFiles(directory)) {
-  files[path]=await inParent(directory,path,false,async full=>{
-   const file=await open(full,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
-   try{
-    const stat=await file.stat();
-    if(!stat.isFile())throw new AppError('Not a regular project file: '+path);
-    if(stat.size>20*1024*1024)throw new AppError('File exceeds 20 MB: '+path);
-    const content=await file.readFile();
-    if(content.length>20*1024*1024)throw new AppError('File exceeds 20 MB: '+path);
-    return content;
-   }finally{await file.close();}
-  });
- }
- return files;
+export interface CaptureOptions {
+ onCaptureFile?: (path: string) => Promise<void> | void;
+ maxRetries?: number;
+ retryDelayMs?: number;
+ verify?: boolean;
 }
-export async function captureFiles(root:string) {return inRoot(root,captureDirectory);}
+export interface CapturedRevision {
+ files: Record<string, Buffer>;
+ textFiles: Record<string, { hash: string; text: string }>;
+ hashes: Record<string, string>;
+ revision: string;
+ incomplete: boolean;
+ retries: number;
+ changedPaths: string[];
+}
+async function captureDirectory(directory:FileHandle,options?:CaptureOptions):Promise<Record<string,Buffer>> {
+ let retries=0;
+ const maxRetries=options?.maxRetries??2;
+ const retryDelayMs=options?.retryDelayMs??10;
+ while(true){
+  let changedDuringCapture=false;
+  const changedPaths:string[]=[];
+  // File names such as __proto__ must remain ordinary captured entries.
+  const files:Record<string,Buffer>=Object.create(null);
+  const initialStats:Record<string,{size:bigint;mtimeMs:number}>=Object.create(null);
+  const initialHashes:Record<string,string>=Object.create(null);
+  const filePaths=await walkFiles(directory);
+  // Source, configuration, manifests and lockfiles retain bytes; analyzers choose eligible source from this capture.
+  for(const path of filePaths) {
+   if(options?.onCaptureFile){
+    await options.onCaptureFile(path);
+   }
+   try{
+    const fileData=await inParent(directory,path,false,async full=>{
+     const file=await open(full,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+     try{
+      const statBefore=await file.stat({bigint:true});
+      if(!statBefore.isFile())throw new AppError('Not a regular project file: '+path);
+      if(statBefore.size>20n*1024n*1024n)throw new AppError('File exceeds 20 MB: '+path);
+      const content=await file.readFile();
+      if(content.length>20*1024*1024)throw new AppError('File exceeds 20 MB: '+path);
+      const statAfter=await file.stat({bigint:true});
+      return {content,statBefore,statAfter};
+     }finally{await file.close();}
+    });
+    if(fileData.statBefore.size!==BigInt(fileData.content.length)||fileData.statAfter.size!==BigInt(fileData.content.length)||fileData.statBefore.mtimeMs!==fileData.statAfter.mtimeMs){
+     changedDuringCapture=true;
+     changedPaths.push(path);
+    }
+    files[path]=fileData.content;
+    initialStats[path]={size:fileData.statBefore.size,mtimeMs:Number(fileData.statBefore.mtimeMs)};
+    initialHashes[path]=hash(fileData.content);
+   }catch(err){
+    const code=(err as NodeJS.ErrnoException).code;
+    if(code==='ENOENT'){
+     changedDuringCapture=true;
+     changedPaths.push(path);
+     continue;
+    }
+    throw err;
+   }
+  }
+
+  if(options?.verify!==false){
+   const verifyPaths=await walkFiles(directory);
+   if(verifyPaths.length!==filePaths.length||verifyPaths.some((p,i)=>p!==filePaths[i])){
+    changedDuringCapture=true;
+    for(const p of verifyPaths)if(!files[p]&&!changedPaths.includes(p))changedPaths.push(p);
+    for(const p of filePaths)if(!verifyPaths.includes(p)&&!changedPaths.includes(p))changedPaths.push(p);
+   }
+
+   for(const path of verifyPaths){
+    if(!files[path])continue;
+    try{
+     const currentData=await inParent(directory,path,false,async full=>{
+      const file=await open(full,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+      try{
+       const currentStat=await file.stat({bigint:true});
+       if(currentStat.size!==initialStats[path]?.size||Number(currentStat.mtimeMs)!==initialStats[path]?.mtimeMs){
+        return {changed:true};
+       }
+       const currentContent=await file.readFile();
+       if(hash(currentContent)!==initialHashes[path]){
+        return {changed:true};
+       }
+       return {changed:false};
+      }finally{await file.close();}
+     });
+     if(currentData.changed){
+      changedDuringCapture=true;
+      if(!changedPaths.includes(path))changedPaths.push(path);
+     }
+    }catch{
+     changedDuringCapture=true;
+     if(!changedPaths.includes(path))changedPaths.push(path);
+    }
+   }
+  }
+
+  if(changedDuringCapture){
+   if(retries<maxRetries){
+    retries++;
+    if(retryDelayMs>0){
+     await new Promise(resolve=>setTimeout(resolve,retryDelayMs));
+    }
+    continue;
+   }
+   Object.defineProperty(files,'incomplete',{value:true,enumerable:false,writable:true,configurable:true});
+   Object.defineProperty(files,'changedPaths',{value:changedPaths,enumerable:false,writable:true,configurable:true});
+   Object.defineProperty(files,'retries',{value:retries,enumerable:false,writable:true,configurable:true});
+   return files;
+  }
+
+  Object.defineProperty(files,'incomplete',{value:false,enumerable:false,writable:true,configurable:true});
+  Object.defineProperty(files,'changedPaths',{value:[],enumerable:false,writable:true,configurable:true});
+  Object.defineProperty(files,'retries',{value:retries,enumerable:false,writable:true,configurable:true});
+  return files;
+ }
+}
+export async function captureFiles(root:string,options?:CaptureOptions) {return inRoot(root,dir=>captureDirectory(dir,options));}
+export async function captureSourceRevision(root:string,options?:CaptureOptions):Promise<CapturedRevision>{
+ const files=await captureFiles(root,options);
+ const textFiles:Record<string,{hash:string;text:string}>=Object.create(null);
+ const fileHashes:Record<string,string>=Object.create(null);
+ for(const [p,buf] of Object.entries(files)){
+  const h=hash(buf);
+  fileHashes[p]=h;
+  textFiles[p]={hash:h,text:buf.toString('utf8')};
+ }
+ const incomplete=Boolean((files as any).incomplete);
+ const changedPaths:string[]=(files as any).changedPaths||[];
+ const retries:number=(files as any).retries||0;
+ const revision=hash(Object.keys(fileHashes).sort().map(p=>p+':'+fileHashes[p]).join('\n'));
+ return {files,textFiles,hashes:fileHashes,revision,incomplete,retries,changedPaths};
+}
+export function isRevisionIncomplete(files:Record<string,Buffer>):boolean{
+ return Boolean((files as any).incomplete);
+}
 export function hashes(files:Record<string,Buffer|{hash:string}>) {
  return Object.fromEntries(Object.entries(files).map(([path,value])=>[path,Buffer.isBuffer(value)?hash(value):value.hash]));
 }
@@ -156,7 +274,7 @@ export async function copySnapshot(root:string,dest:string) {
  }
  const inside=(base:string,path:string)=>{const rel=relative(base,path);return !rel||rel!=='..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel);};
  if(inside(root,dest)||inside(dest,root))throw new AppError('Snapshot roots must be separate');
- const files=await captureDirectory(source);
+ const files=await captureDirectory(source,{verify:false,maxRetries:0});
  // Renames can invalidate pathname separation while the source handle remains pinned.
  const outsideSource=async(directory:FileHandle)=>{
   if(await containsDirectory(source,directory))throw new AppError('Snapshot roots must be separate');

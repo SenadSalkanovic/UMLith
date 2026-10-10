@@ -9,8 +9,8 @@ export class AnalysisWorker {
   this.worker.on('message',({id,result,error})=>{const task=this.pending.get(id);if(!task)return;this.pending.delete(id);error?task.reject(new Error(error)):task.resolve(result);});
   this.worker.on('error',error=>{for(const task of this.pending.values())task.reject(error);this.pending.clear();});
  }
- analyze(root:string):Promise<Analysis>{
-  return new Promise((resolve,reject)=>{const id=++this.next;this.pending.set(id,{resolve,reject});this.worker.postMessage({id,root});});
+ analyze(root:string,options?:any):Promise<Analysis>{
+  return new Promise((resolve,reject)=>{const id=++this.next;this.pending.set(id,{resolve,reject});this.worker.postMessage({id,root,options});});
  }
  async close(){for(const t of this.pending.values())t.reject(new Error('Analysis closed'));this.pending.clear();await this.worker.terminate();}
 }

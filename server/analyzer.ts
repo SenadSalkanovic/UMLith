@@ -3,7 +3,7 @@ import {getSchema,PrismaParser,VisitorClassFactory,type Field,type Model} from '
 import {resolve,relative,basename,dirname} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge} from '../shared/model';
-import {captureFiles,scanProjectDirectory,hash,AppError} from './files';
+import {captureFiles,captureSourceRevision,isRevisionIncomplete,type CaptureOptions,type CapturedRevision,scanProjectDirectory,hash,AppError} from './files';
 const idFor=(key:string)=>hash(key).slice(0,24);
 const normalize=(value:string)=>value.replace(/\s+/g,' ').trim();
 
@@ -88,6 +88,93 @@ export interface AnalysisInputDiscovery {
  exclusions: Record<string, DiscoveredExclusion>;
  incompatibleInputs: IncompatibleInputDiagnostic[];
  denominator: number;
+}
+
+export function createParseConfigHost(
+ root: string,
+ files: Record<string, { hash?: string; text: string } | Buffer | string>
+): ts.ParseConfigHost {
+ const normRoot = resolve(root).replaceAll('\\', '/').replace(/\/$/, '');
+ const getRel = (p: string): string | null => {
+  const norm = resolve(p).replaceAll('\\', '/');
+  if (norm === normRoot) return '';
+  if (norm.startsWith(normRoot + '/')) return norm.slice(normRoot.length + 1);
+  return null;
+ };
+ const getText = (rel: string): string | undefined => {
+  const entry = files[rel];
+  if (entry === undefined) return undefined;
+  if (typeof entry === 'string') return entry;
+  if (Buffer.isBuffer(entry)) return entry.toString('utf8');
+  return entry.text;
+ };
+
+ return {
+  useCaseSensitiveFileNames: true,
+  fileExists: (filePath: string) => {
+   const rel = getRel(filePath);
+   if (rel !== null) {
+    if (rel in files) return true;
+    if (rel.startsWith('node_modules/')) return ts.sys.fileExists(filePath);
+    return false;
+   }
+   return ts.sys.fileExists(filePath);
+  },
+  readFile: (filePath: string) => {
+   const rel = getRel(filePath);
+   if (rel !== null) {
+    if (rel in files) return getText(rel);
+    if (rel.startsWith('node_modules/')) return ts.sys.readFile(filePath);
+    return undefined;
+   }
+   return ts.sys.readFile(filePath);
+  },
+  readDirectory: (
+   dir: string,
+   extensions: readonly string[],
+   excludes: readonly string[] | undefined,
+   includes: readonly string[] | undefined,
+   depth?: number
+  ) => {
+   const normDir = resolve(dir).replaceAll('\\', '/').replace(/\/$/, '');
+   const relDir = getRel(normDir);
+   if (relDir !== null) {
+    const dirPrefix = relDir === '' ? '' : relDir + '/';
+    const getFileSystemEntries = (d: string) => {
+     const normD = resolve(d).replaceAll('\\', '/').replace(/\/$/, '');
+     const dRel = getRel(normD);
+     const prefix = dRel === null || dRel === '' ? '' : dRel + '/';
+     const fileList: string[] = [];
+     const dirSet = new Set<string>();
+     for (const key of Object.keys(files)) {
+      if (prefix === '' || key.startsWith(prefix)) {
+       const rest = key.slice(prefix.length);
+       const slashIdx = rest.indexOf('/');
+       if (slashIdx === -1) {
+        fileList.push(rest);
+       } else {
+        dirSet.add(rest.slice(0, slashIdx));
+       }
+      }
+     }
+     return { files: fileList, directories: Array.from(dirSet) };
+    };
+    return (ts as any).matchFiles(
+     normDir,
+     extensions,
+     excludes,
+     includes,
+     true,
+     normRoot,
+     depth,
+     getFileSystemEntries,
+     (p: string) => p
+    );
+   }
+   return ts.sys.readDirectory(dir, extensions, excludes, includes, depth);
+  },
+  trace: () => {},
+ };
 }
 
 export async function discoverAnalysisInputs(
@@ -270,10 +357,11 @@ export async function discoverAnalysisInputs(
  const fullTsPaths = new Set(tsSourceFiles.map(p => resolve(root, p)));
  const configuredSourcesSet = new Set<string>();
 
+ const parseHost = createParseConfigHost(root, files);
  for (const configPath of configurationFiles) {
   const config = ts.parseConfigFileTextToJson(configPath, files[configPath].text);
   if (!config.error && config.config) {
-   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, resolve(root, dirname(configPath)));
+   const parsed = ts.parseJsonConfigFileContent(config.config, parseHost, resolve(root, dirname(configPath)));
    for (const fn of parsed.fileNames) {
     const resolvedFn = resolve(fn);
     if (fullTsPaths.has(resolvedFn)) {
@@ -319,6 +407,11 @@ export async function discoverAnalysisInputs(
  };
 }
 
+export interface AnalyzeOptions {
+ capturedRevision?: CapturedRevision | Record<string, Buffer>;
+ captureOptions?: CaptureOptions;
+}
+
 export class Analyzer {
  public static readonly COMPILER_PIN = TYPESCRIPT_PIN;
  public readonly compilerPin = TYPESCRIPT_PIN;
@@ -327,25 +420,48 @@ export class Analyzer {
  private programs=new Map<string,ts.Program>();
  private sourceCache=new Map<string,{hash:string;source:ts.SourceFile}>();
  private sequence=0;
- async discoverInputs(root:string):Promise<AnalysisInputDiscovery>{
-  return discoverAnalysisInputs(resolve(root));
+ async discoverInputs(root:string, capturedFiles?: Record<string, Buffer | { hash: string; text: string }>):Promise<AnalysisInputDiscovery>{
+  return discoverAnalysisInputs(resolve(root), capturedFiles);
  }
- async analyze(root:string):Promise<Analysis>{
+ async analyze(root:string, options?: AnalyzeOptions):Promise<Analysis>{
   const start=performance.now();root=resolve(root);
   let diskExclusions:Array<{path:string;reason:'ignored-directory'|'sensitive-file'|'symlink'}>=[];
-  try{
-   const scan=await scanProjectDirectory(root);
-   diskExclusions=scan.excludedEntries;
-  }catch{
-   diskExclusions=[];
+  if(!options?.capturedRevision){
+   try{
+    const scan=await scanProjectDirectory(root);
+    diskExclusions=scan.excludedEntries;
+   }catch{
+    diskExclusions=[];
+   }
   }
-  const captured=await captureFiles(root);
-  const files=Object.fromEntries(Object.entries(captured).map(([path,data])=>[path,{hash:hash(data),text:data.toString('utf8')}]));
+  let captured: Record<string, Buffer>;
+  let isIncomplete = false;
+  let changedPaths: string[] = [];
+  if(options?.capturedRevision){
+   if('files' in options.capturedRevision && !Buffer.isBuffer((options.capturedRevision as any).files)){
+    const rev = options.capturedRevision as CapturedRevision;
+    captured = rev.files;
+    isIncomplete = Boolean(rev.incomplete);
+    changedPaths = rev.changedPaths || [];
+   }else{
+    captured = options.capturedRevision as Record<string, Buffer>;
+    isIncomplete = isRevisionIncomplete(captured);
+    changedPaths = (captured as any).changedPaths || [];
+   }
+  }else{
+   captured = await captureFiles(root, options?.captureOptions);
+   isIncomplete = isRevisionIncomplete(captured);
+   changedPaths = (captured as any).changedPaths || [];
+  }
+  const files=Object.fromEntries(Object.entries(captured).map(([path,data])=>[path,{hash:Buffer.isBuffer(data)?hash(data):(data as any).hash,text:Buffer.isBuffer(data)?data.toString('utf8'):(data as any).text}]));
   const discovery=await discoverAnalysisInputs(root,captured,diskExclusions);
   this.lastDiscovery=discovery;
   const eligible=discovery.eligibleFiles;
   const revision=hash(discovery.trackingInputs.map(p=>p+':'+files[p].hash).join('\n'));
   const diagnostics:Diagnostic[]=[];let unsupported=0,unresolved=0,analyzed=0;
+  if(isIncomplete){
+   diagnostics.push({severity:'warning',message:`Source files were modified during capture (${changedPaths.join(', ')||'mixed inputs'}). Revision is incomplete.`,code:'incomplete-revision'});
+  }
   for(const item of discovery.incompatibleInputs){
    diagnostics.push({severity:item.severity,message:item.message,path:item.path,code:item.code});
   }
@@ -368,11 +484,12 @@ export class Analyzer {
   const fullPaths=new Set(tsPaths.map(p=>resolve(root,p)));
   const fallback:ts.CompilerOptions={target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext,moduleResolution:ts.ModuleResolutionKind.Bundler,jsx:ts.JsxEmit.ReactJSX,strict:true,skipLibCheck:true,noEmit:true};
   const configs=Object.keys(files).filter(p=>/^tsconfig[^/]*\.json$/.test(basename(p)));
+  const parseHost = createParseConfigHost(root, files);
   const settings:{key:string;rootNames:string[];options:ts.CompilerOptions;references?:readonly ts.ProjectReference[]}[]=[];
   for(const path of configs){
    const config=ts.parseConfigFileTextToJson(path,files[path].text);
    if(config.error){diagnostics.push({severity:'error',message:ts.flattenDiagnosticMessageText(config.error.messageText,' '),path});continue;}
-   const parsed=ts.parseJsonConfigFileContent(config.config,ts.sys,resolve(root,dirname(path)));
+   const parsed=ts.parseJsonConfigFileContent(config.config,parseHost,resolve(root,dirname(path)));
    for(const d of parsed.errors)if(d.code!==18003)diagnostics.push({severity:'error',message:ts.flattenDiagnosticMessageText(d.messageText,' '),path,code:String(d.code)});
    const rootNames=parsed.fileNames.filter(p=>fullPaths.has(resolve(p)));
    if(rootNames.length)settings.push({key:path,rootNames,options:{...parsed.options,noEmit:true},references:parsed.projectReferences});
@@ -387,10 +504,79 @@ export class Analyzer {
   const makeKey=(decl:ts.Node)=>relative(root,decl.getSourceFile().fileName).replaceAll('\\','/')+':'+decl.getStart()+':'+decl.kind;
   const sourceFiles: {sf:ts.SourceFile;program:ts.Program}[]=[];
   const visited=new Set<string>();
+  const capturedPaths=Object.keys(files);
+  const programHosts=new Map<ts.Program,ts.CompilerHost>();
   for(const setting of settings){
    const host=ts.createCompilerHost(setting.options);
-   const originalRead=host.readFile;
-   host.readFile=(file)=>{const rel=relative(root,file).replaceAll('\\','/');return files[rel]?.text??originalRead(file);};
+   const originalRead=host.readFile.bind(host);
+   const originalFileExists=host.fileExists.bind(host);
+   const originalDirectoryExists=host.directoryExists ? host.directoryExists.bind(host) : (d:string)=>ts.sys.directoryExists(d);
+   const originalGetDirectories=host.getDirectories ? host.getDirectories.bind(host) : (d:string)=>ts.sys.getDirectories(d);
+
+   const getRel=(file:string)=>{
+    const norm=resolve(file).replaceAll('\\','/');
+    const normRoot=resolve(root).replaceAll('\\','/').replace(/\/$/,'');
+    if(norm===normRoot)return '';
+    if(norm.startsWith(normRoot+'/'))return norm.slice(normRoot.length+1);
+    return null;
+   };
+
+   host.fileExists=(file)=>{
+    const rel=getRel(file);
+    if(rel!==null){
+     if(rel in files)return true;
+     if(rel.startsWith('node_modules/'))return originalFileExists(file);
+     return false;
+    }
+    return originalFileExists(file);
+   };
+
+   host.readFile=(file)=>{
+    const rel=getRel(file);
+    if(rel!==null){
+     if(rel in files)return files[rel].text;
+     if(rel.startsWith('node_modules/'))return originalRead(file);
+     return undefined;
+    }
+    return originalRead(file);
+   };
+
+   host.directoryExists=(dir)=>{
+    const rel=getRel(dir);
+    if(rel!==null){
+     if(rel==='')return true;
+     const prefix=rel+'/';
+     if(capturedPaths.some(k=>k.startsWith(prefix)))return true;
+     if(rel.startsWith('node_modules/')||rel==='node_modules')return originalDirectoryExists(dir);
+     return false;
+    }
+    return originalDirectoryExists(dir);
+   };
+
+   host.readDirectory=(dir,extensions,excludes,includes,depth)=>{
+    return [...parseHost.readDirectory(dir,extensions,excludes,includes,depth)];
+   };
+
+   host.getDirectories=(dir)=>{
+    const rel=getRel(dir);
+    if(rel!==null){
+     const prefix=rel===''? '':rel+'/';
+     const dirs=new Set<string>();
+     for(const k of capturedPaths){
+      if(prefix===''||k.startsWith(prefix)){
+       const rest=k.slice(prefix.length);
+       const slash=rest.indexOf('/');
+       if(slash!==-1)dirs.add(rest.slice(0,slash));
+      }
+     }
+     if(rel.startsWith('node_modules/')||rel===''){
+      for(const d of originalGetDirectories(dir))dirs.add(d);
+     }
+     return Array.from(dirs);
+    }
+    return originalGetDirectories(dir);
+   };
+
    host.getSourceFile=(file,languageVersion)=>{
     const text=host.readFile(file);if(text===undefined)return undefined;
     const digest=hash(text);const old=this.sourceCache.get(file);
@@ -399,6 +585,7 @@ export class Analyzer {
    };
    const program=ts.createProgram({rootNames:setting.rootNames,options:setting.options,projectReferences:setting.references,host,oldProgram:this.programs.get(setting.key)});
    this.programs.set(setting.key,program);
+   programHosts.set(program,host);
    for(const d of [...program.getOptionsDiagnostics(),...program.getSyntacticDiagnostics(),...program.getSemanticDiagnostics()]){
     const path=d.file?relative(root,d.file.fileName).replaceAll('\\','/'):undefined;
     if(path&&(!files[path]||path.includes('node_modules/')))continue;
@@ -457,7 +644,8 @@ export class Analyzer {
    function walk(n:ts.Node,owner:string){
     const own=declarations.get(n);if(own)owner=own;
     if(ts.isImportDeclaration(n)&&ts.isStringLiteral(n.moduleSpecifier)){
-     const resolved=ts.resolveModuleName(n.moduleSpecifier.text,sf.fileName,program.getCompilerOptions(),ts.sys).resolvedModule;
+     const currentHost = programHosts.get(program) || ts.sys;
+     const resolved=ts.resolveModuleName(n.moduleSpecifier.text,sf.fileName,program.getCompilerOptions(),currentHost).resolvedModule;
      if(resolved&&fullPaths.has(resolve(resolved.resolvedFileName)))addEdge(mid,idFor('module:'+relative(root,resolved.resolvedFileName).replaceAll('\\','/')),'depends-on');
     }
     if(ts.isCallExpression(n)||ts.isNewExpression(n)){
@@ -566,6 +754,8 @@ export class Analyzer {
   }
   const dedup=Array.from(new Map(diagnostics.map(d=>[JSON.stringify(d),d])).values());
   const graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id)),requirements:[]};
-  return {revision,sequence:++this.sequence,analyzedAt:new Date().toISOString(),status:dedup.some(d=>d.severity!=='info')?'partial':'current',graph,files,durationMs:performance.now()-start,quality:{eligibleFiles:eligible.length,analyzedFiles:analyzed,unresolvedReferences:unresolved,unsupportedConstructs:unsupported,inferredItems:0,prismaValidation:eligible.some(p=>p.endsWith('.prisma'))?'unavailable':'not-applicable',diagnostics:dedup}};
+  const isCurrent = !isIncomplete && !dedup.some(d=>d.severity!=='info');
+  const status: 'current' | 'partial' = isCurrent ? 'current' : 'partial';
+  return {revision,sequence:++this.sequence,analyzedAt:new Date().toISOString(),status,graph,files,durationMs:performance.now()-start,quality:{eligibleFiles:eligible.length,analyzedFiles:analyzed,unresolvedReferences:unresolved,unsupportedConstructs:unsupported,inferredItems:0,prismaValidation:eligible.some(p=>p.endsWith('.prisma'))?'unavailable':'not-applicable',diagnostics:dedup}};
  }
 }
