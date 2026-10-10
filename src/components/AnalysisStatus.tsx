@@ -26,6 +26,7 @@ export interface AnalysisStatusProps {
   isUpdating?: boolean;
   message?: string;
   onRefresh?: () => void;
+  onRescan?: () => void;
   onViewDiagnostics?: () => void;
   compact?: boolean;
   className?: string;
@@ -92,6 +93,7 @@ export const AnalysisStatus: React.FC<AnalysisStatusProps> = ({
   isUpdating = false,
   message,
   onRefresh,
+  onRescan,
   onViewDiagnostics,
   compact = false,
   className = '',
@@ -244,7 +246,32 @@ export const AnalysisStatus: React.FC<AnalysisStatusProps> = ({
         </div>
 
         <div className="analysis-status-actions">
-          {onRefresh && (
+          {onRefresh && onRescan && (
+            <>
+              <button
+                type="button"
+                className="btn btn-secondary btn-xs"
+                onClick={onRefresh}
+                data-testid="analysis-refresh-btn"
+                title="Incremental refresh of project files"
+              >
+                <RefreshCw size={12} style={{ marginRight: 4 }} />
+                Refresh
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-xs"
+                onClick={onRescan}
+                data-testid="analysis-rescan-btn"
+                data-testid-alt="manual-full-rescan-btn"
+                title="Run fresh full manual rescan of all project files"
+              >
+                <RefreshCw size={12} style={{ marginRight: 4 }} />
+                Full Rescan
+              </button>
+            </>
+          )}
+          {onRefresh && !onRescan && (
             <button
               type="button"
               className="btn btn-secondary btn-xs"
@@ -254,6 +281,19 @@ export const AnalysisStatus: React.FC<AnalysisStatusProps> = ({
             >
               <RefreshCw size={12} style={{ marginRight: 4 }} />
               Rescan
+            </button>
+          )}
+          {!onRefresh && onRescan && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-xs"
+              onClick={onRescan}
+              data-testid="analysis-rescan-btn"
+              data-testid-alt="analysis-refresh-btn"
+              title="Run fresh full manual rescan of all project files"
+            >
+              <RefreshCw size={12} style={{ marginRight: 4 }} />
+              Full Rescan
             </button>
           )}
           <button

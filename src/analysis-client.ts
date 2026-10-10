@@ -40,12 +40,17 @@ export interface AnalysisClientOptions {
   transport?: 'auto' | 'eventsource' | 'fetch';
   headers?: Record<string, string>;
   origin?: string;
+  reconcileOnResume?: boolean;
+  resumeAction?: (projectId: string, baseUrl?: string) => Promise<any>;
+  rescanAction?: (projectId: string, baseUrl?: string) => Promise<Analysis | any>;
   createEventSource?: (url: string) => any;
   fetchSnapshot?: (projectId: string, baseUrl?: string) => Promise<Analysis>;
   onSnapshot?: (snapshot: Analysis, source: SnapshotChangeSource) => void;
   onStatus?: (status: SseStatusEvent) => void;
   onDelta?: (delta: SseDeltaEvent) => void;
   onDiagnostics?: (diagnostics: SseDiagnosticsEvent) => void;
+  onResume?: () => void;
+  onRescan?: (analysis: Analysis) => void;
   onError?: (error: Error) => void;
   onConnectionChange?: (status: AnalysisClientConnectionStatus) => void;
 }
@@ -70,6 +75,11 @@ export class AnalysisClient {
   private reconnectDelay: number;
   private destroyed = false;
   private pendingSnapshotFetch: Promise<Analysis> | null = null;
+  private pendingResume: Promise<void> | null = null;
+  private pendingRescan: Promise<Analysis> | null = null;
+  private visibilityListener: (() => void) | null = null;
+  private focusListener: (() => void) | null = null;
+  private onlineListener: (() => void) | null = null;
   private listeners: Map<string, Set<AnalysisClientListener>> = new Map();
 
   constructor(options: AnalysisClientOptions) {
@@ -86,6 +96,8 @@ export class AnalysisClient {
         this.lastEventId = `${this.projectId}:${this.snapshot.revision}:${this.snapshot.sequence}`;
       }
     }
+
+    this.setupLifecycleListeners();
   }
 
   // --- State Accessors ---
@@ -126,6 +138,8 @@ export class AnalysisClient {
   public on(event: 'diagnostics', listener: (event: SseDiagnosticsEvent) => void): () => void;
   public on(event: 'ready', listener: (event: SseReadyEvent) => void): () => void;
   public on(event: 'connection', listener: (status: AnalysisClientConnectionStatus) => void): () => void;
+  public on(event: 'resume', listener: () => void): () => void;
+  public on(event: 'rescan', listener: (snapshot: Analysis) => void): () => void;
   public on(event: 'error', listener: (error: Error) => void): () => void;
   public on(event: string, listener: AnalysisClientListener): () => void {
     if (!this.listeners.has(event)) {
@@ -208,6 +222,145 @@ export class AnalysisClient {
 
     this.pendingSnapshotFetch = fetchPromise;
     return fetchPromise;
+  }
+
+  // --- Lifecycle & Reconciliation on Resume (T060) ---
+
+  private setupLifecycleListeners(): void {
+    if (this.options.reconcileOnResume === false) return;
+
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      this.visibilityListener = () => {
+        if (document.visibilityState === 'visible') {
+          void this.resume().catch((err) => {
+            this.options.onError?.(err);
+            this.emit('error', err);
+          });
+        }
+      };
+      document.addEventListener('visibilitychange', this.visibilityListener);
+    }
+
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      this.focusListener = () => {
+        void this.resume().catch((err) => {
+          this.options.onError?.(err);
+          this.emit('error', err);
+        });
+      };
+      window.addEventListener('focus', this.focusListener);
+
+      this.onlineListener = () => {
+        void this.resume().catch((err) => {
+          this.options.onError?.(err);
+          this.emit('error', err);
+        });
+      };
+      window.addEventListener('online', this.onlineListener);
+    }
+  }
+
+  public async resume(): Promise<void> {
+    if (this.pendingResume) {
+      return this.pendingResume;
+    }
+
+    const resumePromise = (async () => {
+      try {
+        this.emit('resume');
+        this.options.onResume?.();
+
+        if (this.connectionStatus === 'disconnected' || this.connectionStatus === 'error') {
+          if (this.options.autoReconnect !== false) {
+            await this.connect();
+          }
+        }
+
+        if (this.options.resumeAction) {
+          await this.options.resumeAction(this.projectId, this.options.baseUrl);
+        } else {
+          const baseUrl = resolveBaseUrl(this.options.baseUrl);
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            ...(this.options.headers || {}),
+          };
+          if (this.options.origin) {
+            headers['Origin'] = this.options.origin;
+          }
+          await fetch(`${baseUrl}/projects/${encodeURIComponent(this.projectId)}/resume`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({}),
+          }).catch(() => {});
+        }
+
+        if (!this.snapshot) {
+          await this.fetchFreshSnapshot().catch(() => {});
+        }
+      } catch (err: any) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.options.onError?.(error);
+        this.emit('error', error);
+        throw error;
+      } finally {
+        this.pendingResume = null;
+      }
+    })();
+
+    this.pendingResume = resumePromise;
+    return resumePromise;
+  }
+
+  // --- Manual Full Rescan (T060) ---
+
+  public async rescan(options?: { full?: boolean }): Promise<Analysis> {
+    if (this.pendingRescan) {
+      return this.pendingRescan;
+    }
+
+    const rescanPromise = (async () => {
+      try {
+        let freshSnapshot: Analysis;
+        if (this.options.rescanAction) {
+          const res = await this.options.rescanAction(this.projectId, this.options.baseUrl);
+          freshSnapshot = AnalysisSchema.parse((res as any)?.analysis || res);
+        } else {
+          const baseUrl = resolveBaseUrl(this.options.baseUrl);
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            ...(this.options.headers || {}),
+          };
+          if (this.options.origin) {
+            headers['Origin'] = this.options.origin;
+          }
+          const response = await fetch(`${baseUrl}/projects/${encodeURIComponent(this.projectId)}/rescan`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ force: true, full: options?.full ?? true }),
+          });
+          if (!response.ok) {
+            throw new Error(`Rescan failed with HTTP ${response.status}: ${response.statusText}`);
+          }
+          const data = await response.json();
+          freshSnapshot = AnalysisSchema.parse(data.analysis || data);
+        }
+
+        this.setSnapshot(freshSnapshot, 'snapshot');
+        this.emit('rescan', freshSnapshot);
+        this.options.onRescan?.(freshSnapshot);
+        return freshSnapshot;
+      } catch (err: any) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.options.onError?.(error);
+        this.emit('error', error);
+        throw error;
+      } finally {
+        this.pendingRescan = null;
+      }
+    })();
+
+    this.pendingRescan = rescanPromise;
+    return rescanPromise;
   }
 
   // --- Delta Application & Missed Event Recovery ---
@@ -675,6 +828,24 @@ export class AnalysisClient {
       } catch {}
       this.eventSource = null;
     }
+
+    if (this.visibilityListener && typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+      document.removeEventListener('visibilitychange', this.visibilityListener);
+      this.visibilityListener = null;
+    }
+
+    if (this.focusListener && typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+      window.removeEventListener('focus', this.focusListener);
+      this.focusListener = null;
+    }
+
+    if (this.onlineListener && typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+      window.removeEventListener('online', this.onlineListener);
+      this.onlineListener = null;
+    }
+
+    this.pendingResume = null;
+    this.pendingRescan = null;
 
     this.setConnectionStatus('disconnected');
   }

@@ -281,11 +281,19 @@ export class SyncService extends EventEmitter {
  }
 
  async rescan(id: string, options?: { force?: boolean }): Promise<boolean> {
+  if (!this.sessions.has(id)) {
+   await this.start(id);
+   return true;
+  }
   return this.reconcile(id, { force: options?.force ?? true });
  }
 
  async resume(id?: string): Promise<void> {
   if (id !== undefined) {
+   if (!this.sessions.has(id)) {
+    await this.start(id);
+    return;
+   }
    const session = this.sessions.get(id);
    if (!session || session.closed) return;
    this.emit('resume', id);

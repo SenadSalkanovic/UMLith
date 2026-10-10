@@ -14,6 +14,8 @@ import {Analyzer} from '../server/analyzer';
 import {AnalysisWorker} from '../server/worker';
 import {AnalysisSchema,GraphUpdateSchema,applyGraphUpdate,resolveSourceEvidence} from '../shared/model';
 import {getOutdatedPortions} from '../src/components/AnalysisStatus';
+import {createServer} from '../server/main';
+import {AnalysisClient} from '../src/analysis-client';
 
 it('updates the implemented graph while preserving human intent and retains a stale model on invalid saves',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-sync-'));
@@ -1785,4 +1787,419 @@ describe('T059: Reconcile hashes every 60 seconds and after watcher errors', () 
    await rm(dir, { recursive: true, force: true });
   }
  }, 15000);
+});
+
+describe('T060: Reconcile on resume and expose manual full rescan', () => {
+ it('Concrete Scenario 1: Change files while the client is inactive, then resume (AC 1 & Scenario 1)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t060-scenario1-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T060-Scenario1' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export function preSuspension(): number { return 1; }');
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 50,
+   reconcileIntervalMs: 60000,
+  });
+
+  const resumeEvents: string[] = [];
+  sync.on('resume', id => resumeEvents.push(id));
+
+  const analysisUpdates: any[] = [];
+  sync.on('notification', (_id, ev) => {
+   if (ev.type === 'analysis') analysisUpdates.push(ev);
+  });
+
+  try {
+   await sync.start(p.id);
+
+   const initialProject = await store.get(p.id);
+   expect(initialProject.analysis?.status).toBe('current');
+   const rev1 = initialProject.analysis!.revision;
+   const seq1 = initialProject.analysis!.sequence;
+   expect(seq1).toBe(1);
+   expect(initialProject.analysis?.graph.nodes.some(n => n.name === 'preSuspension')).toBe(true);
+
+   // Step 1: Simulate client suspension / inactivity (disable event delivery)
+   sync.disableEventDelivery(p.id);
+   expect(sync.isEventDeliveryDisabled(p.id)).toBe(true);
+
+   // Step 2: Make edits on disk while inactive / suspended
+   await writeFile(
+    join(p.root, 'main.ts'),
+    'export function preSuspension(): number { return 1; }\nexport function postResumeTask(): string { return "resumed"; }\n'
+   );
+   await mkdir(join(p.root, 'prisma'), { recursive: true });
+   await writeFile(
+    join(p.root, 'prisma', 'schema.prisma'),
+    'datasource db {\n  provider = "sqlite"\n  url = "file:dev.db"\n}\n\nmodel Member {\n  id Int @id\n  email String @unique\n}\n'
+   );
+
+   // Step 3: Verify that before resume, edits remain hidden and un-analyzed
+   await new Promise(r => setTimeout(r, 150));
+   const hiddenProject = await store.get(p.id);
+   expect(hiddenProject.analysis!.revision).toBe(rev1);
+   expect(hiddenProject.analysis!.sequence).toBe(seq1);
+   expect(hiddenProject.analysis?.graph.nodes.some(n => n.name === 'postResumeTask')).toBe(false);
+
+   // Step 4: Application resumes / regains active session
+   analysisUpdates.length = 0;
+   await sync.resume(p.id);
+
+   // Verified: Resume detects edits made during suspension (AC 1 & Scenario 1)
+   expect(resumeEvents).toContain(p.id);
+   expect(sync.hasReconcileTimer(p.id)).toBe(true);
+
+   const resumedProject = await store.get(p.id);
+   expect(resumedProject.analysis?.status).toBe('current');
+   expect(resumedProject.analysis!.sequence).toBe(seq1 + 1);
+   expect(resumedProject.analysis!.revision).not.toBe(rev1);
+   expect(resumedProject.analysis?.graph.nodes.some(n => n.name === 'postResumeTask')).toBe(true);
+   expect(resumedProject.analysis?.graph.nodes.some(n => n.name === 'Member')).toBe(true);
+   expect(analysisUpdates.length).toBeGreaterThanOrEqual(1);
+
+   // Step 5: Global resume without arguments resumes all active sessions
+   resumeEvents.length = 0;
+   await sync.resume();
+   expect(resumeEvents).toContain(p.id);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ }, 15000);
+
+ it('Concrete Scenario 2: Request manual rescan while an incremental run is pending (AC 3 & Scenario 2)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t060-scenario2-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T060-Scenario2' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export function v1(): number { return 1; }');
+
+  // Part A: Request manual rescan while a debounced incremental run is pending
+  const syncA = new SyncService(store, {
+   watch: true,
+   debounceMs: 500, // Generous debounce window to reliably test pending state
+   stabilityThreshold: 50,
+  });
+
+  try {
+   await syncA.start(p.id);
+   const initial = await store.get(p.id);
+   expect(initial.analysis?.sequence).toBe(1);
+
+   // Trigger file edit that schedules a 500 ms debounced incremental run
+   await writeFile(join(p.root, 'main.ts'), 'export function v2(): number { return 2; }');
+   syncA.schedule(p.id, 'change', join(p.root, 'main.ts'));
+
+   // Confirm incremental run is currently pending debounce
+   expect(syncA.hasPendingDebounce(p.id)).toBe(true);
+
+   // User requests manual rescan while the incremental run is pending
+   const rescanPromise = syncA.rescan(p.id);
+
+   // Debounce timer is cancelled immediately by manual rescan
+   expect(syncA.hasPendingDebounce(p.id)).toBe(false);
+
+   const rescanSuccess = await rescanPromise;
+   expect(rescanSuccess).toBe(true);
+
+   const updated = await store.get(p.id);
+   expect(updated.analysis?.sequence).toBe(2);
+   expect(updated.analysis?.graph.nodes.some(n => n.name === 'v2')).toBe(true);
+  } finally {
+   await syncA.close();
+  }
+
+  // Part B: Request manual rescan while an incremental worker analysis is in flight (supersession)
+  let resolveFirstAnalyze: () => void;
+  const firstAnalyzeStartedPromise = new Promise<void>((resolve) => {
+   resolveFirstAnalyze = resolve;
+  });
+
+  let analyzeCallCount = 0;
+  const controlledWorker = {
+   analyze: vi.fn().mockImplementation((root: string, opts?: any) => {
+    analyzeCallCount++;
+    const currentCount = analyzeCallCount;
+    if (currentCount === 2) {
+     // Second call (generation 1, the incremental run) is held in flight
+     resolveFirstAnalyze!();
+     return new Promise((resolve) => {
+      setTimeout(() => {
+       resolve({
+        revision: 'rev-incremental-superseded',
+        sequence: 2,
+        analyzedAt: new Date().toISOString(),
+        status: 'current',
+        graph: { schemaVersion: 1, nodes: [{ id: 'n-old', kind: 'function', name: 'staleRun', path: 'main.ts' }], edges: [], requirements: [] },
+        files: {},
+        durationMs: 10,
+        quality: {
+         eligibleFiles: 1,
+         analyzedFiles: 1,
+         unresolvedReferences: 0,
+         unsupportedConstructs: 0,
+         inferredItems: 0,
+         prismaValidation: 'not-applicable',
+         diagnostics: [],
+        },
+       });
+      }, 50);
+     });
+    }
+
+    // Normal analysis for start and generation 2 (rescan)
+    return Promise.resolve({
+     revision: `rev-gen-${opts?.generation || 0}`,
+     sequence: (opts?.generation || 0) + 1,
+     analyzedAt: new Date().toISOString(),
+     status: 'current',
+     graph: { schemaVersion: 1, nodes: [{ id: 'n-fresh', kind: 'function', name: 'freshRescan', path: 'main.ts' }], edges: [], requirements: [] },
+     files: {},
+     durationMs: 10,
+     quality: {
+      eligibleFiles: 1,
+      analyzedFiles: 1,
+      unresolvedReferences: 0,
+      unsupportedConstructs: 0,
+      inferredItems: 0,
+      prismaValidation: 'not-applicable',
+      diagnostics: [],
+     },
+    });
+   }),
+   close: vi.fn().mockResolvedValue(undefined),
+  };
+
+  const syncB = new SyncService(store, {
+   watch: false,
+   worker: controlledWorker as any,
+  });
+
+  const discardedEvents: any[] = [];
+  syncB.on('discarded', (_id, ev) => discardedEvents.push(ev));
+
+  try {
+   await syncB.start(p.id);
+
+   // Launch incremental request (generation 2)
+   const incrementalGen = syncB.getGeneration(p.id) + 1;
+   const incrementalPromise = syncB.request(p.id);
+   await firstAnalyzeStartedPromise;
+
+   // Verify incremental request is currently in-flight
+   expect(syncB.getInFlightCount(p.id)).toBeGreaterThanOrEqual(1);
+
+   // Request manual rescan while incremental run is pending in flight (AC 3)
+   const rescanPromise = syncB.rescan(p.id);
+
+   // Await both promises
+   await Promise.all([incrementalPromise, rescanPromise]);
+
+   // Incremental run must be discarded and superseded before persist (AC 3 & Scenario 2)
+   expect(discardedEvents.some(e => e.generation === incrementalGen && e.reason.includes('superseded'))).toBe(true);
+
+   // Committed analysis must reflect generation 2 (the fresh rescan), never the superseded generation 1
+   const finalProject = await store.get(p.id);
+   expect(finalProject.analysis?.graph.nodes.some(n => n.name === 'freshRescan')).toBe(true);
+   expect(finalProject.analysis?.graph.nodes.some(n => n.name === 'staleRun')).toBe(false);
+  } finally {
+   await syncB.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ }, 15000);
+
+ it('Acceptance Criterion 2: Manual rescan runs fresh full analysis distinct from incremental refresh', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t060-ac2-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T060-AC2' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export const baseline = 100;');
+
+  const sync = new SyncService(store, {
+   watch: false,
+  });
+
+  const analysisUpdates: any[] = [];
+  sync.on('notification', (_id, ev) => {
+   if (ev.type === 'analysis') analysisUpdates.push(ev);
+  });
+
+  const reconcileStarts: any[] = [];
+  sync.on('reconcile-start', (_id, ev) => reconcileStarts.push(ev));
+
+  try {
+   await sync.start(p.id);
+   const p1 = await store.get(p.id);
+   const seq1 = p1.analysis!.sequence;
+   expect(seq1).toBe(1);
+
+   analysisUpdates.length = 0;
+   reconcileStarts.length = 0;
+
+   // 1. Incremental refresh / periodic reconcile when hashes on disk are unchanged
+   const incrementalResult = await sync.reconcile(p.id);
+   expect(incrementalResult).toBe(false); // No changes detected: no-op
+   expect(analysisUpdates.length).toBe(0); // Zero spurious analysis updates published
+
+   const pAfterIncremental = await store.get(p.id);
+   expect(pAfterIncremental.analysis!.sequence).toBe(seq1); // Sequence did not change
+
+   // 2. Manual full rescan when hashes on disk are unchanged
+   const rescanResult = await sync.rescan(p.id);
+   expect(rescanResult).toBe(true); // Forced full analysis runs (AC 2)
+   expect(analysisUpdates.length).toBe(1); // Fresh graph revision published
+
+   const pAfterRescan = await store.get(p.id);
+   expect(pAfterRescan.analysis!.sequence).toBe(seq1 + 1); // Sequence advanced
+   expect(reconcileStarts.some(e => e.force === true)).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('coalesces simultaneous resume, watch, and manual requests safely', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t060-coalesce-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'T060-Coalesce' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export function initial() { return 1; }');
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 50,
+  });
+
+  try {
+   await sync.start(p.id);
+
+   await writeFile(join(p.root, 'main.ts'), 'export function simultaneous() { return 2; }');
+
+   // Trigger simultaneous watch schedule, application resume, and manual rescan
+   const p1 = sync.schedule(p.id, 'change', join(p.root, 'main.ts'));
+   const p2 = sync.resume(p.id);
+   const p3 = sync.rescan(p.id);
+   const p4 = sync.request(p.id);
+
+   // All concurrent requests settle cleanly without crashing or hanging
+   await Promise.all([p2, p3, p4]);
+
+   const final = await store.get(p.id);
+   expect(final.analysis?.status).toBe('current');
+   expect(final.analysis?.graph.nodes.some(n => n.name === 'simultaneous')).toBe(true);
+   expect(sync.isUpdating(p.id)).toBe(false);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('HTTP Integration: server exposes validated manual full-rescan and resume endpoints and AnalysisClient integrates cleanly', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-t060-http-'));
+  const sourceDir = join(dir, 'source');
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, 'index.ts'), 'export function baseHttp() { return 1; }\n');
+
+  const store = new ProjectStore(dir);
+  const worker = new AnalysisWorker();
+  const sync = new SyncService(store, { worker, debounceMs: 40, stabilityThreshold: 40 });
+  const app = await createServer({ store, sync, worker });
+  const serverAddress = await app.listen({ host: '127.0.0.1', port: 0 });
+  const apiBaseUrl = `${serverAddress}/api`;
+
+  try {
+   const project = await store.create({ name: 'HTTP T060 Workspace', root: sourceDir });
+
+   // 1. Test POST /api/projects/:id/rescan (synchronous)
+   const rescanRes = await fetch(`${apiBaseUrl}/projects/${project.id}/rescan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+   });
+   expect(rescanRes.status).toBe(200);
+   const rescanData = await rescanRes.json();
+   expect(rescanData.projectId).toBe(project.id);
+   expect(rescanData.status).toBe('current');
+   expect(rescanData.sequence).toBeGreaterThanOrEqual(1);
+
+   // 2. Test POST /api/projects/:id/rescan?async=true
+   const rescanAsyncRes = await fetch(`${apiBaseUrl}/projects/${project.id}/rescan?async=true`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+   });
+   expect(rescanAsyncRes.status).toBe(202);
+   const rescanAsyncData = await rescanAsyncRes.json();
+   expect(rescanAsyncData.status).toBe('updating');
+
+   // 3. Test POST /api/projects/:id/resume while inactive
+   sync.disableEventDelivery(project.id);
+   await writeFile(join(sourceDir, 'index.ts'), 'export function baseHttp() { return 1; }\nexport function resumeHttp() { return 2; }\n');
+
+   const resumeRes = await fetch(`${apiBaseUrl}/projects/${project.id}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+   });
+   expect(resumeRes.status).toBe(200);
+   const resumeData = await resumeRes.json();
+   expect(resumeData.projectId).toBe(project.id);
+   expect(resumeData.status).toBe('current');
+
+   const projectAfterResume = await store.get(project.id);
+   expect(projectAfterResume.analysis?.graph.nodes.some(n => n.name === 'resumeHttp')).toBe(true);
+
+   // 4. Test POST /api/resume (global resume)
+   const globalResumeRes = await fetch(`${apiBaseUrl}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+   });
+   expect(globalResumeRes.status).toBe(200);
+
+   // 5. Test AnalysisClient resume and rescan methods
+   const client = new AnalysisClient({
+    projectId: project.id,
+    baseUrl: apiBaseUrl,
+    origin: 'http://127.0.0.1:5173',
+   });
+
+   await client.connect();
+
+   // Test client.rescan()
+   const clientSnapshot = await client.rescan();
+   expect(clientSnapshot).toBeDefined();
+   expect(clientSnapshot.status).toBe('current');
+   expect(client.getSnapshot()?.revision).toBe(clientSnapshot.revision);
+
+   // Test client.resume()
+   await writeFile(join(sourceDir, 'index.ts'), 'export function baseHttp() { return 1; }\nexport function resumeClient() { return 3; }\n');
+   await client.resume();
+
+   await expect.poll(async () => {
+    const p = await store.get(project.id);
+    return p.analysis?.graph.nodes.some(n => n.name === 'resumeClient');
+   }, { timeout: 5000, interval: 50 }).toBe(true);
+
+   // Test client coalescing of simultaneous rescan requests
+   const rescanP1 = client.rescan();
+   const rescanP2 = client.rescan();
+   const [snap1, snap2] = await Promise.all([rescanP1, rescanP2]);
+   expect(snap1.revision).toBe(snap2.revision);
+
+   // Test client coalescing of simultaneous resume requests
+   const resumeP1 = client.resume();
+   const resumeP2 = client.resume();
+   await Promise.all([resumeP1, resumeP2]);
+
+   client.disconnect();
+  } finally {
+   await app.close();
+   await sync.close();
+   await worker.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ }, 20000);
 });

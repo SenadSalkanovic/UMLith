@@ -19,6 +19,7 @@ interface HeaderProps {
   onOpenRevisionHistory?: () => void;
   onOpenImportReview?: () => void;
   onRefreshAnalysis?: () => void;
+  onRescanAnalysis?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -36,6 +37,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenRevisionHistory,
   onOpenImportReview,
   onRefreshAnalysis,
+  onRescanAnalysis,
 }) => {
   return (
     <header className="workspace-header" data-testid="workspace-header">
@@ -73,6 +75,7 @@ export const Header: React.FC<HeaderProps> = ({
               analysis={analysis}
               compact={true}
               onRefresh={onRefreshAnalysis}
+              onRescan={onRescanAnalysis}
             />
           </>
         ) : (

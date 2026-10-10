@@ -816,6 +816,11 @@ export const App: React.FC<AppProps> = ({
             void api.startAnalysis(specificationState.project.id, { async: true }, apiBaseUrl);
           }
         }}
+        onRescanAnalysis={() => {
+          if (specificationState.project) {
+            void api.rescanProject(specificationState.project.id, { async: true }, apiBaseUrl);
+          }
+        }}
       />
 
       {/* Analysis Status Alert Banner for Stale or Partial states */}
@@ -829,6 +834,11 @@ export const App: React.FC<AppProps> = ({
             onRefresh={() => {
               if (specificationState.project) {
                 void api.startAnalysis(specificationState.project.id, { async: true }, apiBaseUrl);
+              }
+            }}
+            onRescan={() => {
+              if (specificationState.project) {
+                void api.rescanProject(specificationState.project.id, { async: true }, apiBaseUrl);
               }
             }}
           />

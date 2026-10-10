@@ -281,3 +281,42 @@ export async function importProject(
     body: JSON.stringify(options ?? {}),
   }, baseUrl);
 }
+
+export async function rescanProject(
+  id: string,
+  options?: { async?: boolean } | string,
+  baseUrl?: string
+): Promise<AnalysisResponse> {
+  const opts = typeof options === 'string' ? {} : (options ?? {});
+  const base = typeof options === 'string' ? options : baseUrl;
+  return request<AnalysisResponse>(`/projects/${id}/rescan`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  }, base);
+}
+
+export async function resumeProject(
+  id: string,
+  options?: { async?: boolean } | string,
+  baseUrl?: string
+): Promise<{ projectId: string; status: string; revision?: string | null; sequence?: number; changed?: boolean; analysis?: Analysis }> {
+  const opts = typeof options === 'string' ? {} : (options ?? {});
+  const base = typeof options === 'string' ? options : baseUrl;
+  return request<{ projectId: string; status: string; revision?: string | null; sequence?: number; changed?: boolean; analysis?: Analysis }>(`/projects/${id}/resume`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  }, base);
+}
+
+export async function reconcileProject(
+  id: string,
+  options?: { force?: boolean; async?: boolean } | string,
+  baseUrl?: string
+): Promise<{ projectId: string; changed: boolean; status: string; revision?: string | null; sequence?: number; analysis?: Analysis }> {
+  const opts = typeof options === 'string' ? {} : (options ?? {});
+  const base = typeof options === 'string' ? options : baseUrl;
+  return request<{ projectId: string; changed: boolean; status: string; revision?: string | null; sequence?: number; analysis?: Analysis }>(`/projects/${id}/reconcile`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  }, base);
+}

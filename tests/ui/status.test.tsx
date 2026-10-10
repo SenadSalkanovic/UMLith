@@ -404,5 +404,45 @@ describe('T058: Show updating, current, partial, and stale analysis states UI', 
       const currentAnalysis = createMockAnalysis({ status: 'current' });
       expect(getOutdatedPortions(currentAnalysis)).toBeNull();
     });
+
+    it('renders distinct incremental refresh and manual full rescan actions when provided', () => {
+      const currentAnalysis = createMockAnalysis({ status: 'current' });
+
+      // Both onRefresh and onRescan provided: both distinct buttons render
+      const htmlBoth = renderToString(
+        <AnalysisStatus
+          status="current"
+          analysis={currentAnalysis}
+          onRefresh={() => {}}
+          onRescan={() => {}}
+        />
+      );
+      expect(htmlBoth).toContain('data-testid="analysis-refresh-btn"');
+      expect(htmlBoth).toContain('Refresh');
+      expect(htmlBoth).toContain('data-testid="analysis-rescan-btn"');
+      expect(htmlBoth).toContain('Full Rescan');
+
+      // Only onRefresh provided: renders refresh button
+      const htmlRefreshOnly = renderToString(
+        <AnalysisStatus
+          status="current"
+          analysis={currentAnalysis}
+          onRefresh={() => {}}
+        />
+      );
+      expect(htmlRefreshOnly).toContain('data-testid="analysis-refresh-btn"');
+      expect(htmlRefreshOnly).not.toContain('data-testid="analysis-rescan-btn"');
+
+      // Only onRescan provided: renders rescan button
+      const htmlRescanOnly = renderToString(
+        <AnalysisStatus
+          status="current"
+          analysis={currentAnalysis}
+          onRescan={() => {}}
+        />
+      );
+      expect(htmlRescanOnly).toContain('data-testid="analysis-rescan-btn"');
+      expect(htmlRescanOnly).toContain('Full Rescan');
+    });
   });
 });

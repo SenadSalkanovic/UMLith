@@ -562,6 +562,161 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   app.post('/api/projects/:id/import', startAnalysisHandler);
   app.post('/api/projects/:id/analyze', startAnalysisHandler);
 
+  // Manual full rescan endpoints (T060)
+  const rescanHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const project = await store.get(id);
+    const isAsync = request.body?.async === true || request.query?.async === 'true' || request.query?.async === '1';
+
+    if (!sync.hasSession(id)) {
+      await sync.start(id);
+    }
+
+    if (isAsync) {
+      void sync.rescan(id, { force: true }).catch(err => {
+        app.log.error(err);
+        sync.emit('notification', id, { type: 'error', projectId: id, message: err.message });
+      });
+      return reply.status(202).send({
+        projectId: id,
+        status: 'updating',
+        message: 'Manual full rescan started',
+      });
+    }
+
+    try {
+      await sync.rescan(id, { force: true });
+      const updated = await store.get(id);
+      const analysis = updated.analysis || project.analysis;
+      return reply.status(200).send({
+        projectId: id,
+        status: analysis?.status || 'current',
+        revision: analysis?.revision ?? null,
+        sequence: analysis?.sequence ?? 0,
+        analysis,
+      });
+    } catch (err: any) {
+      const statusCode = err instanceof AppError ? err.statusCode : (err?.statusCode || 400);
+      return reply.status(statusCode).send({
+        error: statusCode === 404 ? 'Not Found' : 'Bad Request',
+        message: err.message,
+        statusCode,
+      });
+    }
+  };
+
+  app.post('/api/projects/:id/rescan', rescanHandler);
+  app.post('/api/projects/:id/sync/rescan', rescanHandler);
+
+  // Application resume endpoints (T060)
+  const resumeHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const project = await store.get(id);
+    const isAsync = request.body?.async === true || request.query?.async === 'true' || request.query?.async === '1';
+
+    if (!sync.hasSession(id)) {
+      await sync.start(id);
+    }
+
+    if (isAsync) {
+      void sync.resume(id).catch(err => {
+        app.log.error(err);
+        sync.emit('notification', id, { type: 'error', projectId: id, message: err.message });
+      });
+      return reply.status(202).send({
+        projectId: id,
+        status: 'updating',
+        message: 'Resume reconciliation started',
+      });
+    }
+
+    try {
+      await sync.resume(id);
+      const updated = await store.get(id);
+      const analysis = updated.analysis || project.analysis;
+      return reply.status(200).send({
+        projectId: id,
+        status: analysis?.status || 'current',
+        revision: analysis?.revision ?? null,
+        sequence: analysis?.sequence ?? 0,
+        analysis,
+      });
+    } catch (err: any) {
+      const statusCode = err instanceof AppError ? err.statusCode : (err?.statusCode || 400);
+      return reply.status(statusCode).send({
+        error: statusCode === 404 ? 'Not Found' : 'Bad Request',
+        message: err.message,
+        statusCode,
+      });
+    }
+  };
+
+  app.post('/api/projects/:id/resume', resumeHandler);
+  app.post('/api/projects/:id/sync/resume', resumeHandler);
+
+  app.post('/api/resume', async (request: any, reply: any) => {
+    const isAsync = request.body?.async === true || request.query?.async === 'true' || request.query?.async === '1';
+    if (isAsync) {
+      void sync.resume().catch(err => {
+        app.log.error(err);
+      });
+      return reply.status(202).send({
+        status: 'updating',
+        message: 'Global resume reconciliation started',
+      });
+    }
+    await sync.resume();
+    return reply.status(200).send({ status: 'ok', message: 'Resumed all active project sessions' });
+  });
+
+  // Hash reconciliation endpoints
+  const reconcileHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const project = await store.get(id);
+    const force = request.body?.force === true || request.query?.force === 'true';
+    const isAsync = request.body?.async === true || request.query?.async === 'true' || request.query?.async === '1';
+
+    if (!sync.hasSession(id)) {
+      await sync.start(id);
+    }
+
+    if (isAsync) {
+      void sync.reconcile(id, { force }).catch(err => {
+        app.log.error(err);
+        sync.emit('notification', id, { type: 'error', projectId: id, message: err.message });
+      });
+      return reply.status(202).send({
+        projectId: id,
+        status: 'updating',
+        message: 'Reconciliation started',
+      });
+    }
+
+    try {
+      const changed = await sync.reconcile(id, { force });
+      const updated = await store.get(id);
+      const analysis = updated.analysis || project.analysis;
+      return reply.status(200).send({
+        projectId: id,
+        changed,
+        status: analysis?.status || 'current',
+        revision: analysis?.revision ?? null,
+        sequence: analysis?.sequence ?? 0,
+        analysis,
+      });
+    } catch (err: any) {
+      const statusCode = err instanceof AppError ? err.statusCode : (err?.statusCode || 400);
+      return reply.status(statusCode).send({
+        error: statusCode === 404 ? 'Not Found' : 'Bad Request',
+        message: err.message,
+        statusCode,
+      });
+    }
+  };
+
+  app.post('/api/projects/:id/reconcile', reconcileHandler);
+  app.post('/api/projects/:id/sync/reconcile', reconcileHandler);
+
   const getAnalysisStatusHandler = async (request: any, reply: any) => {
     const { id } = ProjectIdParamSchema.parse(request.params);
     const project = await store.get(id);
@@ -738,11 +893,22 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
       const query = request.query as { once?: string; watch?: string } | undefined;
       const isOnce = query?.once === 'true' || query?.once === '1';
 
-      if (projectId && query?.watch !== 'false' && !isOnce && !sync.hasSession(projectId)) {
-        try {
-          await sync.start(projectId);
-        } catch (err) {
-          app.log.error(err);
+      if (projectId && query?.watch !== 'false' && !isOnce) {
+        if (!sync.hasSession(projectId)) {
+          try {
+            await sync.start(projectId);
+          } catch (err) {
+            app.log.error(err);
+          }
+        } else if (
+          request.headers['last-event-id'] ||
+          (query as any)?.lastEventId ||
+          (query as any)?.reconnect === 'true' ||
+          (query as any)?.resume === 'true'
+        ) {
+          void sync.resume(projectId).catch(err => {
+            app.log.error(err);
+          });
         }
       }
 
