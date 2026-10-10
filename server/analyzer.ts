@@ -129,6 +129,17 @@ export function createParseConfigHost(
    }
    return ts.sys.readFile(filePath);
   },
+  directoryExists: (dir: string) => {
+   const rel = getRel(dir);
+   if (rel !== null) {
+    if (rel === '') return true;
+    const prefix = rel + '/';
+    if (Object.keys(files).some(k => k.startsWith(prefix))) return true;
+    if (rel.startsWith('node_modules/') || rel === 'node_modules') return ts.sys.directoryExists(dir);
+    return false;
+   }
+   return ts.sys.directoryExists(dir);
+  },
   readDirectory: (
    dir: string,
    extensions: readonly string[],
@@ -360,8 +371,29 @@ export async function discoverAnalysisInputs(
  const parseHost = createParseConfigHost(root, files);
  for (const configPath of configurationFiles) {
   const config = ts.parseConfigFileTextToJson(configPath, files[configPath].text);
-  if (!config.error && config.config) {
-   const parsed = ts.parseJsonConfigFileContent(config.config, parseHost, resolve(root, dirname(configPath)));
+  if (config.error) {
+   incompatibleInputs.push({
+    path: configPath,
+    message: ts.flattenDiagnosticMessageText(config.error.messageText, ' '),
+    severity: 'error',
+    code: String(config.error.code),
+   });
+   continue;
+  }
+  if (config.config) {
+   const configDir = resolve(root, dirname(configPath));
+   const configFilePath = resolve(root, configPath);
+   const parsed = ts.parseJsonConfigFileContent(config.config, parseHost, configDir, undefined, configFilePath);
+   for (const d of parsed.errors) {
+    if (d.code !== 18003 && d.code !== 18002) {
+     incompatibleInputs.push({
+      path: configPath,
+      message: ts.flattenDiagnosticMessageText(d.messageText, ' '),
+      severity: 'error',
+      code: String(d.code),
+     });
+    }
+   }
    for (const fn of parsed.fileNames) {
     const resolvedFn = resolve(fn);
     if (fullTsPaths.has(resolvedFn)) {
@@ -483,21 +515,26 @@ export class Analyzer {
   const tsPaths=eligible.filter(p=>/\.tsx?$/.test(p));
   const fullPaths=new Set(tsPaths.map(p=>resolve(root,p)));
   const fallback:ts.CompilerOptions={target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext,moduleResolution:ts.ModuleResolutionKind.Bundler,jsx:ts.JsxEmit.ReactJSX,strict:true,skipLibCheck:true,noEmit:true};
-  const configs=Object.keys(files).filter(p=>/^tsconfig[^/]*\.json$/.test(basename(p)));
+  const configs=Object.keys(files).filter(p=>/^tsconfig[^/]*\.json$/.test(basename(p))).sort((a,b)=>b.split('/').length - a.split('/').length);
   const parseHost = createParseConfigHost(root, files);
+  const claimedFiles = new Set<string>();
   const settings:{key:string;rootNames:string[];options:ts.CompilerOptions;references?:readonly ts.ProjectReference[]}[]=[];
   for(const path of configs){
    const config=ts.parseConfigFileTextToJson(path,files[path].text);
    if(config.error){diagnostics.push({severity:'error',message:ts.flattenDiagnosticMessageText(config.error.messageText,' '),path});continue;}
-   const parsed=ts.parseJsonConfigFileContent(config.config,parseHost,resolve(root,dirname(path)));
-   for(const d of parsed.errors)if(d.code!==18003)diagnostics.push({severity:'error',message:ts.flattenDiagnosticMessageText(d.messageText,' '),path,code:String(d.code)});
-   const rootNames=parsed.fileNames.filter(p=>fullPaths.has(resolve(p)));
-   if(rootNames.length)settings.push({key:path,rootNames,options:{...parsed.options,noEmit:true},references:parsed.projectReferences});
+   const configDir = resolve(root, dirname(path));
+   const configFilePath = resolve(root, path);
+   const parsed=ts.parseJsonConfigFileContent(config.config,parseHost,configDir,undefined,configFilePath);
+   for(const d of parsed.errors)if(d.code!==18003 && d.code!==18002)diagnostics.push({severity:'error',message:ts.flattenDiagnosticMessageText(d.messageText,' '),path,code:String(d.code)});
+   const rootNames=parsed.fileNames.map(p=>resolve(p)).filter(p=>fullPaths.has(p) && !claimedFiles.has(p));
+   for(const p of rootNames) claimedFiles.add(p);
+   const opts = parsed.options.composite ? { ...parsed.options } : { ...parsed.options, noEmit: true };
+   if(rootNames.length || (parsed.projectReferences && parsed.projectReferences.length > 0))settings.push({key:path,rootNames,options:opts,references:parsed.projectReferences});
   }
   const configured=new Set(settings.flatMap(s=>s.rootNames.map(p=>resolve(p))));
   const extra=tsPaths.map(p=>resolve(root,p)).filter(p=>!configured.has(p));
   if(extra.length||!settings.length)settings.push({key:'unconfigured',rootNames:extra,options:fallback});
-  if(configs.length&&extra.length)diagnostics.push({severity:'warning',message:'Files outside configured TypeScript projects were analyzed with fallback options.'});
+  if(configs.length&&extra.length)diagnostics.push({severity:'warning',message:'Files outside configured TypeScript projects were analyzed with fallback options.',code:'unconfigured-analysis'});
   const declarations=new Map<ts.Node,string>();
   const declarationKeys=new Map<string,string>();
   const filePrograms=new Map<string,ts.Program>();
@@ -513,8 +550,12 @@ export class Analyzer {
    const originalDirectoryExists=host.directoryExists ? host.directoryExists.bind(host) : (d:string)=>ts.sys.directoryExists(d);
    const originalGetDirectories=host.getDirectories ? host.getDirectories.bind(host) : (d:string)=>ts.sys.getDirectories(d);
 
+   const currentDir = setting.key !== 'unconfigured' ? resolve(root, dirname(setting.key)) : resolve(root);
+   host.getCurrentDirectory = () => currentDir;
+   (host as any).useSourceOfProjectReferenceRedirect = () => true;
+
    const getRel=(file:string)=>{
-    const norm=resolve(file).replaceAll('\\','/');
+    const norm=resolve(currentDir, file).replaceAll('\\','/');
     const normRoot=resolve(root).replaceAll('\\','/').replace(/\/$/,'');
     if(norm===normRoot)return '';
     if(norm.startsWith(normRoot+'/'))return norm.slice(normRoot.length+1);
@@ -587,11 +628,19 @@ export class Analyzer {
    this.programs.set(setting.key,program);
    programHosts.set(program,host);
    for(const d of [...program.getOptionsDiagnostics(),...program.getSyntacticDiagnostics(),...program.getSemanticDiagnostics()]){
-    const path=d.file?relative(root,d.file.fileName).replaceAll('\\','/'):undefined;
-    if(path&&(!files[path]||path.includes('node_modules/')))continue;
-    diagnostics.push({severity:d.category===ts.DiagnosticCategory.Error?'error':'warning',message:ts.flattenDiagnosticMessageText(d.messageText,' '),path,line:d.file&&d.start!==undefined?d.file.getLineAndCharacterOfPosition(d.start).line+1:undefined,code:String(d.code)});
+    const diagPath=d.file?relative(root,d.file.fileName).replaceAll('\\','/'):(setting.key!=='unconfigured'?setting.key:undefined);
+    if(diagPath&&(!files[diagPath]||diagPath.includes('node_modules/')))continue;
+    diagnostics.push({severity:d.category===ts.DiagnosticCategory.Error?'error':'warning',message:ts.flattenDiagnosticMessageText(d.messageText,' '),path:diagPath,line:d.file&&d.start!==undefined?d.file.getLineAndCharacterOfPosition(d.start).line+1:undefined,code:String(d.code)});
    }
-   for(const sf of program.getSourceFiles())if(fullPaths.has(resolve(sf.fileName))&&!visited.has(sf.fileName)){visited.add(sf.fileName);sourceFiles.push({sf,program});filePrograms.set(sf.fileName,program);}
+   const settingRoots = new Set(setting.rootNames.map(p => resolve(p)));
+   for(const sf of program.getSourceFiles()){
+    const sfResolved = resolve(sf.fileName);
+    if(settingRoots.has(sfResolved) && !visited.has(sfResolved)){
+     visited.add(sfResolved);
+     sourceFiles.push({sf,program});
+     filePrograms.set(sf.fileName,program);
+    }
+   }
   }
   for(const {sf,program} of sourceFiles){
    const path=relative(root,sf.fileName).replaceAll('\\','/');const checker=program.getTypeChecker();const mid=idFor('module:'+path);

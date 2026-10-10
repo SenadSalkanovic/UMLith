@@ -458,3 +458,181 @@ it('ensures a mixed or unavailable input revision is never labeled current',asyn
   expect(incompleteAnalysis.status).toBe('partial');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+it('imports a project using extends, path aliases, and a project reference (T033 concrete scenario 1)', async () => {
+ const fixtureDir = resolve('tests/fixtures/typescript-config');
+ const analyzer = new Analyzer();
+ const discovery = await analyzer.discoverInputs(fixtureDir);
+
+ // Discovery verification
+ expect(discovery.configurationFiles).toEqual([
+  'packages/app/tsconfig.json',
+  'packages/core/tsconfig.json',
+  'tsconfig.base.json',
+  'tsconfig.json',
+ ].sort());
+ expect(discovery.eligibleFiles).toEqual([
+  'packages/app/src/index.ts',
+  'packages/core/src/service.ts',
+ ]);
+ expect(discovery.configuredSourceFiles).toEqual([
+  'packages/app/src/index.ts',
+  'packages/core/src/service.ts',
+ ]);
+ expect(discovery.unconfiguredSourceFiles).toEqual([]);
+
+ // Full analysis verification
+ const a = await analyzer.analyze(fixtureDir);
+ expect(a.quality.diagnostics).toEqual([]);
+ expect(a.status).toBe('current');
+ expect(a.quality.unresolvedReferences).toBe(0);
+ expect(a.quality.eligibleFiles).toBe(2);
+ expect(a.quality.analyzedFiles).toBe(2);
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+
+ // Module nodes
+ const appModule = a.graph.nodes.find(n => n.kind === 'module' && n.name === 'packages/app/src/index.ts')!;
+ const coreModule = a.graph.nodes.find(n => n.kind === 'module' && n.name === 'packages/core/src/service.ts')!;
+ expect(appModule).toBeDefined();
+ expect(coreModule).toBeDefined();
+
+ // Extracted symbols from both projects
+ const coreClass = a.graph.nodes.find(n => n.kind === 'class' && n.name === 'CoreService')!;
+ const computeFn = a.graph.nodes.find(n => n.kind === 'function' && n.name === 'computeValue')!;
+ const handleFn = a.graph.nodes.find(n => n.kind === 'function' && n.name === 'handleRequest')!;
+ expect(coreClass).toBeDefined();
+ expect(computeFn).toBeDefined();
+ expect(handleFn).toBeDefined();
+
+ // Module dependency edge driven by path alias resolution
+ const dependsOnEdge = a.graph.edges.find(e => e.source === appModule.id && e.target === coreModule.id && e.kind === 'depends-on');
+ expect(dependsOnEdge).toBeDefined();
+
+ // Call edges driven by cross-project reference resolution
+ const callCompute = a.graph.edges.find(e => e.source === handleFn.id && e.target === computeFn.id && e.kind === 'calls');
+ expect(callCompute).toBeDefined();
+ expect(callCompute?.uncertain).toBe(false);
+
+ const executeNode = a.graph.nodes.find(n => n.name === 'execute' && n.parentId === coreClass.id)!;
+ expect(executeNode).toBeDefined();
+ const callExecute = a.graph.edges.find(e => e.source === handleFn.id && e.target === executeNode.id && e.kind === 'calls');
+ expect(callExecute).toBeDefined();
+ expect(callExecute?.uncertain).toBe(false);
+});
+
+it('removes a referenced config or dependency, emitting diagnostics and keeping missing reference evidence visible (T033 concrete scenario 2)', async () => {
+ const dir = await mkdtemp(join(tmpdir(), 'architect-missing-ref-'));
+ try {
+  await cp(resolve('tests/fixtures/typescript-config'), dir, { recursive: true });
+
+  // 1. Remove a referenced config (packages/core/tsconfig.json)
+  await rm(join(dir, 'packages', 'core', 'tsconfig.json'), { force: true });
+
+  const analyzer = new Analyzer();
+  const aMissingConfig = await analyzer.analyze(dir);
+
+  // Status is not current; missing referenced config diagnostic is emitted
+  expect(aMissingConfig.status).not.toBe('current');
+  expect(aMissingConfig.status).toBe('partial');
+  expect(aMissingConfig.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    severity: 'error',
+    code: '6053',
+    message: expect.stringContaining('not found'),
+   })
+  );
+
+  // 2. Remove a dependency (packages/core/src/service.ts)
+  await rm(join(dir, 'packages', 'core', 'src', 'service.ts'), { force: true });
+  // Restore packages/core/tsconfig.json so we isolate the missing dependency scenario
+  await writeFile(
+   join(dir, 'packages', 'core', 'tsconfig.json'),
+   JSON.stringify({
+    extends: '../../tsconfig.base.json',
+    compilerOptions: { composite: true, rootDir: 'src' },
+    include: ['src/**/*'],
+   })
+  );
+
+  const aMissingDep = await new Analyzer().analyze(dir);
+  expect(aMissingDep.status).not.toBe('current');
+  expect(aMissingDep.status).toBe('partial');
+
+  // Diagnostics contain missing module diagnostic and unresolved call diagnostic
+  expect(aMissingDep.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    severity: 'error',
+    code: '2307',
+    message: expect.stringContaining("Cannot find module '@core/service'"),
+   })
+  );
+  expect(aMissingDep.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    severity: 'warning',
+    message: expect.stringContaining('Unresolved call'),
+   })
+  );
+
+  // Missing reference evidence remains visible in the graph
+  expect(aMissingDep.quality.unresolvedReferences).toBeGreaterThan(0);
+  const externalSystem = aMissingDep.graph.nodes.find(n => n.id === 'external');
+  expect(externalSystem).toBeDefined();
+
+  const handleFn = aMissingDep.graph.nodes.find(n => n.name === 'handleRequest')!;
+  expect(handleFn).toBeDefined();
+
+  // Call edges to unresolved targets are marked uncertain: true
+  const uncertainCalls = aMissingDep.graph.edges.filter(e => e.source === handleFn.id && e.kind === 'calls');
+  expect(uncertainCalls.length).toBeGreaterThan(0);
+  for (const call of uncertainCalls) {
+   expect(call.uncertain).toBe(true);
+   const targetNode = aMissingDep.graph.nodes.find(n => n.id === call.target)!;
+   expect(targetNode).toBeDefined();
+   expect(targetNode.parentId).toBe('external');
+  }
+ } finally {
+  await rm(dir, { recursive: true, force: true });
+ }
+});
+
+it('labels unconfigured analysis when files are outside configured TypeScript projects', async () => {
+ const dir = await mkdtemp(join(tmpdir(), 'architect-unconfigured-label-'));
+ try {
+  await mkdir(join(dir, 'src'), { recursive: true });
+  await mkdir(join(dir, 'orphan'), { recursive: true });
+
+  await writeFile(join(dir, 'src', 'configured.ts'), 'export function inside(): number { return 1; }\n');
+  await writeFile(join(dir, 'orphan', 'unconfigured.ts'), 'export function outside(): number { return 2; }\n');
+  await writeFile(
+   join(dir, 'tsconfig.json'),
+   JSON.stringify({
+    compilerOptions: { target: 'ES2022' },
+    include: ['src/**/*'],
+   })
+  );
+
+  const analyzer = new Analyzer();
+  const discovery = await analyzer.discoverInputs(dir);
+
+  // Discovery labels configured vs unconfigured source files
+  expect(discovery.configuredSourceFiles).toEqual(['src/configured.ts']);
+  expect(discovery.unconfiguredSourceFiles).toEqual(['orphan/unconfigured.ts']);
+
+  // Analysis emits diagnostic labeling the unconfigured fallback analysis
+  const a = await analyzer.analyze(dir);
+  expect(a.status).toBe('partial');
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    severity: 'warning',
+    code: 'unconfigured-analysis',
+    message: 'Files outside configured TypeScript projects were analyzed with fallback options.',
+   })
+  );
+
+  // Both files are still analyzed
+  expect(a.graph.nodes.some(n => n.name === 'inside')).toBe(true);
+  expect(a.graph.nodes.some(n => n.name === 'outside')).toBe(true);
+ } finally {
+  await rm(dir, { recursive: true, force: true });
+ }
+});
