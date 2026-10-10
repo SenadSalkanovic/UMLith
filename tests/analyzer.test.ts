@@ -1180,3 +1180,304 @@ it('ensures interface changes are structurally visible while internal edits pres
   await rm(dir, { recursive: true, force: true });
  }
 });
+
+it('imports aliased calls, inheritance, and an implemented interface (T036 concrete scenario 1 & AC 1)', async () => {
+ const fixtureDir = resolve('tests/fixtures/typescript-relationships');
+ const analyzer = new Analyzer();
+ const a = await analyzer.analyze(fixtureDir);
+
+ // 1. Quality report and graph validity
+ expect(a.status).toBe('current');
+ expect(a.quality.unresolvedReferences).toBe(0);
+ expect(a.quality.unsupportedConstructs).toBe(0);
+ expect(a.quality.diagnostics).toEqual([]);
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+
+ const nodes = a.graph.nodes;
+ const edges = a.graph.edges;
+
+ // 2. Verify declared nodes across modules
+ const identifiable = nodes.find(n => n.kind === 'interface' && n.name === 'Identifiable')!;
+ const auditable = nodes.find(n => n.kind === 'interface' && n.name === 'Auditable')!;
+ const baseModel = nodes.find(n => n.kind === 'class' && n.name === 'BaseModel')!;
+ const repository = nodes.find(n => n.kind === 'class' && n.name === 'Repository')!;
+ const orderRepository = nodes.find(n => n.kind === 'class' && n.name === 'OrderRepository')!;
+ const orderService = nodes.find(n => n.kind === 'class' && n.name === 'OrderService')!;
+ const iOrderProcessor = nodes.find(n => n.kind === 'interface' && n.name === 'IOrderProcessor')!;
+
+ const calculateTaxFn = nodes.find(n => n.kind === 'function' && n.name === 'calculateTax')!;
+ const clampFn = nodes.find(n => n.kind === 'function' && n.name === 'clamp')!;
+ const defaultFormatterFn = nodes.find(n => n.kind === 'function' && n.name === 'defaultFormatter')!;
+ const processOrderMethod = nodes.find(n => n.kind === 'function' && n.name === 'processOrder' && n.parentId === orderService.id)!;
+ const validateStatusMethod = nodes.find(n => n.kind === 'function' && n.name === 'validateStatus' && n.parentId === orderService.id)!;
+ const createDefaultMethod = nodes.find(n => n.kind === 'function' && n.name === 'createDefault' && n.parentId === orderService.id)!;
+ const orderRepoFindMethod = nodes.find(n => n.kind === 'function' && n.name === 'find' && n.parentId === orderRepository.id)!;
+ const processorContractMethod = nodes.find(n => n.kind === 'function' && n.name === 'processOrder' && n.parentId === iOrderProcessor.id)!;
+ const runWorkflowFn = nodes.find(n => n.kind === 'function' && n.name === 'runWorkflow')!;
+
+ expect(identifiable).toBeDefined();
+ expect(auditable).toBeDefined();
+ expect(baseModel).toBeDefined();
+ expect(repository).toBeDefined();
+ expect(orderRepository).toBeDefined();
+ expect(orderService).toBeDefined();
+ expect(iOrderProcessor).toBeDefined();
+ expect(calculateTaxFn).toBeDefined();
+ expect(clampFn).toBeDefined();
+ expect(defaultFormatterFn).toBeDefined();
+ expect(processOrderMethod).toBeDefined();
+ expect(validateStatusMethod).toBeDefined();
+ expect(createDefaultMethod).toBeDefined();
+ expect(orderRepoFindMethod).toBeDefined();
+ expect(processorContractMethod).toBeDefined();
+ expect(runWorkflowFn).toBeDefined();
+
+ // 3. Verify inheritance (inherits edges) through direct and aliased declarations
+ // Auditable extends Identifiable
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: auditable.id,
+  target: identifiable.id,
+  kind: 'inherits',
+ }));
+ // Repository extends AliasedBaseModel (BaseModel)
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: repository.id,
+  target: baseModel.id,
+  kind: 'inherits',
+ }));
+ // OrderRepository extends Repository
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: orderRepository.id,
+  target: repository.id,
+  kind: 'inherits',
+ }));
+ // OrderService extends AliasedBaseModel (BaseModel)
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: orderService.id,
+  target: baseModel.id,
+  kind: 'inherits',
+ }));
+
+ // 4. Verify interface implementation (implements edges) through direct and aliased declarations
+ // BaseModel implements Identifiable
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: baseModel.id,
+  target: identifiable.id,
+  kind: 'implements',
+ }));
+ // OrderService implements IOrderProcessor
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: orderService.id,
+  target: iOrderProcessor.id,
+  kind: 'implements',
+ }));
+ // OrderService implements AliasedAuditable (Auditable)
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: orderService.id,
+  target: auditable.id,
+  kind: 'implements',
+ }));
+
+ // 5. Verify aliased calls resolve to the expected graph targets (AC 1)
+ // OrderService.processOrder calls computeTax -> resolves to calculateTax
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: processOrderMethod.id,
+  target: calculateTaxFn.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+ // OrderService.processOrder calls constrainValue -> resolves to clamp
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: processOrderMethod.id,
+  target: clampFn.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+ // OrderService.processOrder calls stringFormatter -> resolves to defaultFormatter
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: processOrderMethod.id,
+  target: defaultFormatterFn.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+ // OrderService.processOrder calls defaultFormatter directly -> resolves to defaultFormatter
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: processOrderMethod.id,
+  target: defaultFormatterFn.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+ // OrderService.processOrder calls MathUtils.calculateTax (namespace member call) -> resolves to calculateTax
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: processOrderMethod.id,
+  target: calculateTaxFn.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+ // OrderService.processOrder calls this.repository.find -> resolves to OrderRepository.find
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: processOrderMethod.id,
+  target: orderRepoFindMethod.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+ // OrderService.processOrder calls this['validateStatus']() (string literal element access) -> resolves to validateStatus
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: processOrderMethod.id,
+  target: validateStatusMethod.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+
+ // 6. Verify static member calls, constructor calls, and typed contract calls
+ // OrderService.createDefault calls new OrderService()
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: createDefaultMethod.id,
+  target: orderService.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+ // runWorkflow calls OrderService.createDefault()
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: runWorkflowFn.id,
+  target: createDefaultMethod.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+ // runWorkflow calls processor.processOrder() (interface contract call)
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: runWorkflowFn.id,
+  target: processorContractMethod.id,
+  kind: 'calls',
+  uncertain: false,
+ }));
+
+ // 7. Module depends-on relationships
+ const reexportMod = nodes.find(n => n.kind === 'module' && n.name === 'src/reexport.ts')!;
+ const utilsMod = nodes.find(n => n.kind === 'module' && n.name === 'src/utils.ts')!;
+ const servicesMod = nodes.find(n => n.kind === 'module' && n.name === 'src/services.ts')!;
+ const modelsMod = nodes.find(n => n.kind === 'module' && n.name === 'src/models.ts')!;
+ const indexMod = nodes.find(n => n.kind === 'module' && n.name === 'src/index.ts')!;
+
+ expect(edges).toContainEqual(expect.objectContaining({ source: reexportMod.id, target: utilsMod.id, kind: 'depends-on' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: servicesMod.id, target: modelsMod.id, kind: 'depends-on' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: servicesMod.id, target: reexportMod.id, kind: 'depends-on' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: servicesMod.id, target: utilsMod.id, kind: 'depends-on' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: indexMod.id, target: servicesMod.id, kind: 'depends-on' }));
+});
+
+it('exercises an unresolved import and dynamic property call (T036 concrete scenario 2, AC 2 & AC 3)', async () => {
+ const dir = await mkdtemp(join(tmpdir(), 'architect-relationships-unresolved-'));
+ try {
+  await mkdir(join(dir, 'src'), { recursive: true });
+  await writeFile(
+   join(dir, 'package.json'),
+   JSON.stringify({ name: 'test-unresolved-dispatch', version: '1.0.0', dependencies: { typescript: '6.0.3' } })
+  );
+  await writeFile(
+   join(dir, 'tsconfig.json'),
+   JSON.stringify({
+    compilerOptions: { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', strict: true, skipLibCheck: true, noEmit: true },
+    include: ['src/**/*'],
+   })
+  );
+  await writeFile(
+   join(dir, 'src', 'dispatch.ts'),
+   `import { missingUtility } from './absent-utils';
+import { MissingContract } from './missing-contract';
+
+export class Dispatcher implements MissingContract {
+  execute(dynamicKey: string, payload: any): void {
+    // 1. Call to unresolved import
+    missingUtility();
+
+    // 2. Dynamic element access with variable key
+    payload[dynamicKey]();
+
+    // 3. Dynamic element access on any with literal key
+    payload['dynamicAction']();
+
+    // 4. Dynamic property call on any
+    (payload as any).dynamicMethod();
+  }
+}
+`
+  );
+
+  const analyzer = new Analyzer();
+  const a = await analyzer.analyze(dir);
+
+  // 1. Status is partial due to unresolved references and diagnostics
+  expect(a.status).toBe('partial');
+  expect(a.status).not.toBe('current');
+
+  // 2. AC 3: Missing targets contribute to the quality report
+  expect(a.quality.unresolvedReferences).toBeGreaterThanOrEqual(3);
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: 'unresolved-import',
+    severity: 'error',
+    message: expect.stringContaining('./absent-utils'),
+   })
+  );
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: 'unresolved-import',
+    severity: 'error',
+    message: expect.stringContaining('./missing-contract'),
+   })
+  );
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: 'unresolved-call',
+    severity: 'warning',
+    message: expect.stringContaining('missingUtility'),
+   })
+  );
+
+  // 3. AC 2: Unsupported dispatch does not produce invented certainty
+  // Dynamic property calls are recorded as unsupported constructs, NOT invented calls edges
+  expect(a.quality.unsupportedConstructs).toBeGreaterThanOrEqual(3);
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: 'unsupported-dispatch',
+    severity: 'warning',
+    message: expect.stringContaining('payload[dynamicKey]'),
+   })
+  );
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: 'unsupported-dispatch',
+    severity: 'warning',
+    message: expect.stringContaining("payload['dynamicAction']"),
+   })
+  );
+  expect(a.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    code: 'unsupported-dispatch',
+    severity: 'warning',
+    message: expect.stringContaining('(payload as any).dynamicMethod'),
+   })
+  );
+
+  const dispatcherNode = a.graph.nodes.find(n => n.name === 'Dispatcher' && n.kind === 'class')!;
+  const executeMethod = a.graph.nodes.find(n => n.name === 'execute' && n.parentId === dispatcherNode.id)!;
+  expect(dispatcherNode).toBeDefined();
+  expect(executeMethod).toBeDefined();
+
+  // No fake calls edges for dynamic property calls exist from executeMethod
+  const callEdges = a.graph.edges.filter(e => e.source === executeMethod.id && e.kind === 'calls');
+  // Only the named call to missingUtility has an uncertain calls edge; none of the 3 dynamic calls produced invented edges
+  for (const call of callEdges) {
+   const target = a.graph.nodes.find(n => n.id === call.target)!;
+   expect(target.name).not.toContain('dynamicKey');
+   expect(target.name).not.toContain('dynamicAction');
+   expect(target.name).not.toContain('dynamicMethod');
+  }
+
+  // Graph structure remains valid
+  expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+ } finally {
+  await rm(dir, { recursive: true, force: true });
+ }
+});

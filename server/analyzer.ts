@@ -858,6 +858,20 @@ export class Analyzer {
   }
   for(const {sf,program} of sourceFiles){
    const path=relative(root,sf.fileName).replaceAll('\\','/');const checker=program.getTypeChecker();const mid=idFor('module:'+path);
+   function isErrorType(type: ts.Type | undefined, visited = new Set<ts.Type>()): boolean {
+    if (!type || visited.has(type)) return false;
+    visited.add(type);
+    if ((type as any).intrinsicName === 'error') return true;
+    if ((type.flags & ts.TypeFlags.Any) && (type as any).intrinsicName === 'error') return true;
+    if (type.isUnionOrIntersection()) {
+     return type.types.some(t => isErrorType(t, visited));
+    }
+    const typeArgs = checker.getTypeArguments?.(type as ts.TypeReference) || (type as ts.TypeReference).typeArguments;
+    if (typeArgs && typeArgs.some(t => isErrorType(t, visited))) return true;
+    const aliasArgs = type.aliasTypeArguments;
+    if (aliasArgs && aliasArgs.some(t => isErrorType(t, visited))) return true;
+    return false;
+   }
    const external=(expression:ts.Expression,decl?:ts.Declaration)=>{
     const text=expression.getText(sf);
     const origin=decl?decl.getSourceFile().fileName.replaceAll('\\','/').replace(/^.*node_modules\//,''):'unresolved';
@@ -866,32 +880,128 @@ export class Analyzer {
     if(!nodes.has(id))nodes.set(id,NodeSchema.parse({id,kind:'function',name:text,parentId:'external',provenance:'extracted',description:decl?'Resolved declaration outside imported source.':'The call target cannot be resolved statically.'}));
     return id;
    };
+   function unwrapParentheses(expr: ts.Expression): ts.Expression {
+    while(ts.isParenthesizedExpression(expr)){
+     expr=expr.expression;
+    }
+    return expr;
+   }
+   function isDynamicPropertyCall(call: ts.CallExpression): boolean {
+    const expr = unwrapParentheses(call.expression);
+    if(ts.isElementAccessExpression(expr)){
+     if(!ts.isStringLiteral(expr.argumentExpression)){
+      return true;
+     }
+     const receiverType = checker.getTypeAtLocation(unwrapParentheses(expr.expression));
+     if(receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)){
+      return true;
+     }
+     const sym = checker.getSymbolAtLocation(expr.argumentExpression);
+     if(!sym){
+      return true;
+     }
+     return false;
+    }
+    if(ts.isPropertyAccessExpression(expr)){
+     const receiverType = checker.getTypeAtLocation(unwrapParentheses(expr.expression));
+     if(receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)){
+      return true;
+     }
+    }
+    return false;
+   }
+   function resolveAliasSymbol(sym: ts.Symbol | undefined): ts.Symbol | undefined {
+    let current = sym;
+    while(current && (current.flags & ts.SymbolFlags.Alias)){
+     try{
+      const next = checker.getAliasedSymbol(current);
+      if(!next || next === current) break;
+      current = next;
+     }catch{
+      break;
+     }
+    }
+    if(current && current.declarations?.[0] && ts.isExportAssignment(current.declarations[0])){
+     const ea = current.declarations[0] as ts.ExportAssignment;
+     if(ea.expression && !ts.isClassExpression(ea.expression) && !ts.isArrowFunction(ea.expression) && !ts.isFunctionExpression(ea.expression)){
+      const exprSym = checker.getSymbolAtLocation(ea.expression);
+      if(exprSym){
+       current = exprSym;
+       while(current && (current.flags & ts.SymbolFlags.Alias)){
+        try{
+         const next = checker.getAliasedSymbol(current);
+         if(!next || next === current) break;
+         current = next;
+        }catch{
+         break;
+        }
+       }
+      }
+     }
+    }
+    return current;
+   }
    function walk(n:ts.Node,owner:string){
     const own=declarations.get(n);if(own)owner=own;
     if((ts.isImportDeclaration(n)||ts.isExportDeclaration(n))&&n.moduleSpecifier&&ts.isStringLiteral(n.moduleSpecifier)){
      const currentHost = programHosts.get(program) || ts.sys;
      const resolved=ts.resolveModuleName(n.moduleSpecifier.text,sf.fileName,program.getCompilerOptions(),currentHost).resolvedModule;
-     if(resolved&&fullPaths.has(resolve(resolved.resolvedFileName)))addEdge(mid,idFor('module:'+relative(root,resolved.resolvedFileName).replaceAll('\\','/')),'depends-on');
+     if(resolved&&fullPaths.has(resolve(resolved.resolvedFileName))){
+      addEdge(mid,idFor('module:'+relative(root,resolved.resolvedFileName).replaceAll('\\','/')),'depends-on');
+     }else if(!resolved){
+      unresolved++;
+      diagnostics.push({
+       severity:'error',
+       message:'Unresolved import target: '+n.moduleSpecifier.text,
+       path,
+       line:sf.getLineAndCharacterOfPosition(n.getStart(sf)).line+1,
+       code:'unresolved-import'
+      });
+     }
     }
     if(ts.isCallExpression(n)||ts.isNewExpression(n)){
-     let symbol=checker.getSymbolAtLocation(n.expression);
-     if(symbol&&(symbol.flags&ts.SymbolFlags.Alias))try{symbol=checker.getAliasedSymbol(symbol);}catch{}
-     const decl=symbol?.valueDeclaration||symbol?.declarations?.[0];
-     let target=decl?(declarations.get(decl)||declarationKeys.get(makeKey(decl))):undefined;
-     if(!target&&symbol?.declarations){
-      for(const d of symbol.declarations){
-       target=declarations.get(d)||declarationKeys.get(makeKey(d));
-       if(target)break;
+     if(ts.isCallExpression(n) && isDynamicPropertyCall(n)){
+      unsupported++;
+      diagnostics.push({
+       severity:'warning',
+       message:'Dynamic property call cannot be resolved statically: '+n.expression.getText(sf),
+       path,
+       line:sf.getLineAndCharacterOfPosition(n.getStart(sf)).line+1,
+       code:'unsupported-dispatch'
+      });
+     }else{
+      const callExpr = unwrapParentheses(n.expression);
+      let symbol=checker.getSymbolAtLocation(callExpr);
+      if(!symbol && ts.isElementAccessExpression(callExpr) && ts.isStringLiteral(callExpr.argumentExpression)){
+       symbol=checker.getSymbolAtLocation(callExpr.argumentExpression);
       }
+      symbol = resolveAliasSymbol(symbol);
+      const decl=symbol?.valueDeclaration||symbol?.declarations?.[0];
+      let target=decl?(declarations.get(decl)||declarationKeys.get(makeKey(decl))):undefined;
+      if(!target&&symbol?.declarations){
+       for(const d of symbol.declarations){
+        target=declarations.get(d)||declarationKeys.get(makeKey(d));
+        if(target)break;
+       }
+      }
+      const uncertain=!decl;
+      if(!target)target=external(n.expression,decl);
+      if(uncertain){
+       unresolved++;
+       diagnostics.push({
+        severity:'warning',
+        message:'Unresolved call: '+n.expression.getText(sf),
+        path,
+        line:sf.getLineAndCharacterOfPosition(n.getStart(sf)).line+1,
+        code:'unresolved-call'
+       });
+      }
+      addEdge(owner,target,'calls','',uncertain);
      }
-     const uncertain=!decl;
-     if(!target)target=external(n.expression,decl);
-     if(uncertain){unresolved++;diagnostics.push({severity:'warning',message:'Unresolved call: '+n.expression.getText(sf),path,line:sf.getLineAndCharacterOfPosition(n.getStart()).line+1});}
-     addEdge(owner,target,'calls','',uncertain);
     }
     if((ts.isClassDeclaration(n)||ts.isClassExpression(n)||ts.isInterfaceDeclaration(n))&&n.heritageClauses)for(const clause of n.heritageClauses)for(const t of clause.types){
      let sym=checker.getSymbolAtLocation(t.expression);
-     if(sym&&(sym.flags&ts.SymbolFlags.Alias))sym=checker.getAliasedSymbol(sym);
+     sym = resolveAliasSymbol(sym);
      const decl=clause.token===ts.SyntaxKind.ExtendsKeyword?(sym?.valueDeclaration||sym?.declarations?.[0]):sym?.declarations?.[0];
      let target=decl&&(declarations.get(decl)||declarationKeys.get(makeKey(decl)));
      if(!target&&sym?.declarations){
@@ -900,7 +1010,21 @@ export class Analyzer {
        if(target)break;
       }
      }
-     if(target)addEdge(owner,target,clause.token===ts.SyntaxKind.ExtendsKeyword?'inherits':'implements');
+     if(target){
+      addEdge(owner,target,clause.token===ts.SyntaxKind.ExtendsKeyword?'inherits':'implements');
+     }else{
+      const heritageType=checker.getTypeAtLocation(t);
+      if((!sym||!decl) && !isErrorType(heritageType)){
+       unresolved++;
+       diagnostics.push({
+        severity:'error',
+        message:'Unresolved '+(clause.token===ts.SyntaxKind.ExtendsKeyword?'inheritance':'implementation')+' target: '+t.expression.getText(sf),
+        path,
+        line:sf.getLineAndCharacterOfPosition(t.getStart(sf)).line+1,
+        code:'unresolved-target'
+       });
+      }
+     }
     }
     ts.forEachChild(n,c=>walk(c,owner));
    }
