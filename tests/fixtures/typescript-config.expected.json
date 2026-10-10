@@ -1,0 +1,326 @@
+{
+  "schemaVersion": 1,
+  "nodes": [
+    {
+      "id": "04e87a30c50231490384064d",
+      "kind": "module",
+      "name": "packages/app/src/index.ts",
+      "parentId": "project",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "packages/app/src/index.ts",
+      "source": {
+        "path": "packages/app/src/index.ts",
+        "start": 0,
+        "end": 233,
+        "line": 1,
+        "hash": "c06aebbd8062387069c494df131c2688687c04152a89f84eaf36d87b73f77f93",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": []
+    },
+    {
+      "id": "0e31e7ed32faf02f11721ca6",
+      "kind": "step",
+      "name": "return 'executed-core';",
+      "parentId": "6a8f8ff32b00f7c8ca32e507",
+      "description": "return 'executed-core';",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "packages/core/src/service.ts",
+        "start": 53,
+        "end": 76,
+        "line": 3,
+        "hash": "4c230661fcbb381babccb7bef9c4f1e96af02f5603e9e24dfa1f38064f2bea1c",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": [],
+      "stepType": "return"
+    },
+    {
+      "id": "1c8796ced62c57616dcdf62d",
+      "kind": "step",
+      "name": "return `${service.execute()}:${doubled}`;",
+      "parentId": "ab872ea662a9fec88e4c2a77",
+      "description": "return `${service.execute()}:${doubled}`;",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "packages/app/src/index.ts",
+        "start": 189,
+        "end": 230,
+        "line": 6,
+        "hash": "c06aebbd8062387069c494df131c2688687c04152a89f84eaf36d87b73f77f93",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": [],
+      "stepType": "return"
+    },
+    {
+      "id": "5f66a6d45d256568b8e1db64",
+      "kind": "step",
+      "name": "const doubled = computeValue(val);",
+      "parentId": "ab872ea662a9fec88e4c2a77",
+      "description": "const doubled = computeValue(val);",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "packages/app/src/index.ts",
+        "start": 152,
+        "end": 186,
+        "line": 5,
+        "hash": "c06aebbd8062387069c494df131c2688687c04152a89f84eaf36d87b73f77f93",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": [],
+      "stepType": "operation"
+    },
+    {
+      "id": "60fd0793c350e920afbe67f0",
+      "kind": "module",
+      "name": "packages/core/src/service.ts",
+      "parentId": "project",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "packages/core/src/service.ts",
+      "source": {
+        "path": "packages/core/src/service.ts",
+        "start": 0,
+        "end": 160,
+        "line": 1,
+        "hash": "4c230661fcbb381babccb7bef9c4f1e96af02f5603e9e24dfa1f38064f2bea1c",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": []
+    },
+    {
+      "id": "650060b1359050139002fe29",
+      "kind": "function",
+      "name": "computeValue",
+      "parentId": "60fd0793c350e920afbe67f0",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "computeValue(input: number): number",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "packages/core/src/service.ts",
+      "source": {
+        "path": "packages/core/src/service.ts",
+        "symbol": "computeValue",
+        "start": 84,
+        "end": 159,
+        "line": 7,
+        "hash": "4c230661fcbb381babccb7bef9c4f1e96af02f5603e9e24dfa1f38064f2bea1c",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": []
+    },
+    {
+      "id": "681941c7252047e33d41c79f",
+      "kind": "class",
+      "name": "CoreService",
+      "parentId": "60fd0793c350e920afbe67f0",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "execute: () => string",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "packages/core/src/service.ts",
+      "source": {
+        "path": "packages/core/src/service.ts",
+        "symbol": "CoreService",
+        "start": 0,
+        "end": 82,
+        "line": 1,
+        "hash": "4c230661fcbb381babccb7bef9c4f1e96af02f5603e9e24dfa1f38064f2bea1c",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": []
+    },
+    {
+      "id": "6a8f8ff32b00f7c8ca32e507",
+      "kind": "function",
+      "name": "execute",
+      "parentId": "681941c7252047e33d41c79f",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "execute(): string",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "packages/core/src/service.ts",
+      "source": {
+        "path": "packages/core/src/service.ts",
+        "symbol": "CoreService.execute",
+        "start": 29,
+        "end": 80,
+        "line": 2,
+        "hash": "4c230661fcbb381babccb7bef9c4f1e96af02f5603e9e24dfa1f38064f2bea1c",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": []
+    },
+    {
+      "id": "6f04631edc534d11b2baf821",
+      "kind": "step",
+      "name": "const service = new CoreService();",
+      "parentId": "ab872ea662a9fec88e4c2a77",
+      "description": "const service = new CoreService();",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "packages/app/src/index.ts",
+        "start": 115,
+        "end": 149,
+        "line": 4,
+        "hash": "c06aebbd8062387069c494df131c2688687c04152a89f84eaf36d87b73f77f93",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": [],
+      "stepType": "operation"
+    },
+    {
+      "id": "ab872ea662a9fec88e4c2a77",
+      "kind": "function",
+      "name": "handleRequest",
+      "parentId": "04e87a30c50231490384064d",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "handleRequest(val: number): string",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "packages/app/src/index.ts",
+      "source": {
+        "path": "packages/app/src/index.ts",
+        "symbol": "handleRequest",
+        "start": 60,
+        "end": 232,
+        "line": 3,
+        "hash": "c06aebbd8062387069c494df131c2688687c04152a89f84eaf36d87b73f77f93",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": []
+    },
+    {
+      "id": "d782a9018a4192777986f6f7",
+      "kind": "step",
+      "name": "return input * 2;",
+      "parentId": "650060b1359050139002fe29",
+      "description": "return input * 2;",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "packages/core/src/service.ts",
+        "start": 140,
+        "end": 157,
+        "line": 8,
+        "hash": "4c230661fcbb381babccb7bef9c4f1e96af02f5603e9e24dfa1f38064f2bea1c",
+        "revision": "c284869bb64f9c2f5eb82c631177ec67652bd273f803037ca8fb902135a85830"
+      },
+      "fields": [],
+      "stepType": "return"
+    },
+    {
+      "id": "project",
+      "kind": "system",
+      "name": "typescript-config",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "fields": []
+    }
+  ],
+  "edges": [
+    {
+      "id": "1782da79b977bc82bb06cba4",
+      "source": "6f04631edc534d11b2baf821",
+      "target": "5f66a6d45d256568b8e1db64",
+      "kind": "next",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "1c18d38d0b57d297e7866b14",
+      "source": "ab872ea662a9fec88e4c2a77",
+      "target": "650060b1359050139002fe29",
+      "kind": "calls",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "8777fbdfef81593dc215dc38",
+      "source": "04e87a30c50231490384064d",
+      "target": "60fd0793c350e920afbe67f0",
+      "kind": "depends-on",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "a7af19f5d174e9c77bf3f947",
+      "source": "ab872ea662a9fec88e4c2a77",
+      "target": "681941c7252047e33d41c79f",
+      "kind": "calls",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "ad16ae4d0e55b1a3cbfe9e74",
+      "source": "5f66a6d45d256568b8e1db64",
+      "target": "1c8796ced62c57616dcdf62d",
+      "kind": "next",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "e787445187d0eafba9052c00",
+      "source": "ab872ea662a9fec88e4c2a77",
+      "target": "6a8f8ff32b00f7c8ca32e507",
+      "kind": "calls",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    }
+  ],
+  "requirements": []
+}

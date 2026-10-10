@@ -1,0 +1,614 @@
+{
+  "schemaVersion": 1,
+  "nodes": [
+    {
+      "id": "1d9b2b59887e87dc7da120ab",
+      "kind": "module",
+      "name": "schema.prisma",
+      "parentId": "project",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "schema.prisma",
+      "source": {
+        "path": "schema.prisma",
+        "start": 0,
+        "end": 292,
+        "line": 1,
+        "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": []
+    },
+    {
+      "id": "1f272ce813efa877eca32d8d",
+      "kind": "function",
+      "name": "checkStock",
+      "parentId": "fff41cb3bc736e320b537a05",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "checkStock(items: string[]): boolean",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "orders.ts",
+      "source": {
+        "path": "orders.ts",
+        "symbol": "checkStock",
+        "start": 53,
+        "end": 134,
+        "line": 2,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": []
+    },
+    {
+      "id": "201a5f72b4af0d2e7b3cdbef",
+      "kind": "entity",
+      "name": "User",
+      "parentId": "1d9b2b59887e87dc7da120ab",
+      "description": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "[{\"name\":\"id\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"id\",\"kind\":\"field\"},{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"function\",\"name\":\"autoincrement\"}}]}]},{\"name\":\"email\",\"fieldType\":\"String\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"unique\",\"kind\":\"field\"}]},{\"name\":\"orders\",\"fieldType\":\"Order\",\"optional\":false,\"array\":true}]",
+      "requiredChecks": [],
+      "instructions": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "outputPath": "schema.prisma",
+      "source": {
+        "path": "schema.prisma",
+        "symbol": "User",
+        "start": 40,
+        "end": 133,
+        "line": 4,
+        "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [
+        {
+          "name": "id",
+          "type": "Int",
+          "key": "PK",
+          "optional": false,
+          "defaultValue": "autoincrement()",
+          "source": {
+            "path": "schema.prisma",
+            "symbol": "User.id",
+            "start": 55,
+            "end": 91,
+            "line": 5,
+            "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+            "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+          }
+        },
+        {
+          "name": "email",
+          "type": "String",
+          "key": "UNIQUE",
+          "optional": false,
+          "source": {
+            "path": "schema.prisma",
+            "symbol": "User.email",
+            "start": 94,
+            "end": 114,
+            "line": 6,
+            "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+            "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+          }
+        },
+        {
+          "name": "orders",
+          "type": "Order[]",
+          "key": "RELATION",
+          "optional": false,
+          "source": {
+            "path": "schema.prisma",
+            "symbol": "User.orders",
+            "start": 117,
+            "end": 131,
+            "line": 7,
+            "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+            "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+          }
+        }
+      ]
+    },
+    {
+      "id": "4017f10ca6d79dc40c699c63",
+      "kind": "step",
+      "name": "throw new Error(\"Insufficient stock\");",
+      "parentId": "922cee99b006268ed954cd83",
+      "description": "throw new Error(\"Insufficient stock\");",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "orders.ts",
+        "start": 311,
+        "end": 349,
+        "line": 5,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [],
+      "stepType": "throw"
+    },
+    {
+      "id": "483eaacab70d39f81469382e",
+      "kind": "step",
+      "name": "return { id: userId, total: items.length * 10 };",
+      "parentId": "922cee99b006268ed954cd83",
+      "description": "return { id: userId, total: items.length * 10 };",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "orders.ts",
+        "start": 405,
+        "end": 453,
+        "line": 7,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [],
+      "stepType": "return"
+    },
+    {
+      "id": "577e82fb62b6e59bba78f6b5",
+      "kind": "function",
+      "name": "Error",
+      "parentId": "external",
+      "description": "Resolved declaration outside imported source.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "fields": []
+    },
+    {
+      "id": "5f2c076e05c4b1a92fbe7cc7",
+      "kind": "entity",
+      "name": "Order",
+      "parentId": "1d9b2b59887e87dc7da120ab",
+      "description": "Database name: orders · Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "[{\"name\":\"id\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"id\",\"kind\":\"field\"},{\"type\":\"attribute\",\"name\":\"default\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"function\",\"name\":\"autoincrement\"}}]}]},{\"name\":\"userId\",\"fieldType\":\"Int\",\"optional\":false,\"array\":false},{\"name\":\"total\",\"fieldType\":\"Float\",\"optional\":false,\"array\":false},{\"name\":\"user\",\"fieldType\":\"User\",\"optional\":false,\"array\":false,\"attributes\":[{\"type\":\"attribute\",\"name\":\"relation\",\"kind\":\"field\",\"args\":[{\"type\":\"attributeArgument\",\"value\":{\"type\":\"keyValue\",\"key\":\"fields\",\"value\":{\"type\":\"array\",\"args\":[\"userId\"]}}},{\"type\":\"attributeArgument\",\"value\":{\"type\":\"keyValue\",\"key\":\"references\",\"value\":{\"type\":\"array\",\"args\":[\"id\"]}}}]}]},{\"name\":\"map\",\"args\":[{\"type\":\"attributeArgument\",\"value\":\"\\\"orders\\\"\"}]}]",
+      "requiredChecks": [],
+      "instructions": "Schema-derived definition; database state is unverified. Verifying an actual database requires a later, explicit introspection connection.",
+      "outputPath": "schema.prisma",
+      "source": {
+        "path": "schema.prisma",
+        "symbol": "Order",
+        "start": 134,
+        "end": 291,
+        "line": 9,
+        "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [
+        {
+          "name": "id",
+          "type": "Int",
+          "key": "PK",
+          "optional": false,
+          "defaultValue": "autoincrement()",
+          "source": {
+            "path": "schema.prisma",
+            "symbol": "Order.id",
+            "start": 150,
+            "end": 186,
+            "line": 10,
+            "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+            "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+          }
+        },
+        {
+          "name": "userId",
+          "type": "Int",
+          "key": "FK",
+          "optional": false,
+          "source": {
+            "path": "schema.prisma",
+            "symbol": "Order.userId",
+            "start": 189,
+            "end": 199,
+            "line": 11,
+            "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+            "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+          }
+        },
+        {
+          "name": "total",
+          "type": "Float",
+          "key": "",
+          "optional": false,
+          "source": {
+            "path": "schema.prisma",
+            "symbol": "Order.total",
+            "start": 202,
+            "end": 213,
+            "line": 12,
+            "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+            "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+          }
+        },
+        {
+          "name": "user",
+          "type": "User",
+          "key": "RELATION",
+          "optional": false,
+          "source": {
+            "path": "schema.prisma",
+            "symbol": "Order.user",
+            "start": 216,
+            "end": 271,
+            "line": 13,
+            "hash": "0276470abe323699560da86f3316cfe88ee0f13e59024d8cf6c109ad73e18f5f",
+            "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+          }
+        }
+      ],
+      "mappedName": "orders"
+    },
+    {
+      "id": "7720fc1848c07d01616296f6",
+      "kind": "function",
+      "name": "console.log",
+      "parentId": "external",
+      "description": "Resolved declaration outside imported source.",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "fields": []
+    },
+    {
+      "id": "8b7f5201044da3fb7ba57543",
+      "kind": "step",
+      "name": "items.length === 0",
+      "parentId": "922cee99b006268ed954cd83",
+      "description": "if (items.length === 0) { throw new Error(\"Cart is empty\"); }",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "orders.ts",
+        "start": 221,
+        "end": 282,
+        "line": 4,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [],
+      "stepType": "condition"
+    },
+    {
+      "id": "922cee99b006268ed954cd83",
+      "kind": "function",
+      "name": "placeOrder",
+      "parentId": "fff41cb3bc736e320b537a05",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "placeOrder(userId: string, items: string[]): Promise<Order>",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "orders.ts",
+      "source": {
+        "path": "orders.ts",
+        "symbol": "placeOrder",
+        "start": 135,
+        "end": 455,
+        "line": 3,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": []
+    },
+    {
+      "id": "a1d2069807f46d16ddef7f7c",
+      "kind": "step",
+      "name": "!checkStock(items)",
+      "parentId": "922cee99b006268ed954cd83",
+      "description": "if (!checkStock(items)) { throw new Error(\"Insufficient stock\"); }",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "orders.ts",
+        "start": 285,
+        "end": 351,
+        "line": 5,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [],
+      "stepType": "condition"
+    },
+    {
+      "id": "d5689caeec738ce215679ab9",
+      "kind": "step",
+      "name": "console.log(item);",
+      "parentId": "922cee99b006268ed954cd83",
+      "description": "console.log(item);",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "orders.ts",
+        "start": 382,
+        "end": 400,
+        "line": 6,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [],
+      "stepType": "call"
+    },
+    {
+      "id": "e989a66cafab72ac7ce3b4ab",
+      "kind": "step",
+      "name": "throw new Error(\"Cart is empty\");",
+      "parentId": "922cee99b006268ed954cd83",
+      "description": "throw new Error(\"Cart is empty\");",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "orders.ts",
+        "start": 247,
+        "end": 280,
+        "line": 4,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [],
+      "stepType": "throw"
+    },
+    {
+      "id": "external",
+      "kind": "system",
+      "name": "External / unresolved",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "fields": []
+    },
+    {
+      "id": "f697d677bd22d37a3c455a30",
+      "kind": "step",
+      "name": "return items.length > 0;",
+      "parentId": "1f272ce813efa877eca32d8d",
+      "description": "return items.length > 0;",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "orders.ts",
+        "start": 108,
+        "end": 132,
+        "line": 2,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [],
+      "stepType": "return"
+    },
+    {
+      "id": "fb534cde07ed2e1ccfda3bb9",
+      "kind": "interface",
+      "name": "Order",
+      "parentId": "fff41cb3bc736e320b537a05",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "id: string; total: number",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "orders.ts",
+      "source": {
+        "path": "orders.ts",
+        "symbol": "Order",
+        "start": 0,
+        "end": 52,
+        "line": 1,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": []
+    },
+    {
+      "id": "fc9242c0bb6bfecfa2886c12",
+      "kind": "step",
+      "name": "for (const item of items) { console.log(item); }",
+      "parentId": "922cee99b006268ed954cd83",
+      "description": "for (const item of items) { console.log(item); }",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "source": {
+        "path": "orders.ts",
+        "start": 354,
+        "end": 402,
+        "line": 6,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": [],
+      "stepType": "loop"
+    },
+    {
+      "id": "fff41cb3bc736e320b537a05",
+      "kind": "module",
+      "name": "orders.ts",
+      "parentId": "project",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "orders.ts",
+      "source": {
+        "path": "orders.ts",
+        "start": 0,
+        "end": 456,
+        "line": 1,
+        "hash": "476a5a70adc29d5c8098ddb4704720df7fa7c1337511c5c490627e920caf1790",
+        "revision": "586a8dc2fa093661cfe0b84f2154e2d7fe36031ad214aa612545d35c5b74c85d"
+      },
+      "fields": []
+    },
+    {
+      "id": "project",
+      "kind": "system",
+      "name": "shop",
+      "description": "",
+      "provenance": "extracted",
+      "policy": "editable",
+      "contract": "",
+      "requiredChecks": [],
+      "instructions": "",
+      "outputPath": "",
+      "fields": []
+    }
+  ],
+  "edges": [
+    {
+      "id": "30d3cce9de4ab26cc2d5bb4a",
+      "source": "a1d2069807f46d16ddef7f7c",
+      "target": "fc9242c0bb6bfecfa2886c12",
+      "kind": "false",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "35cb72a97ca0d2f67c3cea28",
+      "source": "fc9242c0bb6bfecfa2886c12",
+      "target": "d5689caeec738ce215679ab9",
+      "kind": "true",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "38e46d258e8af63dd5747222",
+      "source": "a1d2069807f46d16ddef7f7c",
+      "target": "4017f10ca6d79dc40c699c63",
+      "kind": "true",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "3b0475f0d570c256045faa3d",
+      "source": "8b7f5201044da3fb7ba57543",
+      "target": "e989a66cafab72ac7ce3b4ab",
+      "kind": "true",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "42a20d2741e27e57a410e1bd",
+      "source": "8b7f5201044da3fb7ba57543",
+      "target": "a1d2069807f46d16ddef7f7c",
+      "kind": "false",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "589bcb9d77607be7bee95320",
+      "source": "fc9242c0bb6bfecfa2886c12",
+      "target": "483eaacab70d39f81469382e",
+      "kind": "false",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "6d256015e978dc0f49f59768",
+      "source": "922cee99b006268ed954cd83",
+      "target": "577e82fb62b6e59bba78f6b5",
+      "kind": "calls",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "6d2f14f645f37aca64985369",
+      "source": "d5689caeec738ce215679ab9",
+      "target": "fc9242c0bb6bfecfa2886c12",
+      "kind": "next",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "7d0d251ec1ffa6af3556e377",
+      "source": "5f2c076e05c4b1a92fbe7cc7",
+      "target": "201a5f72b4af0d2e7b3cdbef",
+      "kind": "relates-to",
+      "label": "many → one · userId",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "c6cbab9803edeaf8ff8c84c2",
+      "source": "922cee99b006268ed954cd83",
+      "target": "1f272ce813efa877eca32d8d",
+      "kind": "calls",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    },
+    {
+      "id": "e28924e180074cf6fab64d1a",
+      "source": "922cee99b006268ed954cd83",
+      "target": "7720fc1848c07d01616296f6",
+      "kind": "calls",
+      "label": "",
+      "provenance": "extracted",
+      "uncertain": false
+    }
+  ],
+  "requirements": []
+}

@@ -3356,3 +3356,307 @@ it('associates findings with source revisions and explicit analysis status acros
  expect(formatted).toContain(`- **File Coverage**: 4 / 5 (80%)`);
  expect(formatted).toContain(`> **Notice**: ${BEHAVIORAL_LIMIT_STATEMENT}`);
 });
+
+export function assertGraphMatchesExpected(actual: import('../shared/model').Graph, expected: import('../shared/model').Graph): void {
+ expect(actual.schemaVersion).toBe(expected.schemaVersion);
+ expect(GraphSchema.safeParse(actual).success).toBe(true);
+ expect(GraphSchema.safeParse(expected).success).toBe(true);
+
+ // 1. Verify node count and full node inventory (kind, name, parentId, contract, fields, stepType, source evidence)
+ expect(actual.nodes.length).toBe(expected.nodes.length);
+ const expectedNodeMap = new Map(expected.nodes.map(n => [n.id, n]));
+ for (const actualNode of actual.nodes) {
+  const expectedNode = expectedNodeMap.get(actualNode.id);
+  expect(expectedNode, `Missing expected node with ID ${actualNode.id} (${actualNode.name})`).toBeDefined();
+  expect(actualNode).toEqual(expectedNode);
+ }
+
+ // 2. Verify edge count and full edge inventory (source, target, kind, label, provenance, uncertainty)
+ expect(actual.edges.length).toBe(expected.edges.length);
+ const expectedEdgeMap = new Map(expected.edges.map(e => [e.id, e]));
+ for (const actualEdge of actual.edges) {
+  const expectedEdge = expectedEdgeMap.get(actualEdge.id);
+  expect(expectedEdge, `Missing expected edge with ID ${actualEdge.id} (${actualEdge.kind}: ${actualEdge.source} -> ${actualEdge.target})`).toBeDefined();
+  expect(actualEdge).toEqual(expectedEdge);
+ }
+
+ // 3. Verify requirements
+ expect(actual.requirements).toEqual(expected.requirements);
+
+ // 4. Complete graph deep equivalence
+ expect(actual).toEqual(expected);
+}
+
+export function assertAnalysisMatchesExpected(
+ actual: import('../shared/model').Analysis,
+ expected: {
+  status: import('../shared/model').Analysis['status'];
+  quality: import('../shared/model').Quality;
+  graph: import('../shared/model').Graph;
+  revision?: string;
+ }
+): void {
+ // Documented nondeterministic metadata excluded:
+ // - actual.analyzedAt is not compared against a hardcoded timestamp
+ // - actual.durationMs is not compared against a hardcoded duration
+ // - actual.sequence is not compared against a hardcoded sequence counter
+ expect(typeof actual.analyzedAt).toBe('string');
+ expect(Date.parse(actual.analyzedAt)).not.toBeNaN();
+ expect(actual.durationMs).toBeGreaterThanOrEqual(0);
+ expect(actual.sequence).toBeGreaterThanOrEqual(1);
+
+ // Deterministic metadata verified:
+ expect(actual.status).toBe(expected.status);
+ if (expected.revision !== undefined) {
+  expect(actual.revision).toBe(expected.revision);
+ }
+ expect(actual.quality.eligibleFiles).toBe(expected.quality.eligibleFiles);
+ expect(actual.quality.analyzedFiles).toBe(expected.quality.analyzedFiles);
+ expect(actual.quality.unresolvedReferences).toBe(expected.quality.unresolvedReferences);
+ expect(actual.quality.unsupportedConstructs).toBe(expected.quality.unsupportedConstructs);
+ expect(actual.quality.inferredItems).toBe(expected.quality.inferredItems);
+ expect(actual.quality.prismaValidation).toBe(expected.quality.prismaValidation);
+ expect(actual.quality.diagnostics).toEqual(expected.quality.diagnostics);
+
+ // Graph verified in full
+ assertGraphMatchesExpected(actual.graph, expected.graph);
+}
+
+it('runs full imports across all known fixtures and strictly matches expected graphs (T047 concrete scenario 1, AC 1-3 & R31, R42)', async () => {
+ const allFixtures = [
+  { name: 'shop', path: resolve('examples/shop'), expected: resolve('tests/fixtures/shop.expected.json') },
+  { name: 'typescript-structure', path: resolve('tests/fixtures/typescript-structure'), expected: resolve('tests/fixtures/typescript-structure.expected.json') },
+  { name: 'typescript-workflows', path: resolve('tests/fixtures/typescript-workflows'), expected: resolve('tests/fixtures/typescript-workflows.expected.json') },
+  { name: 'typescript-config', path: resolve('tests/fixtures/typescript-config'), expected: resolve('tests/fixtures/typescript-config.expected.json') },
+  { name: 'typescript-contracts', path: resolve('tests/fixtures/typescript-contracts'), expected: resolve('tests/fixtures/typescript-contracts.expected.json') },
+  { name: 'typescript-relationships', path: resolve('tests/fixtures/typescript-relationships'), expected: resolve('tests/fixtures/typescript-relationships.expected.json') },
+  { name: 'unsupported', path: resolve('tests/fixtures/unsupported'), expected: resolve('tests/fixtures/unsupported.expected.json') },
+  { name: 'prisma-fields', path: resolve('tests/fixtures/prisma-fields'), expected: resolve('tests/fixtures/prisma-fields.expected.json') },
+  { name: 'prisma-keys', path: resolve('tests/fixtures/prisma-keys'), expected: resolve('tests/fixtures/prisma-keys.expected.json') },
+  { name: 'prisma-relations', path: resolve('tests/fixtures/prisma-relations'), expected: resolve('tests/fixtures/prisma-relations.expected.json') },
+  { name: 'prisma-parser', path: resolve('tests/fixtures/prisma-parser'), expected: resolve('tests/fixtures/prisma-parser.expected.json') },
+  { name: 'import-quality', path: resolve('tests/fixtures/import-quality'), expected: resolve('tests/fixtures/import-quality.expected.json') },
+ ];
+
+ const analyzer = new Analyzer();
+ for (const fixture of allFixtures) {
+  const actual = await analyzer.analyze(fixture.path);
+  const expectedRaw = await readFile(fixture.expected, 'utf8');
+  const expectedGraph = JSON.parse(expectedRaw);
+
+  // AC 1: Expected graphs verify nodes, edges, contracts, and evidence.
+  assertGraphMatchesExpected(actual.graph, expectedGraph);
+
+  // Assert node contracts and source evidence exist
+  for (const node of actual.graph.nodes) {
+   expect(node.id.length).toBeGreaterThan(0);
+   expect(node.provenance).toBe('extracted');
+   if (node.source) {
+    expect(node.source.path.length).toBeGreaterThan(0);
+    expect(node.source.hash.length).toBeGreaterThan(0);
+    expect(node.source.revision.length).toBeGreaterThan(0);
+    expect(node.source.line).toBeGreaterThanOrEqual(1);
+    expect(node.source.end).toBeGreaterThanOrEqual(node.source.start);
+   }
+  }
+
+  // Assert edge endpoints and types
+  for (const edge of actual.graph.edges) {
+   expect(actual.graph.nodes.some(n => n.id === edge.source)).toBe(true);
+   expect(actual.graph.nodes.some(n => n.id === edge.target)).toBe(true);
+   expect(edge.provenance).toBe('extracted');
+  }
+ }
+});
+
+it('verifies incomplete-analysis fixtures and documents intentionally absent evidence (T047 AC 2 & checklist item 4)', async () => {
+ const analyzer = new Analyzer();
+
+ // 1. import-quality fixture covers TypeScript structure, Prisma relations, unsupported constructs, and unresolved references
+ const importQuality = await analyzer.analyze(resolve('tests/fixtures/import-quality'));
+ const expectedImportQualityRaw = await readFile(resolve('tests/fixtures/import-quality.expected.json'), 'utf8');
+ const expectedImportQuality = JSON.parse(expectedImportQualityRaw);
+
+ expect(importQuality.status).toBe('partial'); // Incomplete analysis status
+ expect(importQuality.quality.unresolvedReferences).toBe(1);
+ expect(importQuality.quality.unsupportedConstructs).toBe(2);
+ expect(importQuality.quality.diagnostics.length).toBeGreaterThanOrEqual(2);
+
+ // Diagnostics verify unresolved module and Prisma parser errors
+ expect(importQuality.quality.diagnostics).toContainEqual(
+  expect.objectContaining({
+   severity: 'error',
+   code: '2307', // Cannot find module './absent-module'
+  })
+ );
+ expect(importQuality.quality.diagnostics).toContainEqual(
+  expect.objectContaining({
+   severity: 'error',
+   code: 'prisma-parse-error',
+  })
+ );
+
+ // Verify graph matches expected graph
+ assertGraphMatchesExpected(importQuality.graph, expectedImportQuality);
+
+ // Intentionally absent evidence documentation & verification:
+ // a) Callee source binding for absent-module is absent because the module does not exist in captured files.
+ const unresolvedCallStep = importQuality.graph.nodes.find(n => n.name === 'target.perform();')!;
+ expect(unresolvedCallStep).toBeDefined();
+ expect(unresolvedCallStep.stepType).toBe('opaque');
+ // Target module does not have a module node or resolved symbol in the graph
+ expect(importQuality.graph.nodes.some(n => n.name.includes('absent-module'))).toBe(false);
+
+ // b) Dynamic code evaluated by eval(code) has no discrete child AST nodes (statements, loops, returns);
+ // the internal structure is intentionally absent and preserved as an opaque node with source evidence.
+ const evalStep = importQuality.graph.nodes.find(n => n.name === 'eval(code);')!;
+ expect(evalStep).toBeDefined();
+ expect(evalStep.stepType).toBe('opaque');
+ expect(evalStep.source).toBeDefined();
+ expect(evalStep.source?.path).toBe('src/opaque.ts');
+ const evalChildren = importQuality.graph.nodes.filter(n => n.parentId === evalStep.id);
+ expect(evalChildren).toEqual([]); // No child steps
+
+ // c) Model 'InvalidSyntax' from prisma/invalid.prisma is intentionally absent from the graph due to syntax error
+ expect(importQuality.graph.nodes.some(n => n.name === 'InvalidSyntax')).toBe(false);
+
+ // 2. unsupported fixture covers dynamic execution (eval, Function, dynamic dispatch, complex switch)
+ const unsupported = await analyzer.analyze(resolve('tests/fixtures/unsupported'));
+ expect(unsupported.status).toBe('partial');
+ expect(unsupported.quality.unsupportedConstructs).toBe(4);
+ const expectedUnsupportedRaw = await readFile(resolve('tests/fixtures/unsupported.expected.json'), 'utf8');
+ const expectedUnsupported = JSON.parse(expectedUnsupportedRaw);
+ assertGraphMatchesExpected(unsupported.graph, expectedUnsupported);
+});
+
+it('deliberately perturbs graph edges and confirms expected-graph assertions detect each change (T047 concrete scenario 2 & AC 1)', async () => {
+ const fixtureDir = resolve('examples/shop');
+ const expectedPath = resolve('tests/fixtures/shop.expected.json');
+ const analyzer = new Analyzer();
+ const actual = await analyzer.analyze(fixtureDir);
+ const expectedRaw = await readFile(expectedPath, 'utf8');
+ const expected = JSON.parse(expectedRaw);
+
+ // Baseline passes cleanly
+ expect(() => assertGraphMatchesExpected(actual.graph, expected)).not.toThrow();
+
+ // 1. Perturb edge target (points to wrong node)
+ const perturbedTargetGraph = JSON.parse(JSON.stringify(actual.graph));
+ const targetEdge = perturbedTargetGraph.edges.find((e: any) => e.kind === 'relates-to')!;
+ const originalTarget = targetEdge.target;
+ targetEdge.target = 'non-existent-target-id';
+ expect(() => assertGraphMatchesExpected(perturbedTargetGraph, expected)).toThrow();
+ targetEdge.target = originalTarget; // restore
+
+ // 2. Perturb edge source (originates from wrong node)
+ const perturbedSourceGraph = JSON.parse(JSON.stringify(actual.graph));
+ const sourceEdge = perturbedSourceGraph.edges.find((e: any) => e.kind === 'calls')!;
+ const originalSource = sourceEdge.source;
+ sourceEdge.source = 'different-source-id';
+ expect(() => assertGraphMatchesExpected(perturbedSourceGraph, expected)).toThrow();
+ sourceEdge.source = originalSource; // restore
+
+ // 3. Perturb edge kind (e.g., change 'calls' to 'relates-to')
+ const perturbedKindGraph = JSON.parse(JSON.stringify(actual.graph));
+ const kindEdge = perturbedKindGraph.edges.find((e: any) => e.kind === 'calls')!;
+ const originalKind = kindEdge.kind;
+ kindEdge.kind = 'relates-to';
+ expect(() => assertGraphMatchesExpected(perturbedKindGraph, expected)).toThrow();
+ kindEdge.kind = originalKind; // restore
+
+ // 4. Perturb edge label (e.g., cardinality/field mismatch)
+ const perturbedLabelGraph = JSON.parse(JSON.stringify(actual.graph));
+ const labelEdge = perturbedLabelGraph.edges.find((e: any) => e.kind === 'relates-to')!;
+ const originalLabel = labelEdge.label;
+ labelEdge.label = 'one → one · userId'; // was 'many → one · userId'
+ expect(() => assertGraphMatchesExpected(perturbedLabelGraph, expected)).toThrow();
+ labelEdge.label = originalLabel; // restore
+
+ // 5. Perturb edge uncertainty flag (flip false to true)
+ const perturbedUncertainGraph = JSON.parse(JSON.stringify(actual.graph));
+ const uncertainEdge = perturbedUncertainGraph.edges.find((e: any) => e.kind === 'calls')!;
+ const originalUncertain = uncertainEdge.uncertain;
+ uncertainEdge.uncertain = true;
+ expect(() => assertGraphMatchesExpected(perturbedUncertainGraph, expected)).toThrow();
+ uncertainEdge.uncertain = originalUncertain; // restore
+
+ // 6. Perturb by deleting an edge
+ const deletedEdgeGraph = JSON.parse(JSON.stringify(actual.graph));
+ deletedEdgeGraph.edges.pop();
+ expect(() => assertGraphMatchesExpected(deletedEdgeGraph, expected)).toThrow();
+
+ // 7. Perturb by inserting an extra phantom edge
+ const extraEdgeGraph = JSON.parse(JSON.stringify(actual.graph));
+ extraEdgeGraph.edges.push({
+  id: 'phantom-edge-id',
+  source: actual.graph.nodes[0].id,
+  target: actual.graph.nodes[1].id,
+  kind: 'depends-on',
+  label: 'phantom',
+  provenance: 'extracted',
+  uncertain: false,
+ });
+ expect(() => assertGraphMatchesExpected(extraEdgeGraph, expected)).toThrow();
+
+ // 8. Perturb node contract
+ const perturbedContractGraph = JSON.parse(JSON.stringify(actual.graph));
+ const fnNode = perturbedContractGraph.nodes.find((n: any) => n.name === 'checkStock')!;
+ fnNode.contract = 'checkStock(items: string[]): string'; // changed return type boolean to string
+ expect(() => assertGraphMatchesExpected(perturbedContractGraph, expected)).toThrow();
+
+ // 9. Perturb source evidence line number
+ const perturbedEvidenceGraph = JSON.parse(JSON.stringify(actual.graph));
+ const srcNode = perturbedEvidenceGraph.nodes.find((n: any) => n.name === 'placeOrder')!;
+ srcNode.source.line = 999;
+ expect(() => assertGraphMatchesExpected(perturbedEvidenceGraph, expected)).toThrow();
+});
+
+it('compares full analysis snapshots while excluding only documented nondeterministic metadata (T047 AC 3)', async () => {
+ const analyzer = new Analyzer();
+ const fixtureDir = resolve('examples/shop');
+ const actual1 = await analyzer.analyze(fixtureDir);
+ const actual2 = await analyzer.analyze(fixtureDir);
+
+ // Baseline analysis expected specification
+ const expectedBaseline = {
+  status: actual1.status,
+  revision: actual1.revision,
+  quality: actual1.quality,
+  graph: actual1.graph,
+ };
+
+ // 1. Fresh analysis run matches baseline when excluding documented nondeterministic metadata
+ // (actual2 has different analyzedAt, durationMs, and sequence, but matches status, quality, and graph)
+ expect(actual2.analyzedAt).toBeDefined();
+ expect(actual2.durationMs).toBeGreaterThanOrEqual(0);
+ expect(actual2.sequence).toBeGreaterThan(actual1.sequence);
+ assertAnalysisMatchesExpected(actual2, expectedBaseline);
+
+ // 2. Mutating deterministic metadata causes assertion to fail:
+ // a) status mismatch
+ expect(() =>
+  assertAnalysisMatchesExpected(actual2, {
+   ...expectedBaseline,
+   status: 'stale',
+  })
+ ).toThrow();
+
+ // b) quality diagnostic mismatch
+ expect(() =>
+  assertAnalysisMatchesExpected(actual2, {
+   ...expectedBaseline,
+   quality: {
+    ...expectedBaseline.quality,
+    unresolvedReferences: 99,
+   },
+  })
+ ).toThrow();
+
+ // c) revision mismatch
+ expect(() =>
+  assertAnalysisMatchesExpected(actual2, {
+   ...expectedBaseline,
+   revision: 'tampered-revision-hash',
+  })
+ ).toThrow();
+});
