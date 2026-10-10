@@ -503,7 +503,7 @@ export class Analyzer {
   const nodes=new Map<string,ProgramNode>();const edges=new Map<string,ProgramEdge>();
   const rootId='project';
   nodes.set(rootId,NodeSchema.parse({id:rootId,kind:'system',name:basename(root),provenance:'extracted'}));
-  const source=(path:string,startOffset:number,end:number,symbol?:string):Source=>({path,symbol,start:startOffset,end,line:files[path].text.slice(0,startOffset).split('\n').length,hash:files[path].hash,revision});
+  const source=(path:string,startOffset:number,end:number,symbol?:string):Source=>(symbol!==undefined?{path,symbol,start:startOffset,end,line:files[path].text.slice(0,startOffset).split('\n').length,hash:files[path].hash,revision}:{path,start:startOffset,end,line:files[path].text.slice(0,startOffset).split('\n').length,hash:files[path].hash,revision});
   const addEdge=(from:string,to:string,kind:ProgramEdge['kind'],label='',uncertain=false)=>{
    const id=idFor(from+':'+kind+':'+to+':'+label);
    edges.set(id,{id,source:from,target:to,kind,label,provenance:'extracted',uncertain});
@@ -659,23 +659,46 @@ export class Analyzer {
    }
    function visit(n:ts.Node,parentId:string,qualified:string){
     let id:string|undefined;let name:string|undefined;let kind:ProgramNode['kind']|undefined;let contract='';
+    let enumFields:{name:string;type:string}[]=[];
     if(ts.isClassDeclaration(n)||ts.isInterfaceDeclaration(n)||ts.isTypeAliasDeclaration(n)){
      name=n.name?.text||'default';kind=ts.isClassDeclaration(n)?'class':'interface';contract=shape(n);
      if(ts.isTypeAliasDeclaration(n))contract=checker.typeToString(checker.getTypeAtLocation(n),n,flags|ts.TypeFormatFlags.InTypeAlias);
-    }else if(ts.isFunctionDeclaration(n)||ts.isMethodDeclaration(n)||ts.isConstructorDeclaration(n)||ts.isGetAccessorDeclaration(n)||ts.isSetAccessorDeclaration(n)){
+    }else if(ts.isEnumDeclaration(n)){
+     name=n.name.text;kind='enum';contract='enum '+name+' { '+n.members.map(m=>m.getText(sf)).join(', ')+' }';
+     enumFields=n.members.map(m=>({name:m.name.getText(sf),type:'enum'}));
+    }else if(ts.isModuleDeclaration(n)&&n.name){
+     name=n.name.text;kind='module';contract='namespace '+name;
+    }else if(ts.isFunctionDeclaration(n)||ts.isMethodDeclaration(n)||ts.isMethodSignature(n)||ts.isConstructorDeclaration(n)||ts.isGetAccessorDeclaration(n)||ts.isSetAccessorDeclaration(n)){
      name=ts.isConstructorDeclaration(n)?'constructor':n.name?.getText(sf)||'default';
      kind='function';contract=functionContract(n,name);
-    }else if(ts.isVariableDeclaration(n)&&n.initializer&&(ts.isArrowFunction(n.initializer)||ts.isFunctionExpression(n.initializer))){
+    }else if((ts.isVariableDeclaration(n)||ts.isPropertyDeclaration(n))&&n.initializer&&(ts.isArrowFunction(n.initializer)||ts.isFunctionExpression(n.initializer))){
      name=n.name.getText(sf);kind='function';contract=functionContract(n.initializer,name);
+    }else if((ts.isVariableDeclaration(n)||ts.isPropertyDeclaration(n))&&n.initializer&&(ts.isClassDeclaration(n.initializer)||ts.isClassExpression(n.initializer))){
+     name=n.name.getText(sf);kind='class';contract=shape(n.initializer);
+    }else if(ts.isExportAssignment(n)){
+     if(ts.isArrowFunction(n.expression)||ts.isFunctionExpression(n.expression)){
+      name='default';kind='function';contract=functionContract(n.expression,name);
+     }else if(ts.isClassExpression(n.expression)){
+      name=n.expression.name?.text||'default';kind='class';contract=shape(n.expression);
+     }
     }
     if(kind&&name){
      const symbolName=qualified?qualified+'.'+name:name;id=idFor(path+':'+kind+':'+symbolName);
      const previous=nodes.get(id);
      const src=source(path,previous?.source?Math.min(previous.source.start,n.getStart(sf)):n.getStart(sf),Math.max(previous?.source?.end||0,n.end),symbolName);
-     nodes.set(id,NodeSchema.parse({id,kind,name,parentId,provenance:'extracted',contract:previous?.contract&&previous.contract!==contract?previous.contract+'\n'+contract:contract,source:src,outputPath:path}));
+     const mergedContract=previous?.contract&&previous.contract!==contract
+      ?(previous.contract.split('\n').includes(contract)?previous.contract:previous.contract+'\n'+contract)
+      :contract;
+     const mergedFields=enumFields.length?enumFields:(previous?.fields||[]);
+     nodes.set(id,NodeSchema.parse({id,kind,name,parentId,provenance:'extracted',contract:mergedContract,fields:mergedFields,source:src,outputPath:path}));
      declarations.set(n,id);declarationKeys.set(makeKey(n),id);
-     if(ts.isVariableDeclaration(n)&&n.initializer){declarations.set(n.initializer,id);declarationKeys.set(makeKey(n.initializer),id);}
-     ts.forEachChild(n,child=>visit(child,id!,symbolName));
+     if((ts.isVariableDeclaration(n)||ts.isPropertyDeclaration(n))&&n.initializer){declarations.set(n.initializer,id);declarationKeys.set(makeKey(n.initializer),id);}
+     if(ts.isExportAssignment(n)&&n.expression){declarations.set(n.expression,id);declarationKeys.set(makeKey(n.expression),id);}
+     if(ts.isEnumDeclaration(n)){for(const m of n.members){declarations.set(m,id);declarationKeys.set(makeKey(m),id);}}
+     const targetNode=((ts.isVariableDeclaration(n)||ts.isPropertyDeclaration(n))&&n.initializer&&(ts.isClassDeclaration(n.initializer)||ts.isClassExpression(n.initializer)))
+      ?n.initializer
+      :(ts.isExportAssignment(n)&&ts.isClassExpression(n.expression)?n.expression:n);
+     ts.forEachChild(targetNode,child=>visit(child,id!,symbolName));
     }else ts.forEachChild(n,child=>visit(child,parentId,qualified));
    }
    visit(sf,mid,'');analyzed++;
@@ -692,7 +715,7 @@ export class Analyzer {
    };
    function walk(n:ts.Node,owner:string){
     const own=declarations.get(n);if(own)owner=own;
-    if(ts.isImportDeclaration(n)&&ts.isStringLiteral(n.moduleSpecifier)){
+    if((ts.isImportDeclaration(n)||ts.isExportDeclaration(n))&&n.moduleSpecifier&&ts.isStringLiteral(n.moduleSpecifier)){
      const currentHost = programHosts.get(program) || ts.sys;
      const resolved=ts.resolveModuleName(n.moduleSpecifier.text,sf.fileName,program.getCompilerOptions(),currentHost).resolvedModule;
      if(resolved&&fullPaths.has(resolve(resolved.resolvedFileName)))addEdge(mid,idFor('module:'+relative(root,resolved.resolvedFileName).replaceAll('\\','/')),'depends-on');
@@ -702,16 +725,28 @@ export class Analyzer {
      if(symbol&&(symbol.flags&ts.SymbolFlags.Alias))try{symbol=checker.getAliasedSymbol(symbol);}catch{}
      const decl=symbol?.valueDeclaration||symbol?.declarations?.[0];
      let target=decl?(declarations.get(decl)||declarationKeys.get(makeKey(decl))):undefined;
+     if(!target&&symbol?.declarations){
+      for(const d of symbol.declarations){
+       target=declarations.get(d)||declarationKeys.get(makeKey(d));
+       if(target)break;
+      }
+     }
      const uncertain=!decl;
      if(!target)target=external(n.expression,decl);
      if(uncertain){unresolved++;diagnostics.push({severity:'warning',message:'Unresolved call: '+n.expression.getText(sf),path,line:sf.getLineAndCharacterOfPosition(n.getStart()).line+1});}
      addEdge(owner,target,'calls','',uncertain);
     }
-    if(ts.isClassDeclaration(n)&&n.heritageClauses)for(const clause of n.heritageClauses)for(const t of clause.types){
+    if((ts.isClassDeclaration(n)||ts.isClassExpression(n)||ts.isInterfaceDeclaration(n))&&n.heritageClauses)for(const clause of n.heritageClauses)for(const t of clause.types){
      let sym=checker.getSymbolAtLocation(t.expression);
      if(sym&&(sym.flags&ts.SymbolFlags.Alias))sym=checker.getAliasedSymbol(sym);
      const decl=clause.token===ts.SyntaxKind.ExtendsKeyword?(sym?.valueDeclaration||sym?.declarations?.[0]):sym?.declarations?.[0];
-     const target=decl&&(declarations.get(decl)||declarationKeys.get(makeKey(decl)));
+     let target=decl&&(declarations.get(decl)||declarationKeys.get(makeKey(decl)));
+     if(!target&&sym?.declarations){
+      for(const d of sym.declarations){
+       target=declarations.get(d)||declarationKeys.get(makeKey(d));
+       if(target)break;
+      }
+     }
      if(target)addEdge(owner,target,clause.token===ts.SyntaxKind.ExtendsKeyword?'inherits':'implements');
     }
     ts.forEachChild(n,c=>walk(c,owner));
@@ -720,7 +755,8 @@ export class Analyzer {
    const occurrence=new Map<string,number>();
    function workflow(functionNode:ts.Node,owner:string){
     let body:ts.ConciseBody|undefined;
-    if(ts.isVariableDeclaration(functionNode)&&functionNode.initializer&&(ts.isArrowFunction(functionNode.initializer)||ts.isFunctionExpression(functionNode.initializer)))body=functionNode.initializer.body;
+    if((ts.isVariableDeclaration(functionNode)||ts.isPropertyDeclaration(functionNode))&&functionNode.initializer&&(ts.isArrowFunction(functionNode.initializer)||ts.isFunctionExpression(functionNode.initializer)))body=functionNode.initializer.body;
+    else if(ts.isExportAssignment(functionNode)&&functionNode.expression&&(ts.isArrowFunction(functionNode.expression)||ts.isFunctionExpression(functionNode.expression)))body=(functionNode.expression as ts.ArrowFunction|ts.FunctionExpression).body;
     else if(ts.isFunctionLike(functionNode)&&'body' in functionNode)body=(functionNode as ts.FunctionDeclaration).body;
     if(!body)return;
     type Exit={id:string;kind:ProgramEdge['kind']};

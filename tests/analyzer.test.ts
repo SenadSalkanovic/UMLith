@@ -2,9 +2,10 @@ import {it,expect} from 'vitest';
 import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN} from '../server/analyzer';
 import {GraphSchema,resolveSourceEvidence} from '../shared/model';
 import {hash,captureSourceRevision} from '../server/files';
-import {mkdtemp,writeFile,cp,rm,mkdir} from 'node:fs/promises';
+import {mkdtemp,writeFile,readFile,cp,rm,mkdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
+import {ProjectStore} from '../server/store';
 it('extracts source-backed symbols, calls, workflows and Prisma relationships',async()=>{
  const a=await new Analyzer().analyze(resolve('examples/shop'));
  expect(a.graph.schemaVersion).toBe(1);
@@ -634,5 +635,234 @@ it('labels unconfigured analysis when files are outside configured TypeScript pr
   expect(a.graph.nodes.some(n => n.name === 'outside')).toBe(true);
  } finally {
   await rm(dir, { recursive: true, force: true });
+ }
+});
+
+it('extracts TypeScript architecture declarations: named/default exports, overloads, arrow functions, nested classes, and methods (T034 concrete scenario 1)', async () => {
+ const fixtureDir = resolve('tests/fixtures/typescript-structure');
+ const analyzer = new Analyzer();
+ const analysis = await analyzer.analyze(fixtureDir);
+
+ // Schema validity and successful analysis
+ expect(analysis.graph.schemaVersion).toBe(1);
+ expect(GraphSchema.safeParse(analysis.graph).success).toBe(true);
+ expect(analysis.status).toBe('current');
+ expect(analysis.quality.diagnostics).toEqual([]);
+
+ const nodes = analysis.graph.nodes;
+ const edges = analysis.graph.edges;
+
+ // 1. Modules
+ const modelsMod = nodes.find(n => n.kind === 'module' && n.name === 'src/models.ts')!;
+ const serviceMod = nodes.find(n => n.kind === 'module' && n.name === 'src/service.ts')!;
+ const defaultFnMod = nodes.find(n => n.kind === 'module' && n.name === 'src/default-fn.ts')!;
+ const indexMod = nodes.find(n => n.kind === 'module' && n.name === 'src/index.ts')!;
+ expect(modelsMod).toBeDefined();
+ expect(serviceMod).toBeDefined();
+ expect(defaultFnMod).toBeDefined();
+ expect(indexMod).toBeDefined();
+
+ // 2. Enums and enum members (fields)
+ const priorityEnum = nodes.find(n => n.kind === 'enum' && n.name === 'Priority')!;
+ expect(priorityEnum).toBeDefined();
+ expect(priorityEnum.parentId).toBe(modelsMod.id);
+ expect(priorityEnum.fields.map(f => f.name)).toEqual(['Low', 'Medium', 'High']);
+ expect(priorityEnum.fields.every(f => f.type === 'enum')).toBe(true);
+
+ // 3. Interfaces and interface inheritance
+ const identifiable = nodes.find(n => n.kind === 'interface' && n.name === 'Identifiable')!;
+ const auditable = nodes.find(n => n.kind === 'interface' && n.name === 'Auditable')!;
+ const taskHandler = nodes.find(n => n.kind === 'interface' && n.name === 'TaskHandler')!;
+ expect(identifiable).toBeDefined();
+ expect(auditable).toBeDefined();
+ expect(taskHandler).toBeDefined();
+
+ const auditableInheritsIdentifiable = edges.find(
+  e => e.source === auditable.id && e.target === identifiable.id && e.kind === 'inherits'
+ );
+ expect(auditableInheritsIdentifiable).toBeDefined();
+
+ // Interface method signature (overloaded)
+ const taskHandlerHandle = nodes.find(n => n.kind === 'function' && n.name === 'handle' && n.parentId === taskHandler.id)!;
+ expect(taskHandlerHandle).toBeDefined();
+ expect(taskHandlerHandle.contract).toContain('handle(task: string): boolean');
+ expect(taskHandlerHandle.contract).toContain('handle(tasks: string[]): boolean');
+
+ // 4. Arrow functions (standalone, class property, and default export)
+ const formatPriorityFn = nodes.find(n => n.kind === 'function' && n.name === 'formatPriority')!;
+ expect(formatPriorityFn).toBeDefined();
+ expect(formatPriorityFn.parentId).toBe(serviceMod.id);
+ expect(formatPriorityFn.contract).toContain('formatPriority(priority: Priority): string');
+
+ const defaultFn = nodes.find(n => n.kind === 'function' && n.name === 'default' && n.parentId === defaultFnMod.id)!;
+ expect(defaultFn).toBeDefined();
+ expect(defaultFn.contract).toContain('default(msg: string): string');
+
+ // 5. Overloaded functions
+ const processInputFn = nodes.find(n => n.kind === 'function' && n.name === 'processInput')!;
+ expect(processInputFn).toBeDefined();
+ expect(processInputFn.parentId).toBe(serviceMod.id);
+ const processInputOverloadLines = processInputFn.contract.split('\n');
+ expect(processInputOverloadLines).toContain('processInput(input: string): string');
+ expect(processInputOverloadLines).toContain('processInput(input: number): number');
+ expect(processInputOverloadLines).toContain('processInput(input: string | number): string | number');
+
+ // 6. Classes, constructors, methods, getters/setters, class-property arrow functions
+ const baseService = nodes.find(n => n.kind === 'class' && n.name === 'BaseService')!;
+ expect(baseService).toBeDefined();
+ expect(baseService.parentId).toBe(serviceMod.id);
+ const baseCtor = nodes.find(n => n.kind === 'function' && n.name === 'constructor' && n.parentId === baseService.id)!;
+ expect(baseCtor).toBeDefined();
+ const baseGetName = nodes.find(n => n.kind === 'function' && n.name === 'getName' && n.parentId === baseService.id)!;
+ expect(baseGetName).toBeDefined();
+
+ const baseImplementsAuditable = edges.find(
+  e => e.source === baseService.id && e.target === auditable.id && e.kind === 'implements'
+ );
+ expect(baseImplementsAuditable).toBeDefined();
+
+ const taskService = nodes.find(n => n.kind === 'class' && n.name === 'TaskService')!;
+ expect(taskService).toBeDefined();
+ expect(taskService.parentId).toBe(serviceMod.id);
+
+ const taskInheritsBase = edges.find(
+  e => e.source === taskService.id && e.target === baseService.id && e.kind === 'inherits'
+ );
+ expect(taskInheritsBase).toBeDefined();
+
+ const taskImplementsHandler = edges.find(
+  e => e.source === taskService.id && e.target === taskHandler.id && e.kind === 'implements'
+ );
+ expect(taskImplementsHandler).toBeDefined();
+
+ // Getter/setter accessor representation
+ const statusAccessor = nodes.find(n => n.kind === 'function' && n.name === 'status' && n.parentId === taskService.id)!;
+ expect(statusAccessor).toBeDefined();
+ expect(statusAccessor.contract).toContain('status(): string');
+ expect(statusAccessor.contract).toContain('status(val: string): void');
+
+ // Arrow function member on class
+ const validatorMember = nodes.find(n => n.kind === 'function' && n.name === 'validator' && n.parentId === taskService.id)!;
+ expect(validatorMember).toBeDefined();
+ expect(validatorMember.contract).toContain('validator(task: string): boolean');
+
+ // Overloaded method on class
+ const taskHandleMethod = nodes.find(n => n.kind === 'function' && n.name === 'handle' && n.parentId === taskService.id)!;
+ expect(taskHandleMethod).toBeDefined();
+ const taskHandleLines = taskHandleMethod.contract.split('\n');
+ expect(taskHandleLines).toContain('handle(task: string): boolean');
+ expect(taskHandleLines).toContain('handle(tasks: string[]): boolean');
+ expect(taskHandleLines).toContain('handle(taskOrTasks: string | string[]): boolean');
+
+ // 7. Nested classes (static nested class and local class inside function)
+ const helperClass = nodes.find(n => n.kind === 'class' && n.name === 'Helper')!;
+ expect(helperClass).toBeDefined();
+ expect(helperClass.parentId).toBe(taskService.id);
+ const helperFormat = nodes.find(n => n.kind === 'function' && n.name === 'format' && n.parentId === helperClass.id)!;
+ expect(helperFormat).toBeDefined();
+
+ const createRunnerMethod = nodes.find(n => n.kind === 'function' && n.name === 'createRunner' && n.parentId === taskService.id)!;
+ expect(createRunnerMethod).toBeDefined();
+
+ const localRunnerClass = nodes.find(n => n.kind === 'class' && n.name === 'LocalRunner')!;
+ expect(localRunnerClass).toBeDefined();
+ expect(localRunnerClass.parentId).toBe(createRunnerMethod.id);
+ const localRunnerRun = nodes.find(n => n.kind === 'function' && n.name === 'run' && n.parentId === localRunnerClass.id)!;
+ expect(localRunnerRun).toBeDefined();
+
+ // 8. Default export class
+ const appClass = nodes.find(n => n.kind === 'class' && n.name === 'Application')!;
+ expect(appClass).toBeDefined();
+ expect(appClass.parentId).toBe(indexMod.id);
+ const appStart = nodes.find(n => n.kind === 'function' && n.name === 'start' && n.parentId === appClass.id)!;
+ expect(appStart).toBeDefined();
+
+ // 9. Cross-module dependencies and calls
+ expect(edges).toContainEqual(expect.objectContaining({ source: serviceMod.id, target: modelsMod.id, kind: 'depends-on' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: indexMod.id, target: serviceMod.id, kind: 'depends-on' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: indexMod.id, target: defaultFnMod.id, kind: 'depends-on' }));
+
+ expect(edges).toContainEqual(expect.objectContaining({ source: taskHandleMethod.id, target: validatorMember.id, kind: 'calls' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: createRunnerMethod.id, target: localRunnerRun.id, kind: 'calls' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: appStart.id, target: defaultFn.id, kind: 'calls' }));
+ expect(edges).toContainEqual(expect.objectContaining({ source: appStart.id, target: taskHandleMethod.id, kind: 'calls' }));
+});
+
+it('compares extracted graph against a hand-authored fixture graph (T034 concrete scenario 2)', async () => {
+ const fixtureDir = resolve('tests/fixtures/typescript-structure');
+ const expectedPath = resolve('tests/fixtures/typescript-structure.expected.json');
+
+ const analyzer = new Analyzer();
+ const actual = await analyzer.analyze(fixtureDir);
+
+ const expectedContent = await readFile(expectedPath, 'utf8');
+ const expectedGraph = JSON.parse(expectedContent);
+
+ expect(GraphSchema.safeParse(expectedGraph).success).toBe(true);
+
+ expect(actual.graph.schemaVersion).toBe(expectedGraph.schemaVersion);
+ expect(actual.graph.nodes.length).toBe(expectedGraph.nodes.length);
+ expect(actual.graph.edges.length).toBe(expectedGraph.edges.length);
+ expect(actual.graph).toEqual(expectedGraph);
+});
+
+it('imported code changes only the implemented graph, preserving human-authored intent (T034 acceptance criterion 3)', async () => {
+ const tempDir = await mkdtemp(join(tmpdir(), 'architect-spec-isolation-'));
+ try {
+  const fixtureDir = resolve('tests/fixtures/typescript-structure');
+  const store = new ProjectStore(tempDir);
+  const project = await store.create({ name: 'StructureIsolation', root: fixtureDir });
+
+  // 1. Initial human specification is empty at revision 0
+  expect(project.specRevision).toBe(0);
+  expect(project.specification.nodes).toEqual([]);
+  expect(project.specification.edges).toEqual([]);
+
+  // Implemented graph has the extracted architecture
+  expect(project.analysis).toBeDefined();
+  expect(project.analysis!.graph.nodes.length).toBeGreaterThan(0);
+  expect(project.analysis!.graph.nodes.some(n => n.name === 'TaskService')).toBe(true);
+
+  // 2. Human explicitly authoring/adopting intended specification
+  const humanNode = {
+   id: 'human-arch-intent',
+   kind: 'system' as const,
+   name: 'Intended Architecture Boundary',
+   description: 'Human-reviewed architectural baseline',
+   provenance: 'human' as const,
+   policy: 'editable' as const,
+   contract: '',
+   requiredChecks: [],
+   instructions: '',
+   outputPath: '',
+   fields: [],
+  };
+  await store.updateSpec(project.id, 0, {
+   nodes: [humanNode],
+   edges: [],
+  });
+
+  const updated = await store.get(project.id);
+  expect(updated.specRevision).toBe(1);
+  expect(updated.specification.nodes).toHaveLength(1);
+  expect(updated.specification.nodes[0].name).toBe('Intended Architecture Boundary');
+
+  // 3. Re-analyzing or importing code updates only the analysis graph, never human specification
+  const analyzer = new Analyzer();
+  const reAnalysis = await analyzer.analyze(fixtureDir);
+  await store.updateAnalysis(project.id, reAnalysis);
+
+  const reloaded = await store.get(project.id);
+  // Human specification remains exactly as authored at specRevision 1
+  expect(reloaded.specRevision).toBe(1);
+  expect(reloaded.specification.nodes).toHaveLength(1);
+  expect(reloaded.specification.nodes[0].id).toBe('human-arch-intent');
+  expect(reloaded.specification.nodes[0].name).toBe('Intended Architecture Boundary');
+
+  // Implemented graph contains only the code-backed analysis
+  expect(reloaded.analysis!.graph.nodes.some(n => n.id === 'human-arch-intent')).toBe(false);
+  expect(reloaded.analysis!.graph.nodes.some(n => n.name === 'TaskService')).toBe(true);
+ } finally {
+  await rm(tempDir, { recursive: true, force: true });
  }
 });
