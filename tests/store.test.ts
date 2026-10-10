@@ -8,7 +8,8 @@ import {ProjectStore} from '../server/store';
 import {AppError,captureFiles,hashes,hash} from '../server/files';
 import {Analyzer} from '../server/analyzer';
 import {freezeNode,validateCandidate,applyReviewed} from '../server/review';
-import {bundleFiles} from '../server/export';
+import {bundleFiles,exportBundle} from '../server/export';
+import {unzipSync,strFromU8} from 'fflate';
 import {GraphSchema,NodeSchema,type Analysis,type AgentJob,type Layout} from '../shared/model';
 const analysisMetadata:Omit<Analysis,'graph'>={revision:'source-1',sequence:1,analyzedAt:'2026-10-08T00:00:00Z',status:'current',files:{},durationMs:0,
  quality:{eligibleFiles:0,analyzedFiles:0,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
@@ -795,5 +796,159 @@ it('rejects an invalid analysis graph before saving and keeps the project readab
   const recovered=await analyzer.analyze(p.root);
   await store.updateAnalysis(p.id,recovered);
   expect((await store.get(p.id)).analysis).toEqual(recovered);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('T030: builds a project with simple and workflow functions, verifies separate layout, and reloads across restart',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'architect-t030-store-'));
+ try{
+  const store=new ProjectStore(dir);
+  const p=await store.create({name:'OrderPlatform',target:'Desktop application'});
+
+  const simpleFn=NodeSchema.parse({
+   id:'fn-ping',kind:'function',name:'ping',description:'Simple ping endpoint that returns uptime',
+   policy:'editable',contract:'export function ping(): boolean',requiredChecks:[],instructions:'',outputPath:'src/ping.ts',fields:[],
+  });
+
+  const detailedFn=NodeSchema.parse({
+   id:'fn-order',kind:'function',name:'processOrder',description:'Processes a customer order',
+   policy:'sensitive',contract:'export function processOrder(orderId: string, amount: number): Promise<boolean>',
+   inputs:'orderId: string\namount: number',outputs:'Promise<boolean>',
+   rules:'Amount must be greater than zero\nMust record audit trail',
+   errors:'InvalidAmountError: amount <= 0\nPaymentDeclinedError: payment declined',
+   scenarios:['Given a valid order, when processed, returns true and confirms order','When payment declines, raises PaymentDeclinedError without committing order'],
+   requiredChecks:['npm test'],instructions:'Keep monetary arithmetic exact. Audit all transactions.',outputPath:'src/order.ts',fields:[],
+  });
+
+  const stepValidate=NodeSchema.parse({
+   id:'step-validate',kind:'step',stepType:'condition',parentId:'fn-order',name:'validateAmount',
+   description:'Check amount > 0',policy:'editable',contract:'',requiredChecks:[],instructions:'',outputPath:'',fields:[],
+  });
+
+  const stepCharge=NodeSchema.parse({
+   id:'step-charge',kind:'step',stepType:'call',parentId:'fn-order',name:'chargeGateway',
+   description:'Call payment gateway',policy:'editable',contract:'',requiredChecks:[],instructions:'',outputPath:'',fields:[],
+  });
+
+  const stepReturn=NodeSchema.parse({
+   id:'step-return',kind:'step',stepType:'return',parentId:'fn-order',name:'returnSuccess',
+   description:'Return transaction confirmation',policy:'editable',contract:'',requiredChecks:[],instructions:'',outputPath:'',fields:[],
+  });
+
+  const workflowEdges=[
+   {id:'e-step-1',source:'step-validate',target:'step-charge',kind:'true' as const,label:'valid'},
+   {id:'e-step-2',source:'step-charge',target:'step-return',kind:'next' as const,label:'approved'},
+  ];
+
+  const containmentEdges=[
+   {id:'c-1',source:'fn-order',target:'step-validate',kind:'contains' as const},
+   {id:'c-2',source:'fn-order',target:'step-charge',kind:'contains' as const},
+   {id:'c-3',source:'fn-order',target:'step-return',kind:'contains' as const},
+  ];
+
+  const requirements=[
+   {id:'req-order',text:'Atomic order processing with audit trail',nodeIds:['fn-order'],edgeIds:[],constraints:['Must not drop audit events'],scenarios:['Given order, process atomically']},
+  ];
+
+  const graph=GraphSchema.parse({
+   nodes:[simpleFn,detailedFn,stepValidate,stepCharge,stepReturn],
+   edges:[...containmentEdges,...workflowEdges],
+   requirements,
+  });
+
+  // Save specification
+  const saved=await store.updateSpec(p.id,0,graph);
+  expect(saved.specRevision).toBe(1);
+
+  // Save layout: root layout + scoped layout for function workflow
+  const rootLayout={'fn-ping':{x:50,y:100},'fn-order':{x:300,y:100}};
+  const stepLayout={'step-validate':{x:20,y:20},'step-charge':{x:20,y:120},'step-return':{x:20,y:220}};
+  await store.updateLayout(p.id,rootLayout);
+  await store.updateLayout(p.id,stepLayout,'function:fn-order');
+
+  // Verify on-disk file separation before restart
+  const base=store.projectDir(p.id);
+  const projectJsonRaw=await readFile(join(base,'project.json'),'utf8');
+  const layoutJsonRaw=await readFile(join(base,'layout.json'),'utf8');
+  const projectJson=JSON.parse(projectJsonRaw);
+  const layoutJson=JSON.parse(layoutJsonRaw);
+
+  expect(projectJson).not.toHaveProperty('layout');
+  expect(projectJson).not.toHaveProperty('scopedLayouts');
+  expect(projectJson).not.toHaveProperty('layoutRevision');
+  expect(projectJson.specRevision).toBe(1);
+  expect(projectJson.name).toBe('OrderPlatform');
+  expect(projectJson.target).toBe('Desktop application');
+  expect(projectJson.specification.nodes).toHaveLength(5);
+
+  const persistedSimple=projectJson.specification.nodes.find((n:any)=>n.id==='fn-ping');
+  expect(persistedSimple.description).toBe('Simple ping endpoint that returns uptime');
+  for(const field of ['inputs','outputs','rules','errors','scenarios'])expect(persistedSimple).not.toHaveProperty(field);
+
+  const persistedDetailed=projectJson.specification.nodes.find((n:any)=>n.id==='fn-order');
+  expect(persistedDetailed.inputs).toContain('orderId: string');
+  expect(persistedDetailed.outputs).toBe('Promise<boolean>');
+  expect(persistedDetailed.rules).toContain('Amount must be greater than zero');
+  expect(persistedDetailed.errors).toContain('PaymentDeclinedError');
+  expect(persistedDetailed.scenarios).toHaveLength(2);
+  expect(persistedDetailed.policy).toBe('sensitive');
+  expect(persistedDetailed.instructions).toContain('Keep monetary arithmetic exact');
+
+  expect(layoutJson.schemaVersion).toBe(1);
+  expect(layoutJson.revision).toBe(2);
+  expect(layoutJson.layout['fn-ping']).toEqual({x:50,y:100});
+  expect(layoutJson.scopedLayouts['function:fn-order']).toEqual(stepLayout);
+
+  // RESTART: instantiate fresh store instance on same directory
+  const restartedStore=new ProjectStore(dir);
+  const reloaded=await restartedStore.get(p.id);
+
+  expect(reloaded.id).toBe(p.id);
+  expect(reloaded.specRevision).toBe(1);
+  expect(reloaded.layoutRevision).toBe(2);
+  expect(reloaded.specification.nodes).toHaveLength(5);
+  expect(reloaded.specification.edges).toHaveLength(5);
+  expect(reloaded.specification.requirements).toHaveLength(1);
+
+  // Both functions survive restart intact
+  const reloadedSimple=reloaded.specification.nodes.find(n=>n.id==='fn-ping')!;
+  expect(reloadedSimple.name).toBe('ping');
+  expect(reloadedSimple.description).toBe('Simple ping endpoint that returns uptime');
+  for(const field of ['inputs','outputs','rules','errors','scenarios'] as const)expect(reloadedSimple[field]).toBeUndefined();
+
+  const reloadedDetailed=reloaded.specification.nodes.find(n=>n.id==='fn-order')!;
+  expect(reloadedDetailed.name).toBe('processOrder');
+  expect(reloadedDetailed.inputs).toBe(detailedFn.inputs);
+  expect(reloadedDetailed.outputs).toBe(detailedFn.outputs);
+  expect(reloadedDetailed.rules).toBe(detailedFn.rules);
+  expect(reloadedDetailed.errors).toBe(detailedFn.errors);
+  expect(reloadedDetailed.scenarios).toEqual(detailedFn.scenarios);
+  expect(reloadedDetailed.policy).toBe('sensitive');
+  expect(reloadedDetailed.instructions).toBe(detailedFn.instructions);
+
+  const reloadedSteps=reloaded.specification.nodes.filter(n=>n.parentId==='fn-order');
+  expect(reloadedSteps).toHaveLength(3);
+
+  expect(reloaded.layout['fn-ping']).toEqual({x:50,y:100});
+  expect(reloaded.layout['fn-order']).toEqual({x:300,y:100});
+  expect(reloaded.scopedLayouts!['function:fn-order']).toEqual(stepLayout);
+
+  // Moving a node increments layoutRevision without incrementing specRevision or modifying project.json
+  await restartedStore.updateLayout(p.id,{'fn-ping':{x:75,y:150}});
+  const afterMove=await restartedStore.get(p.id);
+  expect(afterMove.layoutRevision).toBe(3);
+  expect(afterMove.specRevision).toBe(1);
+  expect(await readFile(join(base,'project.json'),'utf8')).toBe(projectJsonRaw);
+
+  // Portable export of the reloaded mixed-detail model
+  const files=unzipSync(exportBundle(afterMove,'Export mixed project',['src/']));
+  const exportJson=JSON.parse(strFromU8(files['specification.json']));
+  expect(exportJson.graph.nodes).toHaveLength(5);
+  expect(exportJson.graph.nodes.find((n:any)=>n.id==='fn-ping')).not.toHaveProperty('inputs');
+  expect(exportJson.graph.nodes.find((n:any)=>n.id==='fn-order')).toHaveProperty('inputs');
+  expect(strFromU8(files['specification.json'])).not.toContain(dir);
+  expect(strFromU8(files['ARCHITECTURE.md'])).toContain('processOrder');
+  expect(strFromU8(files['ARCHITECTURE.md'])).toContain('ping');
+  expect(strFromU8(files['AGENT_TASK.md'])).toContain('Missing function details and workflows are unspecified');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
