@@ -15,7 +15,7 @@ import {
   type EdgeMouseHandler,
   type OnNodeDrag,
 } from '@xyflow/react';
-import type { Graph, Layout, ProgramNode, ProgramEdge } from '../../shared/model';
+import type { Graph, Layout, ProgramNode, ProgramEdge, BindingReviewRecord } from '../../shared/model';
 import { validRelationship, GraphSchema } from '../../shared/model';
 import type { ViewState } from '../types';
 import {
@@ -35,12 +35,14 @@ import * as api from '../api';
 export interface GraphCanvasProps {
   graph: Graph | null;
   layout: Layout;
+  scopedLayouts?: Record<string, Layout>;
   viewState: ViewState;
   onSelectNode: (id: string | null) => void;
   onSelectEdge?: (id: string | null) => void;
   onScopeChange: (scopeId: string | null) => void;
   onLayoutChange?: (layout: Layout, scopeId?: string | null) => void | Promise<void>;
   onUpdateSpecification?: (graph: Graph) => void | Promise<void>;
+  bindingReviews?: BindingReviewRecord[];
   projectId?: string;
   apiBaseUrl?: string;
   readOnly?: boolean;
@@ -76,17 +78,18 @@ export const ArchitectureNode: React.FC<{
   data: {
     node: ProgramNode;
     isSelected: boolean;
+    isAmbiguous?: boolean;
     onScopeIn?: (id: string) => void;
   };
   selected?: boolean;
 }> = ({ data, selected }) => {
-  const { node, onScopeIn } = data;
+  const { node, onScopeIn, isAmbiguous } = data;
   const isSelected = selected || data.isSelected;
   const isContainer = ['system', 'module', 'class', 'function'].includes(node.kind);
 
   return (
     <div
-      className={`custom-flow-node ${isSelected ? 'selected' : ''} kind-${node.kind}`}
+      className={`custom-flow-node ${isSelected ? 'selected' : ''} kind-${node.kind} ${isAmbiguous ? 'binding-ambiguous' : ''}`}
       data-testid={`canvas-flow-node-${node.id}`}
     >
       <Handle
@@ -105,6 +108,15 @@ export const ArchitectureNode: React.FC<{
       <div className="flow-node-header">
         <span className="flow-node-kind">{node.kind}</span>
         <div className="flow-node-badges">
+          {isAmbiguous && (
+            <span
+              className="flow-node-badge badge-ambiguous"
+              data-testid={`binding-ambiguous-${node.id}`}
+              title="Ambiguous source binding: manual review required"
+            >
+              Ambiguous
+            </span>
+          )}
           {node.policy && node.policy !== 'editable' && (
             <span className={`flow-node-policy policy-${node.policy}`}>{node.policy}</span>
           )}
@@ -174,12 +186,14 @@ const nodeTypes = {
 const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
   graph,
   layout,
+  scopedLayouts,
   viewState,
   onSelectNode,
   onSelectEdge,
   onScopeChange,
   onLayoutChange,
   onUpdateSpecification,
+  bindingReviews,
   projectId,
   apiBaseUrl,
   readOnly = false,
@@ -239,11 +253,17 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
   // Convert to React Flow nodes with stable IDs and positions
   const flowNodes: FlowNode[] = useMemo(() => {
     return scopedNodes.map((node, index) => {
-      const savedPos = layout[node.id];
+      const activeScopedLayout = (scopedLayouts && viewState.activeScope)
+        ? scopedLayouts[viewState.activeScope]
+        : undefined;
+      const savedPos = activeScopedLayout?.[node.id] || layout[node.id];
       const col = index % 3;
       const row = Math.floor(index / 3);
       const position = savedPos ? { x: savedPos.x, y: savedPos.y } : { x: col * 240 + 40, y: row * 160 + 40 };
       const isSelected = viewState.selectedId === node.id && viewState.selectedType === 'node';
+      const isAmbiguous = bindingReviews?.some(
+        r => r.nodeId === node.id && (r.status === 'ambiguous' || r.status === 'unresolved')
+      );
 
       return {
         id: node.id,
@@ -253,12 +273,16 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
         data: {
           node,
           isSelected,
+          isAmbiguous,
           onScopeIn: (id: string) => onScopeChange(id),
           // Fallback label for default React Flow renderer if custom type not picked up in SSR
           label: (
-            <div className={`custom-flow-node ${isSelected ? 'selected' : ''} kind-${node.kind}`}>
+            <div className={`custom-flow-node ${isSelected ? 'selected' : ''} kind-${node.kind} ${isAmbiguous ? 'binding-ambiguous' : ''}`}>
               <div className="flow-node-header">
                 <span className="flow-node-kind">{node.kind}</span>
+                {isAmbiguous && (
+                  <span className="flow-node-badge badge-ambiguous" data-testid={`binding-ambiguous-${node.id}`}>Ambiguous</span>
+                )}
                 {node.policy && node.policy !== 'editable' && (
                   <span className={`flow-node-policy policy-${node.policy}`}>{node.policy}</span>
                 )}
@@ -272,7 +296,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
         },
       };
     });
-  }, [scopedNodes, layout, viewState.selectedId, viewState.selectedType, readOnly, onScopeChange]);
+  }, [scopedNodes, layout, scopedLayouts, bindingReviews, viewState.selectedId, viewState.selectedType, viewState.activeScope, readOnly, onScopeChange]);
 
   // Scoped edges with stable IDs and visual styles
   const flowEdges: FlowEdge[] = useMemo(() => {
@@ -580,17 +604,23 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
         </div>
 
         <div className="canvas-scoped-pills" data-testid="canvas-scoped-pills">
-          {scopedNodes.map(n => (
-            <button
-              key={n.id}
-              className={`canvas-scoped-pill kind-${n.kind} ${viewState.selectedId === n.id && viewState.selectedType === 'node' ? 'selected' : ''}`}
-              onClick={() => onSelectNode(n.id)}
-              data-testid={`canvas-node-${n.id}`}
-              title={`Inspect ${n.name} (${n.kind})`}
-            >
-              <span>{n.name}</span>
-            </button>
-          ))}
+          {scopedNodes.map(n => {
+            const isAmbiguous = bindingReviews?.some(
+              r => r.nodeId === n.id && (r.status === 'ambiguous' || r.status === 'unresolved')
+            );
+            return (
+              <button
+                key={n.id}
+                className={`canvas-scoped-pill kind-${n.kind} ${viewState.selectedId === n.id && viewState.selectedType === 'node' ? 'selected' : ''} ${isAmbiguous ? 'pill-ambiguous' : ''}`}
+                onClick={() => onSelectNode(n.id)}
+                data-testid={`canvas-node-${n.id}`}
+                title={`Inspect ${n.name} (${n.kind})${isAmbiguous ? ' [Ambiguous Binding]' : ''}`}
+              >
+                <span>{n.name}</span>
+                {isAmbiguous && <span className="pill-ambiguous-tag" data-testid={`pill-ambiguous-${n.id}`}>?</span>}
+              </button>
+            );
+          })}
         </div>
 
         <div className="canvas-header-actions" data-testid="canvas-header-actions">

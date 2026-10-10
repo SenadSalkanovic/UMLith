@@ -3,6 +3,7 @@ import type { Project, Graph, Layout } from '../shared/model';
 import type { CreateProjectRequest, RevisionRecord } from '../shared/api';
 import type { ViewState, SpecificationState, AnalysisState, WorkspaceError, SyncStatus } from './types';
 import * as api from './api';
+import { reconcileSelectionAndScope } from './workspace-state';
 import { Header } from './components/Header';
 import { ProjectTree } from './components/ProjectTree';
 import { Canvas } from './components/Canvas';
@@ -685,38 +686,20 @@ export const App: React.FC<AppProps> = ({
 
     if (!currentGraph) return;
 
-    const nodeExists = viewState.selectedId
-      ? currentGraph.nodes.some(n => n.id === viewState.selectedId)
-      : false;
+    const resolution = reconcileSelectionAndScope(viewState, currentGraph, {
+      specification: specificationState.specification,
+    });
 
-    const edgeExists = viewState.selectedId
-      ? currentGraph.edges.some(e => e.id === viewState.selectedId)
-      : false;
-
-    const scopeExists = viewState.activeScope
-      ? currentGraph.nodes.some(n => n.id === viewState.activeScope)
-      : false;
-
-    if (viewState.selectedId && !nodeExists && viewState.selectedType === 'node') {
+    if (
+      resolution.selectedId !== viewState.selectedId ||
+      resolution.selectedType !== viewState.selectedType ||
+      resolution.activeScope !== viewState.activeScope
+    ) {
       setViewState(prev => ({
         ...prev,
-        selectedId: null,
-        selectedType: null,
-      }));
-    }
-
-    if (viewState.selectedId && !edgeExists && viewState.selectedType === 'edge') {
-      setViewState(prev => ({
-        ...prev,
-        selectedId: null,
-        selectedType: null,
-      }));
-    }
-
-    if (viewState.activeScope && !scopeExists) {
-      setViewState(prev => ({
-        ...prev,
-        activeScope: null,
+        selectedId: resolution.selectedId,
+        selectedType: resolution.selectedType,
+        activeScope: resolution.activeScope,
       }));
     }
   }, [
@@ -925,6 +908,7 @@ export const App: React.FC<AppProps> = ({
               <Canvas
                 graph={activeGraph}
                 layout={specificationState.layout}
+                scopedLayouts={specificationState.project?.scopedLayouts}
                 viewState={viewState}
                 onSelectNode={handleSelectNode}
                 onSelectEdge={handleSelectEdge}
