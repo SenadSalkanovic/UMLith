@@ -8,11 +8,15 @@ import {
   DiagnosticSchema,
   QualitySchema,
   StaleEvidenceSchema,
+  GraphDeltaSchema,
+  GraphUpdateSchema,
   type Graph,
   type GraphInput,
   type Layout,
   type Project,
   type Analysis,
+  type GraphDelta,
+  type GraphUpdate,
 } from './model';
 
 export const CreateProjectRequestSchema = z.object({
@@ -206,3 +210,61 @@ export const AnalysisResponseSchema = z.object({
   sequence: z.number().int().nonnegative().optional(),
 });
 export type AnalysisResponse = z.infer<typeof AnalysisResponseSchema>;
+
+export const SseReadyEventSchema = z.object({
+  event: z.literal('ready').optional(),
+  projectId: z.string().optional(),
+  status: z.literal('connected'),
+  analysisStatus: AnalysisStatusSchema.optional(),
+  revision: z.string().nullable().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+  lastEventId: z.string().nullable().optional(),
+  reconnected: z.boolean().optional(),
+});
+export type SseReadyEvent = z.infer<typeof SseReadyEventSchema>;
+
+export const SseStatusEventSchema = z.object({
+  event: z.literal('status').optional(),
+  type: z.literal('status').optional(),
+  projectId: z.string(),
+  status: AnalysisStatusSchema,
+  revision: z.string().nullable().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+  diagnostics: z.array(DiagnosticSchema).optional(),
+  quality: QualitySchema.optional(),
+  staleEvidence: StaleEvidenceSchema.optional(),
+  message: z.string().optional(),
+  timestamp: z.string().optional(),
+});
+export type SseStatusEvent = z.infer<typeof SseStatusEventSchema>;
+
+export const SseDeltaEventSchema = z.object({
+  event: z.literal('delta').optional(),
+  type: z.literal('analysis').optional(),
+  projectId: z.string(),
+  schemaVersion: z.literal(1),
+  revision: z.string(),
+  baseRevision: z.string().nullable(),
+  sequence: z.number().int().nonnegative(),
+  baseSequence: z.number().int().nonnegative(),
+  status: AnalysisStatusSchema,
+  delta: GraphDeltaSchema,
+  quality: QualitySchema,
+  diagnostics: z.array(DiagnosticSchema),
+  analyzedAt: z.string(),
+  durationMs: z.number().nonnegative(),
+  staleEvidence: StaleEvidenceSchema.optional(),
+  update: GraphUpdateSchema.optional(),
+});
+export type SseDeltaEvent = z.infer<typeof SseDeltaEventSchema>;
+
+export const SseDiagnosticsEventSchema = z.object({
+  event: z.literal('diagnostics').optional(),
+  type: z.literal('diagnostics').optional(),
+  projectId: z.string(),
+  revision: z.string().nullable().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+  diagnostics: z.array(DiagnosticSchema),
+  quality: QualitySchema.optional(),
+});
+export type SseDiagnosticsEvent = z.infer<typeof SseDiagnosticsEventSchema>;

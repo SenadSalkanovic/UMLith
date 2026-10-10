@@ -9,7 +9,9 @@ import { ProjectStore, SpecificationConflictError } from './store';
 import { AppError, safePath, hash, isPathExcluded } from './files';
 import { AnalysisWorker } from './worker';
 import { generateImportQualityReport, type ImportQualityReport } from './analyzer';
-import { AnalysisSchema, emptyGraph, type Analysis } from '../shared/model';
+import { randomUUID } from 'node:crypto';
+import { SyncService, type SyncServiceOptions } from './sync';
+import { AnalysisSchema, emptyGraph, createGraphUpdate, type Analysis } from '../shared/model';
 import {
   CreateProjectRequestSchema,
   UpdateSpecificationRequestSchema,
@@ -21,6 +23,10 @@ import {
   ImportQualityReportSchema,
   AnalysisSnapshotResponseSchema,
   AnalysisResponseSchema,
+  SseReadyEventSchema,
+  SseStatusEventSchema,
+  SseDeltaEventSchema,
+  SseDiagnosticsEventSchema,
 } from '../shared/api';
 
 export const DEFAULT_ALLOWED_ORIGINS = [
@@ -107,6 +113,8 @@ export interface ServerOptions {
   store?: ProjectStore;
   storeDir?: string;
   worker?: AnalysisWorker;
+  sync?: SyncService;
+  syncOptions?: SyncServiceOptions;
   logger?: boolean | object;
   host?: string;
   port?: number;
@@ -121,6 +129,9 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
 
   const ownsWorker = !options.worker;
   const worker = options.worker ?? new AnalysisWorker();
+
+  const ownsSync = !options.sync;
+  const sync = options.sync ?? new SyncService(store, { worker, ...options.syncOptions });
 
   const defaultHost = options.host ?? '127.0.0.1';
   if (!isLoopbackHost(defaultHost)) {
@@ -141,10 +152,28 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
 
   app.decorate('store', store);
   app.decorate('worker', worker);
+  app.decorate('sync', sync);
+
+  const activeSubscriptions = new Map<string, {
+    id: string;
+    projectId?: string;
+    cleanup: () => void;
+  }>();
+  const projectSubscriptions = new Map<string, Set<string>>();
+
+  app.decorate('getActiveSubscriptions', () => activeSubscriptions.size);
+  app.decorate('getProjectSubscriptions', (id: string) => projectSubscriptions.get(id)?.size ?? 0);
 
   const activeAnalyses = new Map<string, { startedAt: string; promise: Promise<{ analysis: Analysis; report: ImportQualityReport }> }>();
 
   app.addHook('onClose', async () => {
+    for (const sub of Array.from(activeSubscriptions.values())) {
+      sub.cleanup();
+    }
+    activeSubscriptions.clear();
+    projectSubscriptions.clear();
+
+    await sync.close();
     if (ownsWorker) {
       await worker.close();
     }
@@ -423,10 +452,22 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     let active = activeAnalyses.get(id);
     if (!active) {
       const executeAnalysis = async () => {
+        const cur = await store.get(id).catch(() => project);
+        sync.emit('notification', id, {
+          type: 'status',
+          projectId: id,
+          status: 'updating',
+          sequence: cur.analysis?.sequence || 0,
+          revision: cur.analysis?.revision || null,
+        });
         try {
           const result = await worker.analyzeAndReport(rootPath, body.options);
+          const prev = await store.get(id);
+          result.analysis.sequence = (prev.analysis?.sequence || 0) + 1;
           AnalysisSchema.parse(result.analysis);
+          const update = createGraphUpdate(prev.analysis, result.analysis, id);
           await store.updateAnalysis(id, result.analysis);
+          sync.emit('notification', id, update);
           return result;
         } catch (err: any) {
           const staleEvidence = { scope: 'all' as const, paths: [], reason: err.message };
@@ -466,6 +507,17 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
           try {
             await store.updateAnalysis(id, stale);
           } catch {}
+          sync.emit('notification', id, {
+            type: 'status',
+            projectId: id,
+            status: 'stale',
+            sequence: stale.sequence,
+            revision: stale.revision,
+            quality: stale.quality,
+            diagnostics: stale.quality.diagnostics,
+            staleEvidence,
+            message: err.message,
+          });
           throw err;
         } finally {
           activeAnalyses.delete(id);
@@ -651,10 +703,17 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   const createSseHandler = (forProject: boolean) => {
     return async (request: any, reply: any) => {
       let projectId: string | undefined;
+      let project: any;
       if (forProject) {
         const { id } = ProjectIdParamSchema.parse(request.params);
         projectId = id;
-        await store.get(projectId);
+        project = await store.get(projectId);
+      } else {
+        const queryProjectId = (request.query as any)?.projectId;
+        if (queryProjectId) {
+          projectId = ProjectIdParamSchema.parse({ id: queryProjectId }).id;
+          project = await store.get(projectId);
+        }
       }
 
       reply.hijack();
@@ -667,30 +726,209 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
         ...(corsOrigin ? { 'Access-Control-Allow-Origin': String(corsOrigin), 'Vary': 'Origin' } : {}),
       });
 
-      reply.raw.write(': connected\n\n');
-      reply.raw.write(`event: ready\ndata: ${JSON.stringify(forProject ? { projectId, status: 'connected' } : { status: 'connected' })}\n\n`);
+      const writeSseMessage = (eventName: string, eventId: string | number, data: any) => {
+        if (reply.raw.writableEnded || reply.raw.destroyed) return;
+        reply.raw.write(`id: ${eventId}\nevent: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
 
-      const query = request.query as { once?: string } | undefined;
-      if (query?.once === 'true' || query?.once === '1') {
+      reply.raw.write(': connected\n\n');
+
+      const query = request.query as { once?: string; watch?: string } | undefined;
+      const isOnce = query?.once === 'true' || query?.once === '1';
+
+      if (projectId && query?.watch !== 'false' && !isOnce && !sync.hasSession(projectId)) {
+        try {
+          await sync.start(projectId);
+        } catch (err) {
+          app.log.error(err);
+        }
+      }
+
+      const activeProject = projectId ? await store.get(projectId).catch(() => project) : project;
+      const currentRevision = activeProject?.analysis?.revision ?? null;
+      const currentSequence = activeProject?.analysis?.sequence ?? 0;
+      const lastEventId = (request.headers['last-event-id'] as string) || (request.query as any)?.lastEventId;
+
+      const readyEventId = projectId
+        ? `${projectId}:${currentRevision ?? 'ready'}:${currentSequence}`
+        : `global:ready:0`;
+
+      const readyData = forProject || projectId
+        ? {
+            projectId,
+            status: 'connected',
+            analysisStatus: activeProject?.analysis?.status,
+            revision: currentRevision,
+            sequence: currentSequence,
+            ...(lastEventId ? { lastEventId, reconnected: true } : {}),
+          }
+        : { status: 'connected' };
+
+      writeSseMessage('ready', readyEventId, readyData);
+
+      if (isOnce) {
         reply.raw.end();
         return;
       }
 
-      const timer = setInterval(() => {
+      const subscriptionId = randomUUID();
+
+      const onNotification = (notifProjectId: string, payload: any) => {
+        if (reply.raw.writableEnded || reply.raw.destroyed) return;
+        if (projectId && notifProjectId !== projectId) return;
+
+        const targetProjectId = notifProjectId || projectId;
+
+        if (payload.type === 'status') {
+          const statusRevision = payload.revision ?? null;
+          const statusSequence = payload.sequence ?? 0;
+          const eventId = `${targetProjectId}:${statusRevision ?? 'status'}:${statusSequence}`;
+          const statusData = {
+            event: 'status',
+            type: 'status',
+            projectId: targetProjectId,
+            status: payload.status,
+            revision: statusRevision,
+            sequence: statusSequence,
+            diagnostics: payload.diagnostics ?? payload.quality?.diagnostics ?? [],
+            quality: payload.quality,
+            staleEvidence: payload.staleEvidence,
+            message: payload.message,
+            timestamp: new Date().toISOString(),
+          };
+          writeSseMessage('status', eventId, statusData);
+
+          if (payload.diagnostics?.length || payload.quality?.diagnostics?.length) {
+            const diagEventId = `${targetProjectId}:${statusRevision ?? 'diag'}:${statusSequence}`;
+            const diagData = {
+              event: 'diagnostics',
+              type: 'diagnostics',
+              projectId: targetProjectId,
+              revision: statusRevision,
+              sequence: statusSequence,
+              diagnostics: payload.diagnostics ?? payload.quality?.diagnostics ?? [],
+              quality: payload.quality,
+            };
+            writeSseMessage('diagnostics', diagEventId, diagData);
+          }
+        } else if (payload.type === 'analysis') {
+          const updateRevision = payload.revision;
+          const updateSequence = payload.sequence;
+
+          // 1. Status transition
+          const statusEventId = `${targetProjectId}:${updateRevision}:${updateSequence}`;
+          const statusData = {
+            event: 'status',
+            type: 'status',
+            projectId: targetProjectId,
+            status: payload.status,
+            revision: updateRevision,
+            sequence: updateSequence,
+            diagnostics: payload.quality?.diagnostics ?? [],
+            quality: payload.quality,
+            timestamp: new Date().toISOString(),
+          };
+          writeSseMessage('status', statusEventId, statusData);
+
+          // 2. Versioned delta
+          const deltaEventId = `${targetProjectId}:${updateRevision}:${updateSequence}`;
+          const deltaData = {
+            event: 'delta',
+            type: 'analysis',
+            projectId: targetProjectId,
+            schemaVersion: payload.schemaVersion ?? 1,
+            revision: updateRevision,
+            baseRevision: payload.baseRevision,
+            sequence: updateSequence,
+            baseSequence: payload.baseSequence,
+            status: payload.status,
+            delta: payload.delta,
+            quality: payload.quality,
+            diagnostics: payload.quality?.diagnostics ?? [],
+            analyzedAt: payload.analyzedAt,
+            durationMs: payload.durationMs,
+            staleEvidence: payload.staleEvidence,
+            update: payload,
+          };
+          writeSseMessage('delta', deltaEventId, deltaData);
+
+          // 3. Diagnostics event
+          const diagEventId = `${targetProjectId}:${updateRevision}:diag:${updateSequence}`;
+          const diagData = {
+            event: 'diagnostics',
+            type: 'diagnostics',
+            projectId: targetProjectId,
+            revision: updateRevision,
+            sequence: updateSequence,
+            diagnostics: payload.quality?.diagnostics ?? [],
+            quality: payload.quality,
+          };
+          writeSseMessage('diagnostics', diagEventId, diagData);
+        } else if (payload.type === 'error') {
+          const errorEventId = `${targetProjectId}:error:${Date.now()}`;
+          writeSseMessage('error', errorEventId, {
+            event: 'error',
+            type: 'error',
+            projectId: targetProjectId,
+            message: payload.message,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      };
+
+      sync.on('notification', onNotification);
+
+      const pingTimer = setInterval(() => {
         try {
-          reply.raw.write(`event: ping\ndata: ${JSON.stringify(forProject ? { projectId, timestamp: Date.now() } : { timestamp: Date.now() })}\n\n`);
+          const pingId = projectId
+            ? `${projectId}:ping:${Date.now()}`
+            : `global:ping:${Date.now()}`;
+          const pingData = projectId
+            ? { projectId, revision: project?.analysis?.revision ?? null, timestamp: Date.now() }
+            : { timestamp: Date.now() };
+          writeSseMessage('ping', pingId, pingData);
         } catch {
-          clearInterval(timer);
+          clearInterval(pingTimer);
         }
       }, 30000);
-      timer.unref();
+      pingTimer.unref();
 
-      request.raw.on('close', () => {
-        clearInterval(timer);
+      let cleanedUp = false;
+      const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        clearInterval(pingTimer);
+        sync.off('notification', onNotification);
+        activeSubscriptions.delete(subscriptionId);
+        if (projectId && projectSubscriptions.has(projectId)) {
+          const set = projectSubscriptions.get(projectId)!;
+          set.delete(subscriptionId);
+          if (set.size === 0) {
+            projectSubscriptions.delete(projectId);
+          }
+        }
         try {
-          reply.raw.end();
+          if (!reply.raw.writableEnded) {
+            reply.raw.end();
+          }
         } catch {}
+      };
+
+      activeSubscriptions.set(subscriptionId, {
+        id: subscriptionId,
+        projectId,
+        cleanup,
       });
+      if (projectId) {
+        if (!projectSubscriptions.has(projectId)) {
+          projectSubscriptions.set(projectId, new Set());
+        }
+        projectSubscriptions.get(projectId)!.add(subscriptionId);
+      }
+
+      request.raw.on('close', cleanup);
+      reply.raw.on('close', cleanup);
+      reply.raw.on('error', cleanup);
     };
   };
 

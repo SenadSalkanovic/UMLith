@@ -277,6 +277,7 @@ export const GraphDeltaSchema=z.object({
 });
 export const GraphUpdateSchema=AnalysisMetadataSchema.extend({
   type:z.literal('analysis'),schemaVersion:z.literal(GRAPH_SCHEMA_VERSION),
+  projectId:z.string().optional(),
   baseRevision:NonblankSchema.nullable(),baseSequence:CountSchema,delta:GraphDeltaSchema,
 }).strict().superRefine((update,ctx)=>{
   validateAnalysisStatus(update,ctx);
@@ -335,11 +336,13 @@ export class SnapshotReconciliationError extends Error {
 
 export function createGraphUpdate(
   before: Pick<Analysis, 'revision' | 'sequence' | 'graph'> | undefined,
-  next: Pick<Analysis, 'revision' | 'sequence' | 'status' | 'quality' | 'durationMs' | 'analyzedAt' | 'graph'> & { staleEvidence?: Analysis['staleEvidence'] }
+  next: Pick<Analysis, 'revision' | 'sequence' | 'status' | 'quality' | 'durationMs' | 'analyzedAt' | 'graph'> & { staleEvidence?: Analysis['staleEvidence'] },
+  projectId?: string
 ): GraphUpdate {
   return GraphUpdateSchema.parse({
     type: 'analysis',
     schemaVersion: GRAPH_SCHEMA_VERSION,
+    ...(projectId ? { projectId } : {}),
     baseRevision: before?.revision || null,
     baseSequence: before?.sequence || 0,
     sequence: next.sequence,

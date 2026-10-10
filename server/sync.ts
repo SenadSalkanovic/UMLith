@@ -142,7 +142,7 @@ export class SyncService extends EventEmitter {
    if (session.closed) return;
    this.emit('reconcile-scheduled', id, { event, path: rel });
    void this.request(id).catch(error =>
-    this.emit('notification', id, { type: 'error', message: error.message })
+    this.emit('notification', id, { type: 'error', projectId: id, message: error.message })
    );
   }, debounceMs);
  }
@@ -204,14 +204,14 @@ export class SyncService extends EventEmitter {
    watcher.on('error', (err) => {
     this.emit('watcher-error', id, err);
     void this.reconcile(id).catch(error =>
-     this.emit('notification', id, { type: 'error', message: error.message })
+     this.emit('notification', id, { type: 'error', projectId: id, message: error.message })
     );
    });
 
    const reconcileInterval = this.options.reconcileIntervalMs ?? 60000;
    session.timer = setInterval(
     () => void this.reconcile(id).catch(error =>
-     this.emit('notification', id, { type: 'error', message: error.message })
+     this.emit('notification', id, { type: 'error', projectId: id, message: error.message })
     ),
     reconcileInterval
    );
@@ -277,7 +277,13 @@ export class SyncService extends EventEmitter {
 
    const p = await this.store.get(id);
    const before = p.analysis;
-   this.emit('notification', id, { type: 'status', status: 'updating', sequence: before?.sequence || 0 });
+   this.emit('notification', id, {
+    type: 'status',
+    projectId: id,
+    status: 'updating',
+    sequence: before?.sequence || 0,
+    revision: before?.revision || null,
+   });
 
    let result: Analysis;
    try {
@@ -349,10 +355,12 @@ export class SyncService extends EventEmitter {
 
     this.emit('notification', id, {
      type: 'status',
+     projectId: id,
      status: 'stale',
      sequence: stale.sequence,
      revision: stale.revision,
      quality: stale.quality,
+     diagnostics: stale.quality.diagnostics,
      staleEvidence,
      message: (error as Error).message,
     });
@@ -373,7 +381,7 @@ export class SyncService extends EventEmitter {
    const currentBefore = latestP.analysis;
    result.sequence = (currentBefore?.sequence || 0) + 1;
 
-   const update = createGraphUpdate(currentBefore, result);
+   const update = createGraphUpdate(currentBefore, result, id);
 
    await this.emitBeforePersist(id, { generation, revision: result.revision, result });
    if (session.closed || generation < session.generation || generation <= session.committedGeneration) {
@@ -488,9 +496,10 @@ export class SyncService extends EventEmitter {
 
  createGraphUpdate(
   currentBefore: Pick<Analysis, 'revision' | 'sequence' | 'graph'> | undefined,
-  result: Analysis
+  result: Analysis,
+  projectId?: string
  ): GraphUpdate {
-  return createGraphUpdate(currentBefore, result);
+  return createGraphUpdate(currentBefore, result, projectId);
  }
 
  async stop(id: string): Promise<void> {
