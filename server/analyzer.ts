@@ -681,6 +681,15 @@ export async function discoverAnalysisInputs(
     category: 'declaration',
     reason: 'Declaration file excluded from code-structure analysis',
    };
+  } else if (/^\.prismarc(?:\.json)?$/i.test(basename(p)) || /^prisma\.config\.[cm]?[jt]s$/i.test(basename(p))) {
+   configurationFiles.push(p);
+   inclusions[p] = {
+    category: 'configuration',
+    reason: 'Prisma project configuration driving schema settings and validation',
+    eligible: false,
+    requiredForResolution: true,
+    participatesInRevision: true,
+   };
   } else if (/\.(?:[cm]?ts|tsx)$/i.test(p)) {
    eligibleFiles.push(p);
    inclusions[p] = {
@@ -770,7 +779,8 @@ export async function discoverAnalysisInputs(
  const configuredSourcesSet = new Set<string>();
 
  const parseHost = createParseConfigHost(root, files);
- for (const configPath of configurationFiles) {
+ const tsConfigFiles = configurationFiles.filter(p => /(?:^|\/)tsconfig[^/]*\.json$/i.test(p));
+ for (const configPath of tsConfigFiles) {
   const config = ts.parseConfigFileTextToJson(configPath, files[configPath].text);
   if (config.error) {
    incompatibleInputs.push({
@@ -1062,6 +1072,8 @@ export class Analyzer {
  private builderPrograms=new Map<string,ts.SemanticDiagnosticsBuilderProgram>();
  private programs=new Map<string,ts.Program>();
  private sourceCache=new Map<string,{hash:string;source:ts.SourceFile}>();
+ private prismaCache=new Map<string,{hash:string;parseResult:PrismaParseResult}>();
+ private lastPrismaParserConfig?: PrismaAstConfig['parser'];
  private lastFiles?: Record<string, { hash: string; text: string }>;
  private sequence=0;
 
@@ -1079,10 +1091,15 @@ export class Analyzer {
   return this.builderPrograms;
  }
 
+ public getPrismaCache(): ReadonlyMap<string, { hash: string; parseResult: PrismaParseResult }> {
+  return this.prismaCache;
+ }
+
  public invalidate(reason = 'Explicit broader invalidation', paths: string[] = []): void {
   this.builderPrograms.clear();
   this.programs.clear();
   this.sourceCache.clear();
+  this.prismaCache.clear();
   this.lastInvalidationReason = reason;
   this.lastInvalidation = {
    scope: 'broader',
@@ -1124,6 +1141,10 @@ export class Analyzer {
     const sourceMod = nodeModulePath.get(e.source);
     if (targetMod && sourceMod && result.has(targetMod) && !result.has(sourceMod)) {
      result.add(sourceMod);
+     expanded = true;
+    }
+    if (e.kind === 'relates-to' && targetMod && sourceMod && result.has(sourceMod) && !result.has(targetMod)) {
+     result.add(targetMod);
      expanded = true;
     }
    }
@@ -1181,14 +1202,26 @@ export class Analyzer {
   let nonlocalInputs: string[] = [];
   let isBroaderInvalidation = false;
 
+  const prismaConfig = options?.prismaParserConfig ?? this.prismaParserConfig;
+  const isPrismaConfigChanged = Boolean(
+   this.lastPrismaParserConfig &&
+   JSON.stringify(this.lastPrismaParserConfig) !== JSON.stringify(prismaConfig)
+  );
+  if (isPrismaConfigChanged) {
+   nonlocalInputs.push('prisma-parser-config');
+  }
+
   const isNonlocal = (p: string): boolean => {
    return (
+    p === 'prisma-parser-config' ||
     discovery.dependencyInputs.includes(p) ||
     (this.lastDiscovery?.dependencyInputs.includes(p) ?? false) ||
     /tsconfig[^/]*\.json$/i.test(p) ||
     /package\.json$/i.test(p) ||
     /lock/i.test(p) ||
     /\.d\.[cm]?ts$/i.test(p) ||
+    /^\.prismarc(?:\.json)?$/i.test(basename(p)) ||
+    /^prisma\.config\.[cm]?[jt]s$/i.test(basename(p)) ||
     (/\.json$/i.test(p) && !p.endsWith('.prisma'))
    );
   };
@@ -1230,6 +1263,7 @@ export class Analyzer {
     if (!currKeys.has(k)) {
      this.sourceCache.delete(k);
      this.sourceCache.delete(resolve(root, k));
+     this.prismaCache.delete(k);
     }
    }
    this.lastInvalidation = {
@@ -2054,24 +2088,47 @@ export class Analyzer {
    function flows(n:ts.Node){const id=declarations.get(n);if(id&&nodes.get(id)?.kind==='function'&&!ts.isArrowFunction(n)&&!ts.isFunctionExpression(n))workflow(n,id);ts.forEachChild(n,flows);}
    flows(sf);
   }
-  const prismaConfig = options?.prismaParserConfig ?? this.prismaParserConfig;
-  for(const path of eligible.filter(p=>p.endsWith('.prisma'))){
-   const parseRes = parsePrismaSchema(path, files[path]?.text ?? '', prismaConfig);
-   if(parseRes.diagnostics.length > 0){
-    for(const d of parseRes.diagnostics) diagnostics.push(d);
+  const prismaSchemasData: { path: string; schema: PrismaSchemaAst }[] = [];
+  for (const path of eligible.filter(p => p.endsWith('.prisma'))) {
+   const fileData = files[path];
+   const fileHash = fileData?.hash ?? '';
+   let parseRes: PrismaParseResult;
+   const cached = this.prismaCache.get(path);
+   if (cached && cached.hash === fileHash && !isPrismaConfigChanged) {
+    parseRes = cached.parseResult;
+   } else {
+    parseRes = parsePrismaSchema(path, fileData?.text ?? '', prismaConfig);
+    this.prismaCache.set(path, { hash: fileHash, parseResult: parseRes });
+   }
+   if (parseRes.diagnostics.length > 0) {
+    for (const d of parseRes.diagnostics) diagnostics.push(d);
     continue;
    }
    const schema = parseRes.schema;
-   if(!schema){
-    diagnostics.push({severity:'error',message:'Prisma schema AST is unavailable after parse',path,code:'prisma-parse-error'});
+   if (!schema) {
+    diagnostics.push({ severity: 'error', message: 'Prisma schema AST is unavailable after parse', path, code: 'prisma-parse-error' });
     continue;
    }
-   try{
-    const models=schema.list.filter((block):block is Model=>block.type==='model');
-    const modelsByName=new Map(models.map(model=>[model.name,model]));
-    const mid=idFor('module:'+path);
-    const attr=(field:Field,name:string)=>field.attributes?.find(a=>a.name===name);
-    const arg=(attribute:ReturnType<typeof attr>,key:string):any=>{
+   prismaSchemasData.push({ path, schema });
+  }
+
+  const allModelsByName = new Map<string, { model: Model; path: string }>();
+  for (const { path, schema } of prismaSchemasData) {
+   for (const block of schema.list) {
+    if (block.type === 'model') {
+     allModelsByName.set(block.name, { model: block, path });
+    }
+   }
+  }
+  const modelsGlobalMap = new Map(Array.from(allModelsByName.entries()).map(([k, v]) => [k, v.model]));
+
+  for (const { path, schema } of prismaSchemasData) {
+   try {
+    const models = schema.list.filter((block): block is Model => block.type === 'model');
+    const modelsByName = new Map(models.map(model => [model.name, model]));
+    const mid = idFor('module:' + path);
+    const attr = (field: Field, name: string) => field.attributes?.find(a => a.name === name);
+    const arg = (attribute: ReturnType<typeof attr>, key: string): any => {
      const a=attribute?.args?.map(a=>a.value).find((v:any)=>v&&typeof v==='object'&&v.type==='keyValue'&&v.key===key) as any;
      return a?.value;
     };
@@ -2158,11 +2215,13 @@ export class Analyzer {
     for(const model of models){
      for(const f of model.properties.filter((p):p is Field=>p.type==='field')){
       const relAttr = attr(f, 'relation');
-      const isKnownModel = modelsByName.has(String(f.fieldType));
+      const targetModelInfo = allModelsByName.get(String(f.fieldType));
+      const isKnownModel = Boolean(targetModelInfo);
       if (!isKnownModel && !relAttr) continue;
 
       const other = String(f.fieldType);
-      const targetModel = modelsByName.get(other);
+      const targetModel = targetModelInfo?.model;
+      const targetPath = targetModelInfo?.path ?? path;
 
       const location = model.location;
       const startOffset = location?.startOffset ?? files[path].text.indexOf('model ' + model.name);
@@ -2202,7 +2261,7 @@ export class Analyzer {
        continue;
       }
 
-      const { inverse, ambiguous } = findPrismaInverseRelationField(model, f, modelsByName);
+      const { inverse, ambiguous } = findPrismaInverseRelationField(model, f, modelsGlobalMap);
       const relInfo = extractPrismaRelationFields(relAttr);
       const foreign = relInfo.fields;
       const referenced = relInfo.references;
@@ -2250,7 +2309,8 @@ export class Analyzer {
       }
 
       const pair = [model.name, other].sort().join(':') + (model.name === other && !group ? ':' + f.name : '');
-      const id = idFor('relation:' + path + ':' + pair + ':' + group);
+      const relPathKey = path === targetPath ? path : [path, targetPath].sort().join('/');
+      const id = idFor('relation:' + relPathKey + ':' + pair + ':' + group);
       const cardinality = computePrismaRelationCardinality(f, inverse);
       const edgeLabel = cardinality + (foreign.length ? ' · ' + foreign.join(', ') : '');
       const isUncertain = !inverse || ambiguous || hasBrokenFields;
@@ -2259,7 +2319,7 @@ export class Analyzer {
        edges.set(id, {
         id,
         source: idFor('entity:' + path + ':' + model.name),
-        target: idFor('entity:' + path + ':' + other),
+        target: idFor('entity:' + targetPath + ':' + other),
         kind: 'relates-to',
         label: edgeLabel,
         provenance: 'extracted',
@@ -2361,8 +2421,9 @@ export class Analyzer {
    },
   };
 
-  const dependentClosure = this.getAffectedClosure(changedInputs, this.lastAnalysis?.graph);
-  const allAffected = new Set<string>([...changedInputs, ...builderAffectedFiles, ...dependentClosure]);
+  const prevClosure = this.getAffectedClosure(changedInputs, this.lastAnalysis?.graph);
+  const nextClosure = this.getAffectedClosure(changedInputs, graph);
+  const allAffected = new Set<string>([...changedInputs, ...builderAffectedFiles, ...prevClosure, ...nextClosure]);
   const affectedFiles = Array.from(allAffected).filter(p => !!files[p]).sort();
 
   this.lastChangedInputs = changedInputs.sort();
@@ -2378,6 +2439,7 @@ export class Analyzer {
    reusedPrograms,
    rebuiltPrograms,
   };
+  this.lastPrismaParserConfig = prismaConfig;
 
   this.lastAnalysis = result;
   this.lastReport = generateImportQualityReport(result);

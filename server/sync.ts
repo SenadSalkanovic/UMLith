@@ -70,6 +70,11 @@ export function isRelevantAnalysisInput(filePath: string): boolean {
   return true;
  }
 
+ // 7. Prisma configuration files (.prismarc, prisma.config.[cm]?[jt]s)
+ if (/^\.prismarc(?:\.json)?$/i.test(name) || /^prisma\.config\.[cm]?[jt]s$/i.test(name)) {
+  return true;
+ }
+
  return false;
 }
 
