@@ -35,6 +35,7 @@ import {
   Activity,
   Terminal,
   HelpCircle,
+  ShieldAlert,
 } from 'lucide-react';
 
 export type ReviewState = 'empty' | 'pending-review' | 'invalid' | 'stale-review';
@@ -636,6 +637,22 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                               {node.contract && (
                                 <code className="diff-node-contract">{node.contract}</code>
                               )}
+                              {node.policy === 'sensitive' && (
+                                <div className="review-sensitive-callout" data-testid={`sensitive-review-callout-${node.id}`}>
+                                  <ShieldAlert size={14} className="sensitive-icon" />
+                                  <span><strong>Sensitive Element:</strong> Human review emphasis required (R24).</span>
+                                  {node.instructions && (
+                                    <div className="review-sensitive-instructions" data-testid={`sensitive-instructions-${node.id}`}>
+                                      <em>Instructions:</em> {node.instructions}
+                                    </div>
+                                  )}
+                                  {node.requiredChecks?.length > 0 && (
+                                    <div className="review-sensitive-checks" data-testid={`sensitive-checks-${node.id}`}>
+                                      <em>Required Checks:</em> {node.requiredChecks.join(', ')}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -657,6 +674,22 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                                   <li key={i}>{c}</li>
                                 ))}
                               </ul>
+                              {(before.policy === 'sensitive' || after.policy === 'sensitive') && (
+                                <div className="review-sensitive-callout" data-testid={`sensitive-review-callout-${after.id}`}>
+                                  <ShieldAlert size={14} className="sensitive-icon" />
+                                  <span><strong>Sensitive Element:</strong> Human review emphasis required (R24).</span>
+                                  {after.instructions && (
+                                    <div className="review-sensitive-instructions" data-testid={`sensitive-instructions-${after.id}`}>
+                                      <em>Instructions:</em> {after.instructions}
+                                    </div>
+                                  )}
+                                  {after.requiredChecks?.length > 0 && (
+                                    <div className="review-sensitive-checks" data-testid={`sensitive-checks-${after.id}`}>
+                                      <em>Required Checks:</em> {after.requiredChecks.join(', ')}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -1011,6 +1044,25 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                       <span className="policy-label">Frozen Contract</span>
                     </div>
                   </div>
+                  {policyCounts.sensitive > 0 && (
+                    <div className="review-sensitive-overview" data-testid="review-sensitive-items-summary">
+                      <div className="sensitive-overview-header">
+                        <ShieldAlert size={13} className="text-amber" />
+                        <span>Sensitive Elements Requiring Review Emphasis ({policyCounts.sensitive}):</span>
+                      </div>
+                      <ul className="sensitive-overview-list" data-testid="review-sensitive-items-list">
+                        {nodes.filter(n => n.policy === 'sensitive').map(n => (
+                          <li key={n.id} className="sensitive-overview-item" data-testid={`sensitive-overview-item-${n.id}`}>
+                            <strong>{n.name}</strong> <code>({n.kind})</code>
+                            {n.instructions && <span className="item-instructions"> — {n.instructions}</span>}
+                            {n.requiredChecks?.length > 0 && (
+                              <span className="item-checks"> [Checks: {n.requiredChecks.join(', ')}]</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
 
                 <div className="review-card">

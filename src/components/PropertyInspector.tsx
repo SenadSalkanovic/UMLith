@@ -32,6 +32,7 @@ import {
   Cpu,
   ShieldAlert,
   Clock,
+  Lock,
 } from 'lucide-react';
 
 export interface NodeDraft {
@@ -78,6 +79,7 @@ export interface PropertyInspectorProps {
   isEditing?: boolean;
   initialTab?: 'overview' | 'edit' | 'requirements';
   onOpenRevisionHistory?: () => void;
+  onEditProtection?: (id: string) => void;
   isReadOnly?: boolean;
 }
 
@@ -509,6 +511,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   isEditing = false,
   initialTab,
   onOpenRevisionHistory,
+  onEditProtection,
   isReadOnly = false,
 }) => {
   const selectedNode = viewState.selectedId
@@ -1148,6 +1151,16 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                       <span className="field-error-msg" data-testid="field-error-policy">
                         <AlertCircle size={12} /> {validationErrors.policy}
                       </span>
+                    )}
+                    {onEditProtection && (
+                      <button
+                        type="button"
+                        className="btn-open-protection-editor"
+                        onClick={() => onEditProtection(selectedNode.id)}
+                        data-testid="open-protection-editor-btn"
+                      >
+                        <Shield size={12} /> Manage Protection Policies & Baselines
+                      </button>
                     )}
                   </div>
 
@@ -1864,6 +1877,13 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                   <span>Opaque logic: unsupported constructs retained as source-backed opaque node. Source access preserved.</span>
                 </div>
               )}
+
+              {selectedNode.policy === 'sensitive' && (
+                <div className="inspector-sensitive-banner" data-testid="inspector-sensitive-banner">
+                  <ShieldAlert size={14} />
+                  <span>Sensitive element: subject to additional human review emphasis and configured verification checks (R24).</span>
+                </div>
+              )}
             </div>
 
             <div className="inspector-field">
@@ -1987,6 +2007,27 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                     </li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {selectedNode.instructions && (
+              <div className="inspector-field" data-testid="inspector-instructions">
+                <label>Sensitive Instructions</label>
+                <p className="item-desc multiline-text">{selectedNode.instructions}</p>
+              </div>
+            )}
+
+            {selectedNode.baseline && (
+              <div className="inspector-field" data-testid="inspector-baseline">
+                <label>Deliberate Baseline</label>
+                <div className="baseline-summary-badge">
+                  <Lock size={12} />
+                  <span>
+                    {selectedNode.baseline.text !== undefined
+                      ? 'Frozen Implementation Baseline'
+                      : 'Frozen Contract Baseline'}
+                  </span>
+                </div>
               </div>
             )}
 

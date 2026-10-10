@@ -17,6 +17,7 @@ import { ErEditor } from './components/ErEditor';
 import { FunctionEditor } from './components/FunctionEditor';
 import { WorkflowEditor } from './components/WorkflowEditor';
 import { RevisionHistory, type SpecificationConflictState } from './components/RevisionHistory';
+import { ProtectionEditor } from './components/ProtectionEditor';
 import { Loader2, Clock, AlertTriangle } from 'lucide-react';
 
 export interface AppProps {
@@ -66,6 +67,10 @@ export const App: React.FC<AppProps> = ({
   const [activeHistoricalRevision, setActiveHistoricalRevision] = useState<number | null>(null);
   const [conflictState, setConflictState] = useState<SpecificationConflictState | null>(null);
   const [revisionsList, setRevisionsList] = useState<RevisionRecord[]>([]);
+
+  // Protection Editor Modal State (T029)
+  const [isProtectionEditorOpen, setIsProtectionEditorOpen] = useState<boolean>(false);
+  const [protectionEditorNodeId, setProtectionEditorNodeId] = useState<string | null>(null);
 
   // 3. Specification State (Persistent & Versioned Intent)
   const [specificationState, setSpecificationState] = useState<SpecificationState>(() => ({
@@ -364,6 +369,28 @@ export const App: React.FC<AppProps> = ({
       }
     }
     setIsWorkflowEditorOpen(true);
+  };
+
+  const handleOpenProtectionEditor = (nodeId: string | null = null) => {
+    setProtectionEditorNodeId(nodeId || viewState.selectedId);
+    setIsProtectionEditorOpen(true);
+  };
+
+  const handleUpdateChecks = async (checks: Record<string, { command: string; args: string[] }>) => {
+    if (!specificationState.project) return;
+    try {
+      const updated = await api.updateChecks(specificationState.project.id, checks, apiBaseUrl);
+      setSpecificationState(prev => ({
+        ...prev,
+        project: updated,
+      }));
+    } catch (err: any) {
+      setError({
+        title: 'Check Update Failed',
+        message: err.message || 'Failed to update project verification checks',
+        actionableSteps: ['Verify project state and try again'],
+      });
+    }
   };
 
   const handleEditNode = (nodeId: string) => {
@@ -953,6 +980,7 @@ export const App: React.FC<AppProps> = ({
                 onSelectEdge={handleSelectEdge}
                 apiBaseUrl={apiBaseUrl}
                 onOpenRevisionHistory={() => setIsRevisionHistoryOpen(true)}
+                onEditProtection={handleOpenProtectionEditor}
                 isReadOnly={isHistoricalActive}
               />
             </div>
@@ -1046,6 +1074,19 @@ export const App: React.FC<AppProps> = ({
         onResolveConflictApply={handleResolveConflictApply}
         onResolveConflictDiscard={handleResolveConflictDiscard}
         apiBaseUrl={apiBaseUrl}
+        mode="modal"
+      />
+
+      <ProtectionEditor
+        isOpen={isProtectionEditorOpen}
+        onClose={() => setIsProtectionEditorOpen(false)}
+        project={specificationState.project}
+        graph={specificationState.specification}
+        analysis={analysisState.analysis}
+        selectedNodeId={protectionEditorNodeId || viewState.selectedId}
+        onSelectNode={handleSelectNode}
+        onUpdateSpecification={handleUpdateSpecification}
+        onUpdateChecks={handleUpdateChecks}
         mode="modal"
       />
     </div>

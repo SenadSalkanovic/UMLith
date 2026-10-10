@@ -205,6 +205,17 @@ export async function getChecks(
   return request<Record<string, { command: string; args: string[] }>>(`/projects/${id}/checks`, { method: 'GET' }, baseUrl);
 }
 
+export async function updateChecks(
+  id: string,
+  checks: Record<string, { command: string; args: string[] }>,
+  baseUrl?: string
+): Promise<Project> {
+  return request<Project>(`/projects/${id}/checks`, {
+    method: 'PUT',
+    body: JSON.stringify(checks),
+  }, baseUrl);
+}
+
 export interface ProjectFileResponse {
   path: string;
   text: string;

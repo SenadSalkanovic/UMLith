@@ -11,24 +11,183 @@ export function normalizeContract(text:string){
  const scanner=ts.createScanner(ts.ScriptTarget.Latest,true,ts.LanguageVariant.Standard,text.replace(/^(export\s+|declare\s+|async\s+|function\s+)*/,''));
  const tokens:string[]=[];while(scanner.scan()!==ts.SyntaxKind.EndOfFileToken)tokens.push(scanner.getTokenText());return tokens.join('|');
 }
-export function freezeNode(node:ProgramNode,policy:ProgramNode['policy'],analysis?:Analysis):ProgramNode{
- if(policy==='editable'||policy==='sensitive')return NodeSchema.parse({...node,policy,baseline:undefined});
- if(policy==='frozen-implementation'){
-  const evidence=resolveSourceEvidence(node.source,analysis,analysis?.revision);
-  if(evidence.status!=='current')throw new AppError('Freeze implementation requires valid, current source evidence. '+('message' in evidence?evidence.message:'Source binding is stale.'));
-  return NodeSchema.parse({...node,policy,baseline:{source:evidence.source,text:evidence.text}});
- }
- let contract=node.contract;
- if(!contract.trim()){
-  const evidence=resolveSourceEvidence(node.source,analysis,analysis?.revision);
-  if(evidence.status!=='current')throw new AppError('Freeze contract requires an explicit interface or valid, current source evidence.');
-  const matches=analysis!.graph.nodes.filter(n=>n.kind===node.kind && n.source?.path===evidence.source.path &&
-   n.source.start===evidence.source.start && n.source.end===evidence.source.end && n.source.symbol===evidence.source.symbol &&
-   n.source.hash===evidence.source.hash && n.source.revision===evidence.source.revision);
-  if(matches.length!==1 || !matches[0].contract.trim())throw new AppError('Freeze contract requires an unambiguous declared interface.');
-  contract=matches[0].contract;
- }
- return NodeSchema.parse({...node,policy,baseline:{source:node.source,contract}});
+export interface FreezePreview {
+  kind: 'implementation' | 'contract';
+  text: string;
+  source?: ProgramNode['source'];
+}
+export interface FreezeEvaluation {
+  allowed: boolean;
+  policy: ProgramNode['policy'];
+  reason?: string;
+  unresolvedEvidence?: string;
+  preview?: FreezePreview;
+}
+export function evaluateFreeze(
+  node: ProgramNode,
+  policy: ProgramNode['policy'],
+  analysis?: Analysis
+): FreezeEvaluation {
+  if (policy === 'editable' || policy === 'sensitive') {
+    return { allowed: true, policy };
+  }
+  if (policy === 'frozen-implementation') {
+    if (!node.source) {
+      return {
+        allowed: false,
+        policy,
+        reason: 'Frozen implementation requires a source binding. Unbound implementation cannot be frozen.',
+        unresolvedEvidence: 'Node is not bound to source code. Source path, range, and content hash are required.',
+      };
+    }
+    const evidence = resolveSourceEvidence(node.source, analysis, analysis?.revision);
+    if (evidence.status !== 'current') {
+      const msg = 'message' in evidence ? evidence.message : `Source evidence is ${evidence.status}`;
+      return {
+        allowed: false,
+        policy,
+        reason: `Freeze implementation requires valid, current source evidence: ${msg}`,
+        unresolvedEvidence: msg,
+      };
+    }
+    return {
+      allowed: true,
+      policy,
+      preview: {
+        kind: 'implementation',
+        text: evidence.text,
+        source: evidence.source,
+      },
+    };
+  }
+  if (policy === 'frozen-contract') {
+    if (node.contract && node.contract.trim()) {
+      return {
+        allowed: true,
+        policy,
+        preview: {
+          kind: 'contract',
+          text: node.contract,
+          source: node.source,
+        },
+      };
+    }
+    if (!node.source) {
+      return {
+        allowed: false,
+        policy,
+        reason: 'Frozen contract requires a source binding or an explicit interface definition.',
+        unresolvedEvidence: 'Node has no explicit declared interface and is not bound to source code.',
+      };
+    }
+    const evidence = resolveSourceEvidence(node.source, analysis, analysis?.revision);
+    if (evidence.status !== 'current') {
+      const msg = 'message' in evidence ? evidence.message : `Source evidence is ${evidence.status}`;
+      return {
+        allowed: false,
+        policy,
+        reason: `Freeze contract requires an explicit interface or valid, current source evidence: ${msg}`,
+        unresolvedEvidence: msg,
+      };
+    }
+    if (!analysis) {
+      return {
+        allowed: false,
+        policy,
+        reason: 'Freeze contract requires analysis to extract declared interface.',
+        unresolvedEvidence: 'Captured analysis is unavailable.',
+      };
+    }
+    const matches = analysis.graph.nodes.filter(
+      n =>
+        n.kind === node.kind &&
+        n.source?.path === evidence.source.path &&
+        n.source.start === evidence.source.start &&
+        n.source.end === evidence.source.end &&
+        n.source.symbol === evidence.source.symbol &&
+        n.source.hash === evidence.source.hash &&
+        n.source.revision === evidence.source.revision
+    );
+    if (matches.length !== 1 || !matches[0].contract.trim()) {
+      return {
+        allowed: false,
+        policy,
+        reason: 'Freeze contract requires an unambiguous declared interface.',
+        unresolvedEvidence:
+          matches.length === 0
+            ? 'No matching declaration found in analysis.'
+            : matches.length > 1
+            ? 'Ambiguous declaration: multiple matches found in analysis.'
+            : 'Matching declaration has an empty contract interface.',
+      };
+    }
+    return {
+      allowed: true,
+      policy,
+      preview: {
+        kind: 'contract',
+        text: matches[0].contract,
+        source: node.source,
+      },
+    };
+  }
+  return { allowed: false, policy, reason: `Unknown policy: ${policy}` };
+}
+export function freezeNode(
+  node: ProgramNode,
+  policy: ProgramNode['policy'],
+  analysis?: Analysis,
+  options?: { instructions?: string; requiredChecks?: string[] }
+): ProgramNode {
+  const instructions = options?.instructions !== undefined ? options.instructions : node.instructions;
+  const requiredChecks = options?.requiredChecks !== undefined ? options.requiredChecks : node.requiredChecks;
+  const target = { ...node, instructions, requiredChecks };
+
+  if (policy === 'editable' || policy === 'sensitive') {
+    return NodeSchema.parse({ ...target, policy, baseline: undefined });
+  }
+  if (policy === 'frozen-implementation') {
+    if (!node.source) {
+      throw new AppError('Freeze implementation requires valid, current source evidence. No source binding is available');
+    }
+    const evidence = resolveSourceEvidence(node.source, analysis, analysis?.revision);
+    if (evidence.status !== 'current') {
+      throw new AppError(
+        'Freeze implementation requires valid, current source evidence. ' +
+        ('message' in evidence ? evidence.message : 'Source binding is stale.')
+      );
+    }
+    return NodeSchema.parse({
+      ...target,
+      policy,
+      baseline: { source: evidence.source, text: evidence.text },
+    });
+  }
+  let contract = target.contract;
+  if (!contract.trim()) {
+    if (!node.source) {
+      throw new AppError('Freeze contract requires an explicit interface or valid, current source evidence.');
+    }
+    const evidence = resolveSourceEvidence(node.source, analysis, analysis?.revision);
+    if (evidence.status !== 'current') {
+      throw new AppError('Freeze contract requires an explicit interface or valid, current source evidence.');
+    }
+    const matches = analysis!.graph.nodes.filter(
+      n =>
+        n.kind === target.kind &&
+        n.source?.path === evidence.source.path &&
+        n.source.start === evidence.source.start &&
+        n.source.end === evidence.source.end &&
+        n.source.symbol === evidence.source.symbol &&
+        n.source.hash === evidence.source.hash &&
+        n.source.revision === evidence.source.revision
+    );
+    if (matches.length !== 1 || !matches[0].contract.trim()) {
+      throw new AppError('Freeze contract requires an unambiguous declared interface.');
+    }
+    contract = matches[0].contract;
+  }
+  return NodeSchema.parse({ ...target, policy, baseline: { source: target.source, contract } });
 }
 export function resolveBinding(node:ProgramNode,analysis:Analysis):ProgramNode|undefined {
  if(node.source)return analysis.graph.nodes.find(n=>n.kind===node.kind&&n.source?.path===node.source?.path&&(node.source?.symbol?n.source?.symbol===node.source.symbol:n.kind==='module'));
