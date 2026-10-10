@@ -1037,32 +1037,119 @@ export class Analyzer {
     else if(ts.isFunctionLike(functionNode)&&'body' in functionNode)body=(functionNode as ts.FunctionDeclaration).body;
     if(!body)return;
     type Exit={id:string;kind:ProgramEdge['kind']};
-    const step=(n:ts.Node,type:ProgramNode['stepType'],label:string)=>{
+    type SequenceResult={exits:Exit[];throws:Exit[]};
+    const step=(n:ts.Node,type:ProgramNode['stepType'],label:string,startPos?:number,endPos?:number)=>{
      const key=owner+':'+type+':'+normalize(n.getText(sf));const count=occurrence.get(key)||0;occurrence.set(key,count+1);
      const id=idFor(key+':'+count);
-     nodes.set(id,NodeSchema.parse({id,kind:'step',name:label.slice(0,100),parentId:owner,provenance:'extracted',stepType:type,description:n.getText(sf),source:source(path,n.getStart(sf),n.end)}));
+     const sStart=startPos??n.getStart(sf);
+     const sEnd=endPos??n.end;
+     const desc=sf.text.slice(sStart,sEnd);
+     nodes.set(id,NodeSchema.parse({id,kind:'step',name:label.slice(0,100),parentId:owner,provenance:'extracted',stepType:type,description:desc,source:source(path,sStart,sEnd)}));
      return id;
     };
     const connect=(incoming:Exit[],id:string)=>incoming.forEach(e=>addEdge(e.id,id,e.kind));
-    function sequence(statements:readonly ts.Statement[],incoming:Exit[]):Exit[]{
-     let exits=incoming;
+    function sequence(statements:readonly ts.Statement[],incoming:Exit[]):SequenceResult{
+     let currentExits=incoming;
+     const allThrows:Exit[]=[];
      for(const stmt of statements){
-      if(ts.isBlock(stmt)){exits=sequence(stmt.statements,exits);continue;}
-      const type=ts.isIfStatement(stmt)?'condition':ts.isForStatement(stmt)||ts.isForOfStatement(stmt)||ts.isForInStatement(stmt)||ts.isWhileStatement(stmt)||ts.isDoStatement(stmt)?'loop':ts.isReturnStatement(stmt)?'return':ts.isThrowStatement(stmt)?'throw':ts.isTryStatement(stmt)?'try':ts.isExpressionStatement(stmt)&&ts.isCallExpression(stmt.expression)?'call':ts.isSwitchStatement(stmt)||ts.isBreakStatement(stmt)||ts.isContinueStatement(stmt)?'opaque':'operation';
-      const label=ts.isIfStatement(stmt)?stmt.expression.getText(sf):stmt.getText(sf);
-      const id=step(stmt,type,label);connect(exits,id);
-      if(type==='opaque'||type==='try'){unsupported++;diagnostics.push({severity:'warning',message:'Workflow contains a source-backed block whose execution paths are not fully reconstructed.',path,line:sf.getLineAndCharacterOfPosition(stmt.getStart()).line+1});}
+      if(ts.isBlock(stmt)){
+       const blockRes=sequence(stmt.statements,currentExits);
+       currentExits=blockRes.exits;
+       allThrows.push(...blockRes.throws);
+       continue;
+      }
       if(ts.isIfStatement(stmt)){
-       const a=sequence(ts.isBlock(stmt.thenStatement)?stmt.thenStatement.statements:[stmt.thenStatement],[{id,kind:'true'}]);
-       const b=stmt.elseStatement?sequence(ts.isBlock(stmt.elseStatement)?stmt.elseStatement.statements:[stmt.elseStatement],[{id,kind:'false'}]):[{id,kind:'false' as const}];
-       exits=[...a,...b];
-      }else if(type==='loop'){
-       const body=(stmt as ts.IterationStatement).statement;
-       const ends=sequence(ts.isBlock(body)?body.statements:[body],[{id,kind:'true'}]);
-       ends.forEach(e=>addEdge(e.id,id,'next','repeat',true));
-       exits=[{id,kind:'false'}];
-      }else exits=type==='return'||type==='throw'?[]:[{id,kind:'next'}];
-     }return exits;
+       const label=stmt.expression.getText(sf);
+       const id=step(stmt,'condition',label);
+       connect(currentExits,id);
+       const thenStmts=ts.isBlock(stmt.thenStatement)?stmt.thenStatement.statements:[stmt.thenStatement];
+       const thenRes=sequence(thenStmts,[{id,kind:'true'}]);
+       allThrows.push(...thenRes.throws);
+       let elseExits:Exit[]=[];
+       if(stmt.elseStatement){
+        const elseStmts=ts.isBlock(stmt.elseStatement)?stmt.elseStatement.statements:[stmt.elseStatement];
+        const elseRes=sequence(elseStmts,[{id,kind:'false'}]);
+        elseExits=elseRes.exits;
+        allThrows.push(...elseRes.throws);
+       }else{
+        elseExits=[{id,kind:'false'}];
+       }
+       currentExits=[...thenRes.exits,...elseExits];
+       continue;
+      }
+      if(ts.isForStatement(stmt)||ts.isForOfStatement(stmt)||ts.isForInStatement(stmt)||ts.isWhileStatement(stmt)||ts.isDoStatement(stmt)){
+       const label=stmt.getText(sf);
+       const id=step(stmt,'loop',label);
+       connect(currentExits,id);
+       const bodyStmt=(stmt as ts.IterationStatement).statement;
+       const bodyStmts=ts.isBlock(bodyStmt)?bodyStmt.statements:[bodyStmt];
+       const bodyRes=sequence(bodyStmts,[{id,kind:'true'}]);
+       allThrows.push(...bodyRes.throws);
+       bodyRes.exits.forEach(e=>addEdge(e.id,id,e.kind));
+       currentExits=[{id,kind:'false'}];
+       continue;
+      }
+      if(ts.isTryStatement(stmt)){
+       const id=step(stmt.tryBlock,'try','try',stmt.getStart(sf),stmt.tryBlock.end);
+       connect(currentExits,id);
+       const tryRes=sequence(stmt.tryBlock.statements,[{id,kind:'next'}]);
+       if(stmt.catchClause){
+        const catchVar=stmt.catchClause.variableDeclaration;
+        const catchLabel=catchVar?'catch ('+catchVar.getText(sf)+')':'catch';
+        const catchId=step(stmt.catchClause,'operation',catchLabel,stmt.catchClause.getStart(sf),stmt.catchClause.end);
+        if(tryRes.throws.length>0){
+         tryRes.throws.forEach(t=>addEdge(t.id,catchId,'exception','Failure'));
+        }else{
+         addEdge(id,catchId,'exception','Failure');
+        }
+        const catchStmts=stmt.catchClause.block.statements;
+        const catchRes=sequence(catchStmts,[{id:catchId,kind:'next'}]);
+        allThrows.push(...catchRes.throws);
+        if(stmt.finallyBlock){
+         const finallyRes=sequence(stmt.finallyBlock.statements,[...tryRes.exits,...catchRes.exits]);
+         currentExits=finallyRes.exits;
+         allThrows.push(...finallyRes.throws);
+        }else{
+         currentExits=[...tryRes.exits,...catchRes.exits];
+        }
+       }else if(stmt.finallyBlock){
+        const finallyRes=sequence(stmt.finallyBlock.statements,tryRes.exits);
+        currentExits=finallyRes.exits;
+        allThrows.push(...tryRes.throws,...finallyRes.throws);
+       }else{
+        currentExits=tryRes.exits;
+        allThrows.push(...tryRes.throws);
+       }
+       continue;
+      }
+      if(ts.isThrowStatement(stmt)){
+       const label=stmt.getText(sf);
+       const id=step(stmt,'throw',label);
+       connect(currentExits,id);
+       allThrows.push({id,kind:'exception'});
+       currentExits=[];
+       continue;
+      }
+      if(ts.isReturnStatement(stmt)){
+       const label=stmt.getText(sf);
+       const id=step(stmt,'return',label);
+       connect(currentExits,id);
+       currentExits=[];
+       continue;
+      }
+      const isCall=ts.isExpressionStatement(stmt)&&(ts.isCallExpression(stmt.expression)||(ts.isAwaitExpression(stmt.expression)&&ts.isCallExpression(stmt.expression.expression)));
+      const isOpaque=ts.isSwitchStatement(stmt)||ts.isBreakStatement(stmt)||ts.isContinueStatement(stmt)||ts.isWithStatement(stmt)||ts.isLabeledStatement(stmt);
+      const type:ProgramNode['stepType']=isCall?'call':isOpaque?'opaque':'operation';
+      const label=stmt.getText(sf);
+      const id=step(stmt,type,label);
+      connect(currentExits,id);
+      if(type==='opaque'){
+       unsupported++;
+       diagnostics.push({severity:'warning',message:'Workflow contains a source-backed block whose execution paths are not fully reconstructed.',path,line:sf.getLineAndCharacterOfPosition(stmt.getStart()).line+1});
+      }
+      currentExits=[{id,kind:'next'}];
+     }
+     return {exits:currentExits,throws:allThrows};
     }
     if(ts.isBlock(body))sequence(body.statements,[]);
     else step(body,'return','return '+body.getText(sf));

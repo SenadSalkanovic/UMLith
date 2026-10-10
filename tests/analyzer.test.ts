@@ -1481,3 +1481,264 @@ export class Dispatcher implements MissingContract {
   await rm(dir, { recursive: true, force: true });
  }
 });
+
+it('imports a nested loop/condition with try/catch/throw and returns (T037 concrete scenario 1 & AC 1-3)', async () => {
+ const fixtureDir = resolve('tests/fixtures/typescript-workflows');
+ const analyzer = new Analyzer();
+ const a = await analyzer.analyze(fixtureDir);
+
+ // 1. Quality report and graph validity
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+ expect(a.quality.unresolvedReferences).toBe(0);
+ // unsupportedWorkflow has 1 unsupported construct (switch statement)
+ expect(a.quality.unsupportedConstructs).toBe(1);
+ expect(a.quality.diagnostics).toContainEqual(
+  expect.objectContaining({
+   severity: 'warning',
+   message: expect.stringContaining('Workflow contains a source-backed block'),
+  })
+ );
+
+ const nodes = a.graph.nodes;
+ const edges = a.graph.edges;
+
+ // 2. Identify runWorkflow function and its workflow steps
+ const runWorkflowFn = nodes.find(n => n.kind === 'function' && n.name === 'runWorkflow')!;
+ expect(runWorkflowFn).toBeDefined();
+
+ const workflowSteps = nodes.filter(n => n.kind === 'step' && n.parentId === runWorkflowFn.id);
+ expect(workflowSteps.length).toBeGreaterThanOrEqual(10);
+
+ const tryStep = workflowSteps.find(s => s.stepType === 'try')!;
+ const loops = workflowSteps.filter(s => s.stepType === 'loop');
+ const conditions = workflowSteps.filter(s => s.stepType === 'condition');
+ const throws = workflowSteps.filter(s => s.stepType === 'throw');
+ const returns = workflowSteps.filter(s => s.stepType === 'return');
+ const catchStep = workflowSteps.find(s => s.stepType === 'operation' && s.name.startsWith('catch'))!;
+ const calls = workflowSteps.filter(s => s.stepType === 'call');
+
+ expect(tryStep).toBeDefined();
+ expect(loops.length).toBe(2);
+ expect(conditions.length).toBe(2);
+ expect(throws.length).toBe(2);
+ expect(returns.length).toBe(2);
+ expect(catchStep).toBeDefined();
+ expect(calls.length).toBe(2);
+
+ const outerLoop = loops.find(l => l.name.includes('batch of batches'))!;
+ const innerLoop = loops.find(l => l.name.includes('item of batch'))!;
+ const emptyBatchCond = conditions.find(c => c.name.includes('batch.length === 0'))!;
+ const poisonCond = conditions.find(c => c.name.includes("item === 'poison'"))!;
+ const emptyBatchThrow = throws.find(t => t.name.includes('Empty batch'))!;
+ const poisonThrow = throws.find(t => t.name.includes('Poison pill'))!;
+ const completedReturn = returns.find(r => r.name.includes("'completed'"))!;
+ const failedReturn = returns.find(r => r.name.includes("'failed'"))!;
+ const processItemCall = calls.find(c => c.name.includes('processItem'))!;
+ const recordFailureCall = calls.find(c => c.name.includes('recordFailure'))!;
+
+ expect(outerLoop).toBeDefined();
+ expect(innerLoop).toBeDefined();
+ expect(emptyBatchCond).toBeDefined();
+ expect(poisonCond).toBeDefined();
+ expect(emptyBatchThrow).toBeDefined();
+ expect(poisonThrow).toBeDefined();
+ expect(completedReturn).toBeDefined();
+ expect(failedReturn).toBeDefined();
+ expect(processItemCall).toBeDefined();
+ expect(recordFailureCall).toBeDefined();
+
+ // 3. Verify ownership: all steps are owned by runWorkflowFn (AC 1)
+ for (const step of workflowSteps) {
+  expect(step.parentId).toBe(runWorkflowFn.id);
+  expect(step.provenance).toBe('extracted');
+  expect(step.source).toBeDefined();
+  expect(step.source?.path).toBe('src/workflows.ts');
+  expect(step.source?.revision).toBe(a.revision);
+ }
+
+ // 4. Verify branch edges and transitions (concrete scenario 1)
+ // try --[next]--> outerLoop
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: tryStep.id,
+  target: outerLoop.id,
+  kind: 'next',
+ }));
+
+ // outerLoop --[true]--> emptyBatchCond
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: outerLoop.id,
+  target: emptyBatchCond.id,
+  kind: 'true',
+ }));
+
+ // emptyBatchCond --[true]--> emptyBatchThrow
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: emptyBatchCond.id,
+  target: emptyBatchThrow.id,
+  kind: 'true',
+ }));
+
+ // emptyBatchCond --[false]--> innerLoop
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: emptyBatchCond.id,
+  target: innerLoop.id,
+  kind: 'false',
+ }));
+
+ // innerLoop --[true]--> poisonCond
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: innerLoop.id,
+  target: poisonCond.id,
+  kind: 'true',
+ }));
+
+ // poisonCond --[true]--> poisonThrow
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: poisonCond.id,
+  target: poisonThrow.id,
+  kind: 'true',
+ }));
+
+ // poisonCond --[false]--> processItemCall
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: poisonCond.id,
+  target: processItemCall.id,
+  kind: 'false',
+ }));
+
+ // processItemCall --[next]--> innerLoop (inner loop repeat)
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: processItemCall.id,
+  target: innerLoop.id,
+  kind: 'next',
+ }));
+
+ // innerLoop --[false]--> outerLoop (inner loop completion loops back to outer)
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: innerLoop.id,
+  target: outerLoop.id,
+  kind: 'false',
+ }));
+
+ // outerLoop --[false]--> completedReturn (outer loop completion exits to return)
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: outerLoop.id,
+  target: completedReturn.id,
+  kind: 'false',
+ }));
+
+ // Exception transitions: throw --[exception]--> catchStep
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: emptyBatchThrow.id,
+  target: catchStep.id,
+  kind: 'exception',
+  label: 'Failure',
+ }));
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: poisonThrow.id,
+  target: catchStep.id,
+  kind: 'exception',
+  label: 'Failure',
+ }));
+
+ // catchStep --[next]--> recordFailureCall
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: catchStep.id,
+  target: recordFailureCall.id,
+  kind: 'next',
+ }));
+
+ // recordFailureCall --[next]--> failedReturn
+ expect(edges).toContainEqual(expect.objectContaining({
+  source: recordFailureCall.id,
+  target: failedReturn.id,
+  kind: 'next',
+ }));
+
+ // 5. Confirm returns and throws do NOT continue with next
+ for (const terminal of [emptyBatchThrow, poisonThrow, completedReturn, failedReturn]) {
+  const nextEdges = edges.filter(e => e.source === terminal.id && e.kind === 'next');
+  expect(nextEdges).toHaveLength(0);
+ }
+});
+
+it('ensures description-only intended functions remain untouched and opaque logic retains source evidence (T037 AC 2 & AC 3)', async () => {
+ const fixtureDir = resolve('tests/fixtures/typescript-workflows');
+ const analyzer = new Analyzer();
+ const a = await analyzer.analyze(fixtureDir);
+
+ // 1. Description-only intended functions in code (interface method signatures) have no workflow steps
+ const ifaceService = a.graph.nodes.find(n => n.kind === 'interface' && n.name === 'IWorkflowService')!;
+ expect(ifaceService).toBeDefined();
+ const descMethod = a.graph.nodes.find(n => n.kind === 'function' && n.name === 'describeWorkflow' && n.parentId === ifaceService.id)!;
+ expect(descMethod).toBeDefined();
+ const descSteps = a.graph.nodes.filter(n => n.kind === 'step' && n.parentId === descMethod.id);
+ expect(descSteps).toHaveLength(0);
+
+ // 2. Description-only intended function in ProjectStore specification is untouched
+ const tempDir = await mkdtemp(join(tmpdir(), 'architect-desc-func-'));
+ try {
+  const store = new ProjectStore(tempDir);
+  const project = await store.create({ name: 'DescFuncTest', root: fixtureDir });
+
+  const humanDescOnlyNode = {
+   id: 'human-desc-only-fn',
+   kind: 'function' as const,
+   name: 'plannedFeature',
+   description: 'Intended specification for a future feature',
+   provenance: 'human' as const,
+   policy: 'editable' as const,
+   contract: 'plannedFeature(): void',
+   requiredChecks: [],
+   instructions: 'Human intent',
+   outputPath: '',
+   fields: [],
+  };
+
+  await store.updateSpec(project.id, 0, {
+   nodes: [humanDescOnlyNode],
+   edges: [],
+  });
+
+  const updatedProject = await store.get(project.id);
+  expect(updatedProject.specification.nodes).toHaveLength(1);
+  const specFn = updatedProject.specification.nodes[0];
+  expect(specFn.id).toBe('human-desc-only-fn');
+  expect(specFn.stepType).toBeUndefined();
+  expect(specFn.description).toBe('Intended specification for a future feature');
+  const specSteps = updatedProject.specification.nodes.filter(n => n.kind === 'step');
+  expect(specSteps).toHaveLength(0);
+ } finally {
+  await rm(tempDir, { recursive: true, force: true });
+ }
+
+ // 3. Unsupported logic remains visible as source-backed opaque nodes (AC 3 & R08)
+ const unsupportedFn = a.graph.nodes.find(n => n.kind === 'function' && n.name === 'unsupportedWorkflow')!;
+ expect(unsupportedFn).toBeDefined();
+ const opaqueStep = a.graph.nodes.find(n => n.kind === 'step' && n.parentId === unsupportedFn.id && n.stepType === 'opaque')!;
+ expect(opaqueStep).toBeDefined();
+ expect(opaqueStep.source).toBeDefined();
+ expect(opaqueStep.source?.path).toBe('src/workflows.ts');
+ const evidence = resolveSourceEvidence(opaqueStep.source, a, a.revision);
+ expect(evidence.status).toBe('current');
+ if (evidence.status === 'current') {
+  expect(evidence.text).toContain('switch (code)');
+ }
+});
+
+it('compares workflow nodes and branch edges against an expected graph (T037 concrete scenario 2)', async () => {
+ const fixtureDir = resolve('tests/fixtures/typescript-workflows');
+ const expectedPath = resolve('tests/fixtures/typescript-workflows.expected.json');
+
+ const analyzer = new Analyzer();
+ const actual = await analyzer.analyze(fixtureDir);
+
+ const expectedContent = await readFile(expectedPath, 'utf8');
+ const expectedGraph = JSON.parse(expectedContent);
+
+ expect(GraphSchema.safeParse(expectedGraph).success).toBe(true);
+ expect(actual.graph.schemaVersion).toBe(expectedGraph.schemaVersion);
+ expect(actual.graph.nodes.length).toBe(expectedGraph.nodes.length);
+ expect(actual.graph.edges.length).toBe(expectedGraph.edges.length);
+ expect(actual.graph).toEqual(expectedGraph);
+});
