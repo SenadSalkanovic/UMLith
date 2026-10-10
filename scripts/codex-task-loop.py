@@ -722,6 +722,8 @@ def run(args):
                                  'Verify every acceptance criterion and concrete scenario, correctness, regression risk, '
                                  'scope, and potential credential/privacy leaks. Verify configured checks and task-specific evidence. '
                                  'A claimed implementation summary is not proof. Return approve only with zero unresolved findings. '
+                                 'The findings array contains only unresolved actionable defects, never positive observations or passed checks. '
+                                 'Put verification evidence in summary. When approving, return exactly "findings": []. '
                                  'Review only: do not edit files, stage, commit, reset, or push. The controller commits locally. '
                                  'A task may already be implemented; an empty diff still requires full task verification.\n'
                                  f"Controller checks passed: {json.dumps(args.check)}\n"
