@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN} from '../server/analyzer';
+import {Analyzer,checkCompilerPin,discoverAnalysisInputs,isTypeScriptVersionCompatible,TYPESCRIPT_PIN,PRISMA_PARSER_CONFIG,DEFAULT_PRISMA_PARSER_CONFIG,createPrismaParser,parsePrismaSchema,findPrismaBlockEnd} from '../server/analyzer';
 import {GraphSchema,resolveSourceEvidence,type AgentJob} from '../shared/model';
 import {hash,captureSourceRevision,captureFiles,hashes} from '../server/files';
 import {mkdtemp,writeFile,readFile,cp,rm,mkdir} from 'node:fs/promises';
@@ -1918,5 +1918,309 @@ it('inspects an opaque node after its source changes (T038 concrete scenario 2 &
   expect(staleEvidence.status).toBe('stale');
  } finally {
   await rm(tempDir, { recursive: true, force: true });
+ }
+});
+
+it('verifies explicit Prisma parser configuration visibility and options (T039 AC 1)', async () => {
+ // 1. Visible parser configuration constants
+ expect(PRISMA_PARSER_CONFIG).toEqual({ nodeLocationTracking: 'full' });
+ expect(DEFAULT_PRISMA_PARSER_CONFIG).toEqual({ nodeLocationTracking: 'full' });
+ expect(Analyzer.PRISMA_PARSER_CONFIG).toEqual({ nodeLocationTracking: 'full' });
+
+ // 2. Visible on Analyzer instance
+ const analyzer = new Analyzer();
+ expect(analyzer.prismaParserConfig).toEqual({ nodeLocationTracking: 'full' });
+
+ // 3. Configurable via constructor
+ const customAnalyzer = new Analyzer({ prismaParserConfig: { nodeLocationTracking: 'full' } });
+ expect(customAnalyzer.prismaParserConfig.nodeLocationTracking).toBe('full');
+
+ // 4. Parser creation factory initializes parser with explicit configuration
+ const parser = createPrismaParser();
+ expect(parser.config.nodeLocationTracking).toBe('full');
+
+ // 5. Helper findPrismaBlockEnd correctly identifies block boundaries
+ const sampleText = 'model Sample {\n  id Int @id\n}\nenum SampleRole {\n  A\n  B\n}';
+ const modelEnd = findPrismaBlockEnd(sampleText, 0);
+ expect(sampleText.slice(0, modelEnd)).toBe('model Sample {\n  id Int @id\n}');
+ const enumStart = sampleText.indexOf('enum');
+ const enumEnd = findPrismaBlockEnd(sampleText, enumStart);
+ expect(sampleText.slice(enumStart, enumEnd)).toBe('enum SampleRole {\n  A\n  B\n}');
+});
+
+it('parses Prisma schema text and produces explicit diagnostics on syntax errors (T039 AC 2 & checklist 2)', async () => {
+ // 1. Valid schema text parses with AST and empty diagnostics
+ const validSchema = `datasource db {
+  provider = "sqlite"
+}
+model User {
+  id Int @id
+}
+enum Role {
+  USER
+  ADMIN
+}`;
+ const validResult = parsePrismaSchema('prisma/schema.prisma', validSchema);
+ expect(validResult.schema).toBeDefined();
+ expect(validResult.schema?.type).toBe('schema');
+ expect(validResult.diagnostics).toEqual([]);
+
+ // Model location tracking is populated due to explicit nodeLocationTracking: 'full'
+ const userModel = validResult.schema?.list.find((b: any) => b.type === 'model' && b.name === 'User') as any;
+ expect(userModel).toBeDefined();
+ expect(userModel.location).toBeDefined();
+ expect(userModel.location.startLine).toBe(4);
+
+ const roleEnum = validResult.schema?.list.find((b: any) => b.type === 'enum' && b.name === 'Role') as any;
+ expect(roleEnum).toBeDefined();
+ expect(roleEnum.location).toBeDefined();
+ expect(roleEnum.location.startLine).toBe(7);
+
+ // 2. Malformed schema produces explicit error diagnostics with path, line, code, and message
+ const malformedSchema = `model Broken {
+  id Int @id
+  invalid syntax here
+}`;
+ const malformedResult = parsePrismaSchema('prisma/broken.prisma', malformedSchema);
+ expect(malformedResult.schema).toBeUndefined();
+ expect(malformedResult.diagnostics.length).toBeGreaterThan(0);
+ const diag = malformedResult.diagnostics[0];
+ expect(diag.severity).toBe('error');
+ expect(diag.path).toBe('prisma/broken.prisma');
+ expect(diag.code).toBe('prisma-parse-error');
+ expect(diag.line).toBe(3);
+ expect(diag.message).toContain('Prisma parse failed');
+
+ // 3. Corrupted / unclosed schema produces diagnostics with line
+ const unclosedSchema = `model Unclosed {
+  id Int @id
+`;
+ const unclosedResult = parsePrismaSchema('prisma/unclosed.prisma', unclosedSchema);
+ expect(unclosedResult.schema).toBeUndefined();
+ expect(unclosedResult.diagnostics).toContainEqual(
+  expect.objectContaining({
+   severity: 'error',
+   path: 'prisma/unclosed.prisma',
+   code: 'prisma-parse-error',
+   line: expect.any(Number),
+  })
+ );
+});
+
+it('parses valid and malformed schema fixtures, reporting schema paths and ranges (T039 concrete scenario 1 & AC 1-3)', async () => {
+ const dir = await mkdtemp(join(tmpdir(), 'architect-prisma-fixtures-'));
+ try {
+  await cp(resolve('tests/fixtures/prisma-parser'), dir, { recursive: true });
+
+  // A. Valid-only scenario: remove malformed.prisma so only valid.prisma remains
+  await rm(join(dir, 'prisma', 'malformed.prisma'), { force: true });
+
+  const analyzer = new Analyzer();
+  const discovery = await analyzer.discoverInputs(dir);
+  expect(discovery.eligibleFiles).toEqual(['prisma/valid.prisma', 'src/index.ts']);
+  expect(discovery.prismaSchemas).toEqual(['prisma/valid.prisma']);
+
+  const validAnalysis = await analyzer.analyze(dir);
+  // Quality and status
+  expect(validAnalysis.status).toBe('current');
+  expect(validAnalysis.quality.eligibleFiles).toBe(2);
+  expect(validAnalysis.quality.analyzedFiles).toBe(2);
+  expect(validAnalysis.quality.diagnostics).toEqual([]);
+  // Prisma validation reported as unavailable, never passed
+  expect(validAnalysis.quality.prismaValidation).toBe('unavailable');
+
+  // Verify extracted entity and enum nodes
+  const user = validAnalysis.graph.nodes.find(n => n.kind === 'entity' && n.name === 'User')!;
+  const post = validAnalysis.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Post')!;
+  const role = validAnalysis.graph.nodes.find(n => n.kind === 'enum' && n.name === 'Role')!;
+  const moduleNode = validAnalysis.graph.nodes.find(n => n.kind === 'module' && n.name === 'prisma/valid.prisma')!;
+
+  expect(user).toBeDefined();
+  expect(post).toBeDefined();
+  expect(role).toBeDefined();
+  expect(moduleNode).toBeDefined();
+
+  // Output paths and containment
+  expect(user.outputPath).toBe('prisma/valid.prisma');
+  expect(post.outputPath).toBe('prisma/valid.prisma');
+  expect(role.outputPath).toBe('prisma/valid.prisma');
+  expect(user.parentId).toBe(moduleNode.id);
+  expect(post.parentId).toBe(moduleNode.id);
+  expect(role.parentId).toBe(moduleNode.id);
+
+  // Exact source evidence ranges and lines
+  expect(user.source).toBeDefined();
+  expect(user.source?.path).toBe('prisma/valid.prisma');
+  expect(user.source?.line).toBe(10);
+  expect(user.source?.start).toBeLessThan(user.source!.end);
+
+  expect(post.source).toBeDefined();
+  expect(post.source?.path).toBe('prisma/valid.prisma');
+  expect(post.source?.line).toBe(17);
+
+  expect(role.source).toBeDefined();
+  expect(role.source?.path).toBe('prisma/valid.prisma');
+  expect(role.source?.line).toBe(5);
+
+  // Source evidence resolves against captured file
+  const userEvidence = resolveSourceEvidence(user.source, validAnalysis, validAnalysis.revision);
+  expect(userEvidence.status).toBe('current');
+  if (userEvidence.status === 'current') {
+   expect(userEvidence.text).toContain('model User {');
+   expect(userEvidence.text).toContain('role  Role   @default(USER)');
+  }
+
+  const roleEvidence = resolveSourceEvidence(role.source, validAnalysis, validAnalysis.revision);
+  expect(roleEvidence.status).toBe('current');
+  if (roleEvidence.status === 'current') {
+   expect(roleEvidence.text).toContain('enum Role {');
+   expect(roleEvidence.text).toContain('ADMIN');
+  }
+
+  // Relations extracted
+  expect(validAnalysis.graph.edges).toContainEqual(
+   expect.objectContaining({ source: post.id, target: user.id, kind: 'relates-to' })
+  );
+  expect(GraphSchema.safeParse(validAnalysis.graph).success).toBe(true);
+
+  // B. Malformed-only scenario: recreate malformed.prisma and remove valid.prisma
+  await cp(resolve('tests/fixtures/prisma-parser/prisma/malformed.prisma'), join(dir, 'prisma', 'malformed.prisma'));
+  await rm(join(dir, 'prisma', 'valid.prisma'), { force: true });
+
+  const malformedAnalysis = await analyzer.analyze(dir);
+  // Status marked partial
+  expect(malformedAnalysis.status).toBe('partial');
+  expect(malformedAnalysis.quality.eligibleFiles).toBe(2);
+  expect(malformedAnalysis.quality.analyzedFiles).toBe(1); // Only src/index.ts was analyzed
+  // Diagnostics contain the error with line and code
+  expect(malformedAnalysis.quality.diagnostics).toContainEqual(
+   expect.objectContaining({
+    path: 'prisma/malformed.prisma',
+    severity: 'error',
+    code: 'prisma-parse-error',
+    line: 7,
+   })
+  );
+  // Schema failures never imply successful validation
+  expect(malformedAnalysis.quality.prismaValidation).toBe('unavailable');
+  expect(malformedAnalysis.quality.prismaValidation).not.toBe('passed');
+  // No entity nodes extracted from malformed schema
+  expect(malformedAnalysis.graph.nodes.some(n => n.name === 'BrokenModel')).toBe(false);
+  expect(GraphSchema.safeParse(malformedAnalysis.graph).success).toBe(true);
+ } finally {
+  await rm(dir, { recursive: true, force: true });
+ }
+});
+
+it('imports multiple schemas where only one fails, preserving usable neighboring schemas (T039 concrete scenario 2 & AC 2-3)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-parser');
+ const analyzer = new Analyzer();
+
+ // 1. Input discovery identifies both schemas as eligible
+ const discovery = await analyzer.discoverInputs(fixtureDir);
+ expect(discovery.prismaSchemas).toEqual(['prisma/malformed.prisma', 'prisma/valid.prisma']);
+ expect(discovery.eligibleFiles).toEqual(['prisma/malformed.prisma', 'prisma/valid.prisma', 'src/index.ts']);
+ expect(discovery.denominator).toBe(3);
+
+ // 2. Analyze the multi-schema project where one schema is malformed
+ const a = await analyzer.analyze(fixtureDir);
+
+ // 3. Acceptance Criteria & Quality Checks:
+ // Denominator covers all eligible files, numerator counts only successfully analyzed files
+ expect(a.quality.eligibleFiles).toBe(3);
+ expect(a.quality.analyzedFiles).toBe(2); // src/index.ts and prisma/valid.prisma; malformed.prisma omitted
+ // Status is explicitly marked partial
+ expect(a.status).toBe('partial');
+
+ // 4. Malformed schema produces diagnostics with path, line, and code
+ const malformedDiag = a.quality.diagnostics.find(d => d.path === 'prisma/malformed.prisma');
+ expect(malformedDiag).toBeDefined();
+ expect(malformedDiag?.severity).toBe('error');
+ expect(malformedDiag?.code).toBe('prisma-parse-error');
+ expect(malformedDiag?.line).toBe(7);
+ expect(malformedDiag?.message).toContain('Prisma parse failed');
+
+ // 5. Schema failures never imply successful validation
+ expect(a.quality.prismaValidation).toBe('unavailable');
+ expect(a.quality.prismaValidation).not.toBe('passed');
+
+ // 6. Preserve usable neighboring schemas:
+ // Entities and enums from prisma/valid.prisma remain in the graph and fully usable
+ const user = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'User');
+ const post = a.graph.nodes.find(n => n.kind === 'entity' && n.name === 'Post');
+ const role = a.graph.nodes.find(n => n.kind === 'enum' && n.name === 'Role');
+
+ expect(user).toBeDefined();
+ expect(post).toBeDefined();
+ expect(role).toBeDefined();
+
+ // BrokenModel from malformed.prisma is completely absent
+ expect(a.graph.nodes.some(n => n.name === 'BrokenModel')).toBe(false);
+
+ // Neighboring relationships are preserved
+ expect(a.graph.edges).toContainEqual(
+  expect.objectContaining({ source: post!.id, target: user!.id, kind: 'relates-to' })
+ );
+
+ // Sourced evidence on neighboring entities and enums is intact and resolves as current
+ const userEvidence = resolveSourceEvidence(user!.source, a, a.revision);
+ expect(userEvidence.status).toBe('current');
+ if (userEvidence.status === 'current') {
+  expect(userEvidence.text).toContain('model User {');
+ }
+
+ const roleEvidence = resolveSourceEvidence(role!.source, a, a.revision);
+ expect(roleEvidence.status).toBe('current');
+ if (roleEvidence.status === 'current') {
+  expect(roleEvidence.text).toContain('enum Role {');
+ }
+
+ // Entire graph structure remains schema-valid
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+});
+
+it('ensures schema failures never imply successful validation in review checks (T039 AC 3)', async () => {
+ const fixtureDir = resolve('tests/fixtures/prisma-parser');
+ const analyzer = new Analyzer();
+ const analysis = await analyzer.analyze(fixtureDir);
+
+ // Structural check
+ expect(analysis.quality.prismaValidation).not.toBe('passed');
+ expect(analysis.quality.prismaValidation).toBe('unavailable');
+ expect(analysis.status).toBe('partial');
+
+ // Candidate review verification:
+ // A candidate reflecting this partial analysis cannot claim passed validation
+ const dir = await mkdtemp(join(tmpdir(), 'architect-review-check-'));
+ try {
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'CandidateValidation', root: fixtureDir });
+  expect(p.analysis?.quality.prismaValidation).not.toBe('passed');
+  expect(p.analysis?.quality.prismaValidation).toBe('unavailable');
+  expect(p.analysis?.status).toBe('partial');
+
+  const candidateDir = join(dir, 'candidate');
+  await cp(fixtureDir, candidateDir, { recursive: true });
+  const job: AgentJob = {
+   id: 'test-job',
+   projectId: p.id,
+   kind: 'implementation',
+   status: 'review',
+   createdAt: new Date().toISOString(),
+   specRevision: p.specRevision,
+   sourceHashes: hashes(await captureFiles(p.root)),
+   task: 'Test Prisma',
+   scope: ['.'],
+   workspace: candidateDir,
+   events: [],
+  };
+
+  const report = await validateCandidate(p, job);
+  // Candidate has prisma parse error diagnostics and prisma validation is unavailable
+  expect(report.candidate?.quality.prismaValidation).not.toBe('passed');
+  expect(report.candidate?.quality.prismaValidation).toBe('unavailable');
+  expect(report.warnings).toContain('Prisma schema parsed; project-version semantic validation is not yet available.');
+ } finally {
+  await rm(dir, { recursive: true, force: true });
  }
 });

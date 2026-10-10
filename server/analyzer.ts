@@ -1,5 +1,14 @@
 import ts from 'typescript';
-import {getSchema,PrismaParser,VisitorClassFactory,type Field,type Model} from '@mrleebo/prisma-ast';
+import {
+ getSchema,
+ PrismaParser,
+ VisitorClassFactory,
+ type Field,
+ type Model,
+ type Enum as PrismaEnum,
+ type PrismaAstConfig,
+ type Schema as PrismaSchemaAst,
+} from '@mrleebo/prisma-ast';
 import {resolve,relative,basename,dirname} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {NodeSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge} from '../shared/model';
@@ -32,6 +41,107 @@ export function isTypeScriptVersionCompatible(range: string, pin = TYPESCRIPT_PI
   }
  }
  return true;
+}
+
+export const PRISMA_PARSER_CONFIG: PrismaAstConfig['parser'] = Object.freeze({
+ nodeLocationTracking: 'full',
+});
+export const DEFAULT_PRISMA_PARSER_CONFIG = PRISMA_PARSER_CONFIG;
+export type PrismaParserConfig = PrismaAstConfig['parser'];
+
+export function createPrismaParser(
+ config: PrismaAstConfig['parser'] = PRISMA_PARSER_CONFIG
+): PrismaParser {
+ return new PrismaParser(config);
+}
+
+export interface PrismaParseResult {
+ schema?: PrismaSchemaAst;
+ diagnostics: Diagnostic[];
+}
+
+export function parsePrismaSchema(
+ path: string,
+ text: string,
+ config: PrismaAstConfig['parser'] = PRISMA_PARSER_CONFIG
+): PrismaParseResult {
+ const parser = createPrismaParser(config);
+ const Visitor = VisitorClassFactory(parser);
+ const visitor = new Visitor();
+ try {
+  const schema = getSchema(text, { parser, visitor });
+  return { schema, diagnostics: [] };
+ } catch (error: any) {
+  const errList = (parser.errors && parser.errors.length > 0) ? parser.errors : [error];
+  const diagnostics: Diagnostic[] = errList.map((err: any) => {
+   const rawMessage = (err as Error)?.message || String(err);
+   let line: number | undefined = undefined;
+   if (err?.token?.startLine && Number.isInteger(err.token.startLine) && err.token.startLine > 0) {
+    line = err.token.startLine;
+   } else if (err?.previousToken?.startLine && Number.isInteger(err.previousToken.startLine) && err.previousToken.startLine > 0) {
+    line = err.previousToken.startLine;
+   } else if (typeof err?.token?.startOffset === 'number' && !Number.isNaN(err.token.startOffset)) {
+    line = Math.max(1, text.slice(0, err.token.startOffset).split('\n').length);
+   }
+   return {
+    severity: 'error' as const,
+    message: 'Prisma parse failed: ' + rawMessage,
+    path,
+    ...(line !== undefined ? { line } : {}),
+    code: 'prisma-parse-error',
+   };
+  });
+  return { diagnostics };
+ }
+}
+
+export function findPrismaBlockEnd(text: string, startOffset: number): number {
+ const openBrace = text.indexOf('{', startOffset);
+ if (openBrace === -1) return startOffset;
+ let depth = 0;
+ let inString = false;
+ let inLineComment = false;
+ let inBlockComment = false;
+ for (let i = openBrace; i < text.length; i++) {
+  const ch = text[i];
+  const next = text[i + 1];
+  if (inLineComment) {
+   if (ch === '\n') inLineComment = false;
+   continue;
+  }
+  if (inBlockComment) {
+   if (ch === '*' && next === '/') {
+    inBlockComment = false;
+    i++;
+   }
+   continue;
+  }
+  if (ch === '/' && next === '/') {
+   inLineComment = true;
+   i++;
+   continue;
+  }
+  if (ch === '/' && next === '*') {
+   inBlockComment = true;
+   i++;
+   continue;
+  }
+  if (ch === '"' && text[i - 1] !== '\\') {
+   inString = !inString;
+   continue;
+  }
+  if (!inString) {
+   if (ch === '{') {
+    depth++;
+   } else if (ch === '}') {
+    depth--;
+    if (depth === 0) {
+     return i + 1;
+    }
+   }
+  }
+ }
+ return text.length;
 }
 
 export type InputCategory =
@@ -442,16 +552,26 @@ export async function discoverAnalysisInputs(
 export interface AnalyzeOptions {
  capturedRevision?: CapturedRevision | Record<string, Buffer>;
  captureOptions?: CaptureOptions;
+ prismaParserConfig?: PrismaAstConfig['parser'];
 }
 
 export class Analyzer {
  public static readonly COMPILER_PIN = TYPESCRIPT_PIN;
+ public static readonly PRISMA_PARSER_CONFIG = PRISMA_PARSER_CONFIG;
  public readonly compilerPin = TYPESCRIPT_PIN;
  public readonly compilerVersion = ts.version;
+ public readonly prismaParserConfig: PrismaAstConfig['parser'];
  public lastDiscovery?: AnalysisInputDiscovery;
  private programs=new Map<string,ts.Program>();
  private sourceCache=new Map<string,{hash:string;source:ts.SourceFile}>();
  private sequence=0;
+
+ constructor(options?: { prismaParserConfig?: PrismaAstConfig['parser'] }) {
+  this.prismaParserConfig = options?.prismaParserConfig
+   ? { ...PRISMA_PARSER_CONFIG, ...options.prismaParserConfig }
+   : PRISMA_PARSER_CONFIG;
+ }
+
  async discoverInputs(root:string, capturedFiles?: Record<string, Buffer | { hash: string; text: string }>):Promise<AnalysisInputDiscovery>{
   return discoverAnalysisInputs(resolve(root), capturedFiles);
  }
@@ -1241,11 +1361,19 @@ export class Analyzer {
    function flows(n:ts.Node){const id=declarations.get(n);if(id&&nodes.get(id)?.kind==='function'&&!ts.isArrowFunction(n)&&!ts.isFunctionExpression(n))workflow(n,id);ts.forEachChild(n,flows);}
    flows(sf);
   }
+  const prismaConfig = options?.prismaParserConfig ?? this.prismaParserConfig;
   for(const path of eligible.filter(p=>p.endsWith('.prisma'))){
+   const parseRes = parsePrismaSchema(path, files[path]?.text ?? '', prismaConfig);
+   if(parseRes.diagnostics.length > 0){
+    for(const d of parseRes.diagnostics) diagnostics.push(d);
+    continue;
+   }
+   const schema = parseRes.schema;
+   if(!schema){
+    diagnostics.push({severity:'error',message:'Prisma schema AST is unavailable after parse',path,code:'prisma-parse-error'});
+    continue;
+   }
    try{
-    const parser=new PrismaParser({nodeLocationTracking:'full'});
-    const Visitor=VisitorClassFactory(parser);
-    const schema=getSchema(files[path].text,{parser,visitor:new Visitor()});
     const models=schema.list.filter((block):block is Model=>block.type==='model');
     const modelsByName=new Map(models.map(model=>[model.name,model]));
     const mid=idFor('module:'+path);
@@ -1261,7 +1389,8 @@ export class Analyzer {
      const foreign=new Set(fields.flatMap(f=>strings(arg(attr(f,'relation'),'fields'))));
      const compound=new Set(model.properties.filter(p=>p.type==='attribute'&&p.name==='id').flatMap((p:any)=>strings(p.args?.[0]?.value)));
      const location=model.location;const startOffset=location?.startOffset??files[path].text.indexOf('model '+model.name);
-     const end=(location?.endOffset??startOffset)+1;
+     const blockEnd=findPrismaBlockEnd(files[path].text,startOffset);
+     const end=blockEnd > startOffset ? blockEnd : (location?.endOffset??startOffset)+1;
      const mapped=model.properties.find(p=>p.type==='attribute'&&p.name==='map') as any;
      nodes.set(id,NodeSchema.parse({id,kind:'entity',name:model.name,parentId:mid,provenance:'extracted',source:source(path,startOffset,end,model.name),outputPath:path,
       contract:JSON.stringify(model.properties.filter(p=>p.type==='field'||p.type==='attribute').map((p:any)=>({name:p.name,fieldType:p.fieldType,optional:p.optional,array:p.array,attributes:p.attributes,args:p.args})),(key,value)=>key==='location'||key==='comment'?undefined:value),
@@ -1281,9 +1410,18 @@ export class Analyzer {
       if(!edges.has(id)||foreign.length)edges.set(id,{id,source:idFor('entity:'+path+':'+model.name),target:idFor('entity:'+path+':'+other),kind:'relates-to',label:(inverse?.array?'many':'one')+' → '+(f.array?'many':f.optional?'zero or one':'one')+(foreign.length?' · '+foreign.join(', '):''),provenance:'extracted',uncertain:!inverse});
      }
     }
-    for(const block of schema.list)if(block.type==='enum')nodes.set(idFor('enum:'+path+':'+block.name),NodeSchema.parse({id:idFor('enum:'+path+':'+block.name),kind:'enum',name:block.name,parentId:mid,provenance:'extracted',fields:block.enumerators.filter(p=>p.type==='enumerator').map(p=>({name:p.name,type:'enum'}))}));
+    for(const block of schema.list)if(block.type==='enum'){
+     const enumLoc=block.location;
+     const startOffset=enumLoc?.startOffset??files[path].text.indexOf('enum '+block.name);
+     const blockEnd=findPrismaBlockEnd(files[path].text,startOffset);
+     const end=blockEnd > startOffset ? blockEnd : (enumLoc?.endOffset??startOffset)+1;
+     const enumId=idFor('enum:'+path+':'+block.name);
+     nodes.set(enumId,NodeSchema.parse({id:enumId,kind:'enum',name:block.name,parentId:mid,provenance:'extracted',outputPath:path,source:source(path,startOffset,end,block.name),fields:block.enumerators.filter(p=>p.type==='enumerator').map(p=>({name:p.name,type:'enum'}))}));
+    }
     analyzed++;
-   }catch(error){diagnostics.push({severity:'error',message:'Prisma parse failed: '+(error as Error).message,path});}
+   }catch(error){
+    diagnostics.push({severity:'error',message:'Prisma schema extraction failed: '+(error as Error).message,path,code:'prisma-extract-error'});
+   }
   }
   const dedup=Array.from(new Map(diagnostics.map(d=>[JSON.stringify(d),d])).values());
   const graph:Graph={schemaVersion:GRAPH_SCHEMA_VERSION,nodes:Array.from(nodes.values()).sort((a,b)=>a.id.localeCompare(b.id)),edges:Array.from(edges.values()).sort((a,b)=>a.id.localeCompare(b.id)),requirements:[]};
