@@ -9,6 +9,7 @@ import {
  isGeneratedOrTemporaryFile,
  areHashesEqual,
 } from '../server/sync';
+import {AnalysisWorker} from '../server/worker';
 import {AnalysisSchema,GraphUpdateSchema,applyGraphUpdate} from '../shared/model';
 
 it('updates the implemented graph while preserving human intent and retains a stale model on invalid saves',async()=>{
@@ -788,6 +789,296 @@ describe('T049: Debounce 300 ms and stabilize file writes', () => {
   } finally {
    vi.useRealTimers();
    await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+});
+
+describe('T052: Discard out-of-order and superseded analysis results', () => {
+ it('Scenario 1: finishes analyses in reverse order and discards late older results (AC 1 & AC 2)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-out-of-order-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'OutOfOrder' });
+
+  await writeFile(join(p.root, 'main.ts'), 'export function v0() { return 0; }');
+
+  const realWorker = new AnalysisWorker();
+
+  let releaseGen2: (() => void) | undefined;
+  const gen2HoldPromise = new Promise<void>(resolve => {
+   releaseGen2 = resolve;
+  });
+
+  const mockWorker = {
+   get pendingCount() { return realWorker.pendingCount; },
+   isClosed: () => realWorker.isClosed(),
+   analyze: async (root: string, options?: any) => {
+    const gen = options?.generation;
+    if (gen === 2) {
+     await gen2HoldPromise;
+    }
+    return realWorker.analyze(root, options);
+   },
+   close: async () => realWorker.close(),
+  } as unknown as AnalysisWorker;
+
+  const sync = new SyncService(store, {
+   watch: false,
+   worker: mockWorker,
+  });
+
+  const analysisNotifications: any[] = [];
+  const discardedEvents: any[] = [];
+  sync.on('notification', (_id, ev) => {
+   if (ev.type === 'analysis') analysisNotifications.push(ev);
+  });
+  sync.on('discarded', (_id, ev) => {
+   discardedEvents.push(ev);
+  });
+
+  try {
+   await sync.start(p.id);
+   expect(analysisNotifications.length).toBe(1);
+   const initial = await store.get(p.id);
+   expect(initial.analysis?.graph.nodes.some(n => n.name === 'v0')).toBe(true);
+
+   // Save 1: writes v1 (generation 2, delayed in worker)
+   await writeFile(join(p.root, 'main.ts'), 'export function v1() { return 1; }');
+   const reqGen2Promise = sync.request(p.id);
+
+   // Save 2: writes v2 (generation 3, not delayed)
+   await writeFile(join(p.root, 'main.ts'), 'export function v2() { return 2; }');
+   const reqGen3Promise = sync.request(p.id);
+
+   // Generation 3 completes first
+   await reqGen3Promise;
+
+   const afterGen3 = await store.get(p.id);
+   expect(afterGen3.analysis?.graph.nodes.some(n => n.name === 'v2')).toBe(true);
+   expect(afterGen3.analysis?.graph.nodes.some(n => n.name === 'v1')).toBe(false);
+   expect(sync.getCommittedGeneration(p.id)).toBe(3);
+   expect(analysisNotifications.length).toBe(2);
+   const updateGen3 = analysisNotifications[1];
+   expect(updateGen3.sequence).toBe(2);
+   expect(updateGen3.revision).toBe(afterGen3.analysis!.revision);
+
+   // Now release generation 2 (which finishes LATER than generation 3, i.e. in reverse order)
+   releaseGen2!();
+   await reqGen2Promise;
+
+   // AC 1: A late older result cannot overwrite newer state
+   const finalProject = await store.get(p.id);
+   expect(finalProject.analysis?.graph.nodes.some(n => n.name === 'v2')).toBe(true);
+   expect(finalProject.analysis?.graph.nodes.some(n => n.name === 'v1')).toBe(false);
+   expect(finalProject.analysis?.revision).toBe(afterGen3.analysis!.revision);
+   expect(finalProject.analysis?.sequence).toBe(2);
+
+   // Verify discarded event was emitted for generation 2
+   expect(discardedEvents.some(d => d.generation === 2)).toBe(true);
+
+   // AC 2: Published graph and evidence belong to one revision
+   // No notification was published for generation 2
+   expect(analysisNotifications.length).toBe(2);
+
+   const applied = applyGraphUpdate(initial.analysis, updateGen3);
+   const v2Node = finalProject.analysis!.graph.nodes.find(n => n.name === 'v2');
+   expect(v2Node).toBeDefined();
+   expect(v2Node!.source?.revision).toBe(finalProject.analysis!.revision);
+   for (const node of finalProject.analysis!.graph.nodes) {
+    if (node.source) {
+     expect(node.source.revision).toBe(finalProject.analysis!.revision);
+    }
+   }
+  } finally {
+   releaseGen2?.();
+   await sync.close();
+   await realWorker.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('discards late older analysis failure without marking newer valid model as stale (R12, R33)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-stale-superseded-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'StaleSuperseded' });
+  await writeFile(join(p.root, 'main.ts'), 'export function v0() { return 0; }');
+
+  const realWorker = new AnalysisWorker();
+  let releaseGen2: (() => void) | undefined;
+  const gen2HoldPromise = new Promise<void>(resolve => {
+   releaseGen2 = resolve;
+  });
+
+  const mockWorker = {
+   get pendingCount() { return realWorker.pendingCount; },
+   isClosed: () => realWorker.isClosed(),
+   analyze: async (root: string, options?: any) => {
+    const gen = options?.generation;
+    if (gen === 2) {
+     await gen2HoldPromise;
+    }
+    return realWorker.analyze(root, options);
+   },
+   close: async () => realWorker.close(),
+  } as unknown as AnalysisWorker;
+
+  const sync = new SyncService(store, { watch: false, worker: mockWorker });
+  const notifications: any[] = [];
+  sync.on('notification', (_id, ev) => notifications.push(ev));
+
+  try {
+   await sync.start(p.id);
+
+   // Save 1: broken syntax (generation 2, delayed)
+   await writeFile(join(p.root, 'main.ts'), 'export function broken( {');
+   const reqGen2 = sync.request(p.id);
+
+   // Save 2: valid syntax (generation 3, fast)
+   await writeFile(join(p.root, 'main.ts'), 'export function fixed() { return 100; }');
+   const reqGen3 = sync.request(p.id);
+
+   // Generation 3 completes first
+   await reqGen3;
+   const afterFixed = await store.get(p.id);
+   expect(afterFixed.analysis?.status).toBe('current');
+   expect(afterFixed.analysis?.graph.nodes.some(n => n.name === 'fixed')).toBe(true);
+
+   // Now release generation 2 (broken syntax finishes second)
+   releaseGen2!();
+   await reqGen2;
+
+   // The late broken result must NOT overwrite the valid model or mark it stale!
+   const finalProject = await store.get(p.id);
+   expect(finalProject.analysis?.status).toBe('current');
+   expect(finalProject.analysis?.graph.nodes.some(n => n.name === 'fixed')).toBe(true);
+   expect(notifications.some(n => n.status === 'stale')).toBe(false);
+  } finally {
+   releaseGen2?.();
+   await sync.close();
+   await realWorker.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('Scenario 2A: triggers a new save just before persistence and avoids committing superseded results', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-new-save-before-persist-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'SaveBeforePersist' });
+  await writeFile(join(p.root, 'main.ts'), 'export function initial() { return 0; }');
+
+  const sync = new SyncService(store, { watch: false });
+  const analysisNotifications: any[] = [];
+  const discardedEvents: any[] = [];
+  sync.on('notification', (_id, ev) => {
+   if (ev.type === 'analysis') analysisNotifications.push(ev);
+  });
+  sync.on('discarded', (_id, ev) => discardedEvents.push(ev));
+
+  try {
+   await sync.start(p.id);
+   expect(analysisNotifications.length).toBe(1);
+
+   // Write save 1
+   await writeFile(join(p.root, 'main.ts'), 'export function intermediate() { return 1; }');
+
+   // Hook into before-persist of generation 2 to trigger save 2 (generation 3)
+   let triggeredNewSave = false;
+   sync.once('before-persist', async (_id, info) => {
+    if (info.generation === 2) {
+     triggeredNewSave = true;
+     // Trigger a new save just before persistence of generation 2!
+     await writeFile(join(p.root, 'main.ts'), 'export function finalVersion() { return 2; }');
+     void sync.request(p.id);
+    }
+   });
+
+   // Request generation 2
+   await sync.request(p.id);
+
+   expect(triggeredNewSave).toBe(true);
+
+   // Store must contain finalVersion, NEVER intermediate!
+   const current = await store.get(p.id);
+   expect(current.analysis?.graph.nodes.some(n => n.name === 'finalVersion')).toBe(true);
+   expect(current.analysis?.graph.nodes.some(n => n.name === 'intermediate')).toBe(false);
+
+   // Generation 2 was discarded right at persist check
+   expect(discardedEvents.some(d => d.generation === 2)).toBe(true);
+
+   // No notification was published for intermediate
+   expect(analysisNotifications.some(n => n.revision === current.analysis!.revision)).toBe(true);
+   expect(analysisNotifications.length).toBe(2); // Only initial and finalVersion
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('Scenario 2B: closes a running session just before persistence and ensures closed sessions cannot publish results (AC 3)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-close-running-session-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'CloseRunningSession' });
+  await writeFile(join(p.root, 'main.ts'), 'export function initial() { return 0; }');
+
+  const sync = new SyncService(store, { watch: false });
+  const publishedResults: any[] = [];
+  const allNotifications: any[] = [];
+  sync.on('notification', (_id, ev) => {
+   allNotifications.push(ev);
+   if (ev.type === 'analysis') publishedResults.push(ev);
+  });
+
+  try {
+   await sync.start(p.id);
+   expect(publishedResults.length).toBe(1);
+
+   await writeFile(join(p.root, 'main.ts'), 'export function shouldNeverPublish() { return 99; }');
+
+   // Hook into before-persist to close the session
+   let closedDuringBeforePersist = false;
+   let notificationsAfterClose = 0;
+   sync.once('before-persist', async () => {
+    closedDuringBeforePersist = true;
+    sync.on('notification', () => {
+     if (closedDuringBeforePersist) notificationsAfterClose++;
+    });
+    await sync.close(p.id);
+   });
+
+   // Request analysis
+   await sync.request(p.id);
+
+   expect(closedDuringBeforePersist).toBe(true);
+
+   // AC 3: Closed sessions cannot publish results
+   expect(publishedResults.length).toBe(1);
+   expect(notificationsAfterClose).toBe(0);
+
+   // The store was not updated to shouldNeverPublish
+   const stored = await store.get(p.id);
+   expect(stored.analysis?.graph.nodes.some(n => n.name === 'shouldNeverPublish')).toBe(false);
+   expect(stored.analysis?.graph.nodes.some(n => n.name === 'initial')).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('associates requests and worker results with generation and source revision', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-generations-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'GenTest' });
+  await writeFile(join(p.root, 'main.ts'), 'export const val = 1;');
+
+  const worker = new AnalysisWorker();
+  try {
+   const res = await worker.analyze(p.root, { generation: 42 });
+   expect((res as any).generation).toBe(42);
+   expect(typeof res.revision).toBe('string');
+   expect(res.revision.length).toBeGreaterThan(0);
+   expect(AnalysisSchema.safeParse(res).success).toBe(true);
+  } finally {
+   await worker.close();
    await rm(dir, { recursive: true, force: true });
   }
  });

@@ -13,6 +13,8 @@ export interface SyncServiceOptions {
  stabilityThreshold?: number;
  pollInterval?: number;
  reconcileIntervalMs?: number;
+ worker?: AnalysisWorker;
+ createWorker?: () => AnalysisWorker;
 }
 
 export function isGeneratedOrTemporaryFile(filePath: string): boolean {
@@ -88,12 +90,22 @@ export function areHashesEqual(a: Record<string, string>, b: Record<string, stri
  return true;
 }
 
+type PendingRequest = {
+ generation: number;
+ resolve: () => void;
+ reject: (err: any) => void;
+};
+
 type Session = {
  root: string;
  worker: AnalysisWorker;
  watcher?: FSWatcher;
  generation: number;
- running?: Promise<void>;
+ committedGeneration: number;
+ committedRevision: string;
+ committedSequence: number;
+ inFlight: Set<number>;
+ pendingRequests: PendingRequest[];
  debounce?: ReturnType<typeof setTimeout>;
  timer?: ReturnType<typeof setInterval>;
  stabilizationTimer?: ReturnType<typeof setTimeout>;
@@ -149,7 +161,21 @@ export class SyncService extends EventEmitter {
  async start(id: string): Promise<void> {
   if (this.sessions.has(id)) return this.request(id);
   const project = await this.store.get(id);
-  const session: Session = { root: project.root, worker: new AnalysisWorker(), generation: 0, closed: false };
+  const worker = this.options.createWorker
+   ? this.options.createWorker()
+   : (this.options.worker ?? new AnalysisWorker());
+
+  const session: Session = {
+   root: project.root,
+   worker,
+   generation: 0,
+   committedGeneration: 0,
+   committedRevision: project.analysis?.revision || '',
+   committedSequence: project.analysis?.sequence || 0,
+   inFlight: new Set<number>(),
+   pendingRequests: [],
+   closed: false,
+  };
   this.sessions.set(id, session);
 
   if (this.options.watch !== false) {
@@ -214,6 +240,8 @@ export class SyncService extends EventEmitter {
  }
 
  async reconcile(id: string): Promise<void> {
+  const session = this.sessions.get(id);
+  if (!session || session.closed) return;
   const p = await this.store.get(id);
   const current = hashes(await captureFiles(p.root));
   const previous = p.analysis ? hashes(p.analysis.files) : {};
@@ -225,60 +253,43 @@ export class SyncService extends EventEmitter {
  request(id: string): Promise<void> {
   const session = this.sessions.get(id);
   if (!session) return this.start(id);
+  if (session.closed) return Promise.resolve();
   session.generation++;
-  this.emit('request', id);
-  if (!session.running) {
-   session.running = this.run(id, session).finally(() => {
-    session.running = undefined;
-   });
-  }
-  return session.running;
+  const gen = session.generation;
+  this.emit('request', id, { generation: gen });
+  const promise = new Promise<void>((resolve, reject) => {
+   session.pendingRequests.push({ generation: gen, resolve, reject });
+  });
+  void this.executeRequest(id, session, gen);
+  return promise;
  }
 
- private async run(id: string, session: Session) {
-  let finished = 0;
-  while (!session.closed && finished !== session.generation) {
-   const generation = session.generation;
+ private async executeRequest(id: string, session: Session, generation: number): Promise<void> {
+  session.inFlight.add(generation);
+  try {
+   if (session.closed || generation < session.generation) {
+    this.emit('discarded', id, {
+     generation,
+     reason: session.closed ? 'session-closed' : 'superseded-before-start',
+    });
+    return;
+   }
+
    const p = await this.store.get(id);
    const before = p.analysis;
    this.emit('notification', id, { type: 'status', status: 'updating', sequence: before?.sequence || 0 });
+
+   let result: Analysis;
    try {
-    const result = AnalysisSchema.parse(await session.worker.analyze(p.root));
-    if (generation !== session.generation) {
-     continue;
-    }
-    if (session.closed) return;
-    result.sequence = (before?.sequence || 0) + 1;
-    const update = GraphUpdateSchema.parse({
-     type: 'analysis',
-     schemaVersion: GRAPH_SCHEMA_VERSION,
-     baseRevision: before?.revision || null,
-     baseSequence: before?.sequence || 0,
-     sequence: result.sequence,
-     revision: result.revision,
-     analyzedAt: result.analyzedAt,
-     durationMs: result.durationMs,
-     status: result.status,
-     quality: result.quality,
-     staleEvidence: result.staleEvidence,
-     delta: graphDelta(before?.graph || emptyGraph(), result.graph),
-    });
-    await this.store.updateAnalysis(id, result);
-    this.emit('notification', id, update);
-    const isIncompleteRevision = result.quality.diagnostics.some(d => d.code === 'incomplete-revision');
-    if (isIncompleteRevision && !session.closed && !session.debounce) {
-     if (session.stabilizationTimer) clearTimeout(session.stabilizationTimer);
-     const delay = this.options.stabilityThreshold ?? 150;
-     session.stabilizationTimer = setTimeout(() => {
-      session.stabilizationTimer = undefined;
-      if (!session.closed) {
-       void this.reconcile(id).catch(() => {});
-      }
-     }, delay);
-     session.stabilizationTimer.unref?.();
-    }
+    result = AnalysisSchema.parse(await session.worker.analyze(p.root, { generation }));
    } catch (error) {
-    if (generation !== session.generation) continue;
+    if (session.closed || generation < session.generation || generation <= session.committedGeneration) {
+     this.emit('discarded', id, {
+      generation,
+      reason: session.closed ? 'session-closed' : 'superseded-on-error',
+     });
+     return;
+    }
     const staleEvidence = { scope: 'all' as const, paths: [], reason: (error as Error).message };
     const stale: Analysis = before
      ? {
@@ -312,21 +323,167 @@ export class SyncService extends EventEmitter {
         diagnostics: [{ severity: 'error', code: 'analysis-failure', message: (error as Error).message }],
        },
       };
-    if (!session.closed) {
-     await this.store.updateAnalysis(id, stale);
-     this.emit('notification', id, {
-      type: 'status',
-      status: 'stale',
-      sequence: stale.sequence,
-      revision: stale.revision,
-      quality: stale.quality,
-      staleEvidence,
-      message: (error as Error).message,
+
+    await this.emitBeforePersist(id, { generation, revision: stale.revision, result: stale, isStale: true });
+    if (session.closed || generation < session.generation || generation <= session.committedGeneration) {
+     this.emit('discarded', id, {
+      generation,
+      reason: session.closed ? 'session-closed' : 'superseded-at-stale-persist',
      });
+     return;
     }
+
+    await this.store.updateAnalysis(id, stale);
+
+    if (session.closed || generation < session.committedGeneration) {
+     this.emit('discarded', id, {
+      generation,
+      reason: session.closed ? 'session-closed' : 'superseded-at-stale-publish',
+     });
+     return;
+    }
+
+    session.committedGeneration = generation;
+    session.committedRevision = stale.revision;
+    session.committedSequence = stale.sequence;
+
+    this.emit('notification', id, {
+     type: 'status',
+     status: 'stale',
+     sequence: stale.sequence,
+     revision: stale.revision,
+     quality: stale.quality,
+     staleEvidence,
+     message: (error as Error).message,
+    });
+    return;
    }
-   finished = generation;
+
+   // Worker succeeded: check supersession before persistence
+   if (session.closed || generation < session.generation || generation <= session.committedGeneration) {
+    this.emit('discarded', id, {
+     generation,
+     revision: result.revision,
+     reason: session.closed ? 'session-closed' : 'superseded-before-persist',
+    });
+    return;
+   }
+
+   const latestP = await this.store.get(id);
+   const currentBefore = latestP.analysis;
+   result.sequence = (currentBefore?.sequence || 0) + 1;
+
+   const update = GraphUpdateSchema.parse({
+    type: 'analysis',
+    schemaVersion: GRAPH_SCHEMA_VERSION,
+    baseRevision: currentBefore?.revision || null,
+    baseSequence: currentBefore?.sequence || 0,
+    sequence: result.sequence,
+    revision: result.revision,
+    analyzedAt: result.analyzedAt,
+    durationMs: result.durationMs,
+    status: result.status,
+    quality: result.quality,
+    staleEvidence: result.staleEvidence,
+    delta: graphDelta(currentBefore?.graph || emptyGraph(), result.graph),
+   });
+
+   await this.emitBeforePersist(id, { generation, revision: result.revision, result });
+   if (session.closed || generation < session.generation || generation <= session.committedGeneration) {
+    this.emit('discarded', id, {
+     generation,
+     revision: result.revision,
+     reason: session.closed ? 'session-closed' : 'superseded-at-persist',
+    });
+    return;
+   }
+
+   await this.store.updateAnalysis(id, result);
+
+   if (session.closed || generation < session.committedGeneration) {
+    this.emit('discarded', id, {
+     generation,
+     revision: result.revision,
+     reason: session.closed ? 'session-closed' : 'superseded-at-publish',
+    });
+    return;
+   }
+
+   session.committedGeneration = generation;
+   session.committedRevision = result.revision;
+   session.committedSequence = result.sequence;
+
+   this.emit('notification', id, update);
+
+   const isIncompleteRevision = result.quality.diagnostics.some(d => d.code === 'incomplete-revision');
+   if (isIncompleteRevision && !session.closed && !session.debounce) {
+    if (session.stabilizationTimer) clearTimeout(session.stabilizationTimer);
+    const delay = this.options.stabilityThreshold ?? 150;
+    session.stabilizationTimer = setTimeout(() => {
+     session.stabilizationTimer = undefined;
+     if (!session.closed) {
+      void this.reconcile(id).catch(() => {});
+     }
+    }, delay);
+    session.stabilizationTimer.unref?.();
+   }
+  } finally {
+   session.inFlight.delete(generation);
+   this.settlePendingRequests(session);
   }
+ }
+
+ private async emitBeforePersist(id: string, payload: { generation: number; revision: string; result: Analysis; isStale?: boolean }): Promise<void> {
+  const listeners = this.rawListeners('before-persist');
+  for (const listener of listeners) {
+   const res = (listener as Function)(id, payload);
+   if (res && typeof (res as Promise<any>).then === 'function') {
+    await res;
+   }
+  }
+ }
+
+ private settlePendingRequests(session: Session): void {
+  if (session.closed) {
+   for (const req of session.pendingRequests) {
+    req.resolve();
+   }
+   session.pendingRequests = [];
+   return;
+  }
+  const remaining: PendingRequest[] = [];
+  for (const req of session.pendingRequests) {
+   if (req.generation <= session.committedGeneration) {
+    if (!session.inFlight.has(req.generation)) {
+     req.resolve();
+    } else {
+     remaining.push(req);
+    }
+   } else if (session.inFlight.size === 0) {
+    req.resolve();
+   } else {
+    remaining.push(req);
+   }
+  }
+  session.pendingRequests = remaining;
+ }
+
+ isSuperseded(id: string, generation: number): boolean {
+  const session = this.sessions.get(id);
+  if (!session || session.closed) return true;
+  return generation < session.generation || generation <= session.committedGeneration;
+ }
+
+ getGeneration(id: string): number {
+  return this.sessions.get(id)?.generation ?? 0;
+ }
+
+ getCommittedGeneration(id: string): number {
+  return this.sessions.get(id)?.committedGeneration ?? 0;
+ }
+
+ getInFlightCount(id: string): number {
+  return this.sessions.get(id)?.inFlight.size ?? 0;
  }
 
  isWatching(id: string): boolean {
@@ -366,7 +523,10 @@ export class SyncService extends EventEmitter {
    await session.watcher.close();
    session.watcher = undefined;
   }
-  await session.worker.close();
+  if (!this.options.worker || session.worker !== this.options.worker) {
+   await session.worker.close();
+  }
+  this.settlePendingRequests(session);
   this.sessions.delete(id);
  }
 
