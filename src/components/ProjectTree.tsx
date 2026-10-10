@@ -18,6 +18,7 @@ import {
   Trash2,
   Tag,
 } from 'lucide-react';
+import { ModelContextBar } from './ModelContext';
 
 export interface ProjectTreeProps {
   graph: Graph | null;
@@ -286,43 +287,13 @@ export const ProjectTree: React.FC<ProjectTreeProps> = ({
       </div>
 
       {/* Model Context Header - Always visible */}
-      <div className="model-context-bar" data-testid="model-context-bar">
-        <div className="model-context-info">
-          <span className={`context-status-dot dot-${currentContext}`} />
-          <span className="model-context-indicator" data-testid="model-context-indicator">
-            {`Context: ${currentContext === 'implemented' ? 'Implemented Architecture' : 'Intended Specification'}`}
-          </span>
-        </div>
-        <div className="graph-context-actions" data-testid="graph-context-actions">
-          <button
-            type="button"
-            className={`context-tab-btn ${currentContext === 'intended' ? 'active' : ''}`}
-            data-testid="context-tab-intended"
-            onClick={() => onGraphContextChange?.('intended')}
-            title="View intended specification"
-          >
-            Intended
-          </button>
-          <button
-            type="button"
-            className={`context-tab-btn ${currentContext === 'implemented' ? 'active' : ''}`}
-            data-testid="context-tab-implemented"
-            onClick={() => onGraphContextChange?.('implemented')}
-            title="View implemented analysis"
-          >
-            Implemented
-          </button>
-          <button
-            type="button"
-            className="btn-switch-context"
-            data-testid="switch-graph-context-btn"
-            onClick={() => onGraphContextChange?.(currentContext === 'intended' ? 'implemented' : 'intended')}
-            title="Switch graph context"
-          >
-            Switch Context
-          </button>
-        </div>
-      </div>
+      <ModelContextBar
+        graphContext={currentContext}
+        onGraphContextChange={onGraphContextChange}
+        project={project}
+        specification={graph}
+        analysis={analysis}
+      />
 
       {/* Scope Breadcrumbs when scoped */}
       {viewState.activeScope && (

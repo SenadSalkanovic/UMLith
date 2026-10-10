@@ -29,6 +29,8 @@ import {
   FileText,
   ListPlus,
   RefreshCw,
+  Cpu,
+  ShieldAlert,
 } from 'lucide-react';
 
 export interface NodeDraft {
@@ -1800,6 +1802,20 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                   {selectedNode.provenance}
                 </span>
               </div>
+
+              {selectedNode.provenance === 'ai' && (
+                <div className="ai-notice-banner" data-testid="ai-notice-banner">
+                  <Cpu size={14} />
+                  <span>AI-inferred interpretation: not compiler-verified evidence.</span>
+                </div>
+              )}
+
+              {selectedNode.stepType === 'opaque' && (
+                <div className="opaque-logic-banner" data-testid="opaque-logic-banner">
+                  <ShieldAlert size={14} />
+                  <span>Opaque logic: unsupported constructs retained as source-backed opaque node. Source access preserved.</span>
+                </div>
+              )}
             </div>
 
             <div className="inspector-field">
@@ -1934,17 +1950,29 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             )}
 
             {selectedNode.source && (
-              <div className="inspector-field">
+              <div
+                className="inspector-field"
+                data-testid={selectedNode.stepType === 'opaque' ? 'opaque-source-access' : undefined}
+              >
                 <label>Bound Source</label>
                 <div className="source-meta-card">
                   <div>
-                    <strong>File:</strong> {selectedNode.source.path}
+                    <strong>File:</strong>{' '}
+                    <span data-testid={selectedNode.stepType === 'opaque' ? 'opaque-source-path' : undefined}>
+                      {selectedNode.source.path}
+                    </span>
                   </div>
                   <div>
-                    <strong>Line:</strong> {selectedNode.source.line}
+                    <strong>Line:</strong>{' '}
+                    <span data-testid={selectedNode.stepType === 'opaque' ? 'opaque-source-line' : undefined}>
+                      {selectedNode.source.line}
+                    </span>
                   </div>
                   <div>
-                    <strong>Revision:</strong> {selectedNode.source.revision}
+                    <strong>Revision:</strong>{' '}
+                    <span data-testid={selectedNode.stepType === 'opaque' ? 'opaque-source-revision' : undefined}>
+                      {selectedNode.source.revision}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -2029,6 +2057,13 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                   </span>
                 )}
               </div>
+
+              {selectedEdge.provenance === 'ai' && (
+                <div className="ai-notice-banner" data-testid="ai-notice-banner">
+                  <Cpu size={14} />
+                  <span>AI-inferred interpretation: not compiler-verified evidence.</span>
+                </div>
+              )}
             </div>
 
             <div className="inspector-field">
