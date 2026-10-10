@@ -1,4 +1,4 @@
-import {it,expect,describe} from 'vitest';
+import {it,expect,describe,vi} from 'vitest';
 import {mkdtemp,writeFile,rm,rename,unlink,mkdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -513,6 +513,280 @@ model Post {
    const final = await store.get(p.id);
    expect(final.analysis?.files['main.ts'].text).toContain('v = 3');
   } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+});
+
+describe('T049: Debounce 300 ms and stabilize file writes', () => {
+ it('retains an explicit 300 ms debounce by default and coalesces bursty events within debounce using fake timers', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-fake-timers-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'FakeTimerDebounce' });
+  await writeFile(join(p.root, 'main.ts'), 'export function calc() { return 0; }');
+
+  const sync = new SyncService(store, { watch: false });
+  expect(sync.getDebounceMs()).toBe(300);
+
+  const scheduledEvents: any[] = [];
+  sync.on('reconcile-scheduled', (id, info) => scheduledEvents.push({ id, ...info }));
+
+  vi.useFakeTimers();
+  try {
+   await sync.start(p.id);
+
+   // Rapid burst of file change events within 300 ms
+   // Event 1 at t = 0
+   await writeFile(join(p.root, 'main.ts'), 'export function calc() { return 1; }');
+   sync.schedule(p.id, 'change', join(p.root, 'main.ts'));
+   expect(sync.hasPendingDebounce(p.id)).toBe(true);
+
+   // Advance 100 ms (t = 100): not fired yet (< 300 ms)
+   await vi.advanceTimersByTimeAsync(100);
+   expect(scheduledEvents.length).toBe(0);
+   expect(sync.hasPendingDebounce(p.id)).toBe(true);
+
+   // Event 2 at t = 100 ms: resets debounce timer back to 300 ms
+   await writeFile(join(p.root, 'main.ts'), 'export function calc() { return 2; }');
+   sync.schedule(p.id, 'change', join(p.root, 'main.ts'));
+
+   // Advance 150 ms (t = 250): only 150 ms since event 2, not fired yet
+   await vi.advanceTimersByTimeAsync(150);
+   expect(scheduledEvents.length).toBe(0);
+   expect(sync.hasPendingDebounce(p.id)).toBe(true);
+
+   // Event 3 at t = 250 ms: resets debounce timer back to 300 ms again
+   await writeFile(join(p.root, 'main.ts'), 'export function calc() { return 3; }');
+   sync.schedule(p.id, 'change', join(p.root, 'main.ts'));
+
+   // Advance 200 ms (t = 450): only 200 ms since event 3, not fired yet
+   await vi.advanceTimersByTimeAsync(200);
+   expect(scheduledEvents.length).toBe(0);
+   expect(sync.hasPendingDebounce(p.id)).toBe(true);
+
+   // Advance remaining 100 ms (t = 550): exactly 300 ms have passed since event 3!
+   await vi.advanceTimersByTimeAsync(100);
+   expect(scheduledEvents.length).toBe(1);
+   expect(sync.hasPendingDebounce(p.id)).toBe(false);
+
+   // Switch to real timers to await the async analysis resolution
+   vi.useRealTimers();
+
+   await expect.poll(async () => {
+    const current = await store.get(p.id);
+    return current.analysis?.files['main.ts']?.text.includes('return 3;');
+   }, { timeout: 5000, interval: 50 }).toBe(true);
+
+   const final = await store.get(p.id);
+   expect(final.analysis?.status).toBe('current');
+   expect(final.analysis?.graph.nodes.some(n => n.name === 'calc')).toBe(true);
+  } finally {
+   vi.useRealTimers();
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('simulates a chunked write stream and ensures intermediate incomplete writes are coalesced and stabilized', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-chunked-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'ChunkedWrite' });
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 300,
+   stabilityThreshold: 40,
+   pollInterval: 20,
+  });
+
+  const requestEvents: string[] = [];
+  sync.on('request', id => requestEvents.push(id));
+
+  try {
+   await writeFile(join(p.root, 'main.ts'), 'export function initial() { return 0; }');
+   await sync.start(p.id);
+   const baselineRequests = requestEvents.length;
+
+   // Chunked write sequence with inter-chunk delays < 300 ms debounce
+   // Chunk 1: Incomplete function signature (would be syntax error if consumed!)
+   await writeFile(join(p.root, 'main.ts'), 'export function chunkedCalc(');
+   await new Promise(r => setTimeout(r, 60));
+
+   // Chunk 2: Parameter list (still incomplete syntax!)
+   await writeFile(join(p.root, 'main.ts'), 'export function chunkedCalc(a: number, b: number) {\n');
+   await new Promise(r => setTimeout(r, 60));
+
+   // Chunk 3: Final complete function body
+   await writeFile(join(p.root, 'main.ts'), 'export function chunkedCalc(a: number, b: number) {\n  return a + b;\n}\n');
+
+   // Wait for the 300 ms debounce to settle and store to update
+   await expect.poll(async () => {
+    const current = await store.get(p.id);
+    return current.analysis?.files['main.ts']?.text.includes('return a + b;');
+   }, { timeout: 5000, interval: 50 }).toBe(true);
+
+   // Exactly 1 new reconciliation request was triggered, coalescing all chunk events
+   expect(requestEvents.length - baselineRequests).toBe(1);
+
+   // Analysis must reflect the stable final state with status 'current'
+   const final = await store.get(p.id);
+   expect(final.analysis?.status).toBe('current');
+   expect(final.analysis?.graph.nodes.some(n => n.name === 'chunkedCalc')).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('does not consume a deliberately incomplete write as final current content', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-incomplete-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'IncompleteWrite' });
+
+  const sync = new SyncService(store, { watch: false });
+
+  try {
+   // 1. Initial valid source
+   await writeFile(join(p.root, 'main.ts'), 'export function validBase() { return 100; }');
+   await sync.start(p.id);
+
+   const initial = await store.get(p.id);
+   expect(initial.analysis?.status).toBe('current');
+   expect(initial.analysis?.graph.nodes.some(n => n.name === 'validBase')).toBe(true);
+
+   // 2. Deliberately incomplete write: invalid syntax left unclosed
+   await writeFile(join(p.root, 'main.ts'), 'export function deliberatelyIncomplete(');
+   await sync.request(p.id);
+
+   // Analysis must NOT consume the incomplete write as current content
+   const incomplete = await store.get(p.id);
+   expect(incomplete.analysis?.status).toBe('stale');
+   expect(incomplete.analysis?.status).not.toBe('current');
+   // The previous valid graph is retained
+   expect(incomplete.analysis?.graph.nodes.some(n => n.name === 'validBase')).toBe(true);
+   expect(incomplete.analysis?.quality.diagnostics.some(d => d.code === 'analysis-failure')).toBe(true);
+   expect(incomplete.analysis?.staleEvidence).toMatchObject({
+    scope: 'all',
+    reason: expect.stringMatching(/invalid TypeScript syntax/i),
+   });
+
+   // 3. Complete the write to verify recovery to current status
+   await writeFile(join(p.root, 'main.ts'), 'export function deliberatelyIncomplete() { return 200; }');
+   await sync.request(p.id);
+
+   const recovered = await store.get(p.id);
+   expect(recovered.analysis?.status).toBe('current');
+   expect(recovered.analysis?.graph.nodes.some(n => n.name === 'deliberatelyIncomplete')).toBe(true);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('simulates an atomic editor replacement and coalesces it without losing the final change', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-atomic-'));
+  const store = new ProjectStore(dir);
+  const p = await store.create({ name: 'AtomicSave' });
+
+  const sync = new SyncService(store, {
+   watch: true,
+   debounceMs: 300,
+   stabilityThreshold: 40,
+   pollInterval: 20,
+  });
+
+  const requestEvents: string[] = [];
+  sync.on('request', id => requestEvents.push(id));
+
+  try {
+   await writeFile(join(p.root, 'main.ts'), 'export function versionOne() { return 1; }');
+   await sync.start(p.id);
+
+   const baseline = requestEvents.length;
+   const initial = await store.get(p.id);
+   expect(initial.analysis?.graph.nodes.some(n => n.name === 'versionOne')).toBe(true);
+
+   // Step 1: Editor creates temporary files (vim swap, temp file, JetBrains temp)
+   await writeFile(join(p.root, '.main.ts.swp'), 'vim swap file binary');
+   await writeFile(join(p.root, 'main.ts___jb_tmp___'), 'jetbrains temp');
+   await writeFile(join(p.root, 'main.ts.tmp'), 'export function versionTwo() { return 2; }');
+
+   // Step 2: Atomic replacement: unlink target then immediately rename temp to target
+   await unlink(join(p.root, 'main.ts'));
+   await rename(join(p.root, 'main.ts.tmp'), join(p.root, 'main.ts'));
+
+   // Clean up swap files
+   await rm(join(p.root, '.main.ts.swp'), { force: true });
+   await rm(join(p.root, 'main.ts___jb_tmp___'), { force: true });
+
+   // Wait for the 300 ms debounce to settle and analysis to update the store
+   await expect.poll(async () => {
+    const current = await store.get(p.id);
+    return current.analysis?.files['main.ts']?.text.includes('versionTwo');
+   }, { timeout: 5000, interval: 50 }).toBe(true);
+
+   // Verify exactly one reconciliation request was issued (coalesced)
+   expect(requestEvents.length).toBe(baseline + 1);
+
+   // Verify final analysis reflects the atomically saved version Two
+   const updated = await store.get(p.id);
+   expect(updated.analysis?.status).toBe('current');
+   expect(updated.analysis?.files['main.ts']?.text).toContain('versionTwo');
+   expect(updated.analysis?.graph.nodes.some(n => n.name === 'versionTwo')).toBe(true);
+   expect(updated.analysis?.graph.nodes.some(n => n.name === 'versionOne')).toBe(false);
+  } finally {
+   await sync.close();
+   await rm(dir, { recursive: true, force: true });
+  }
+ });
+
+ it('releases timers on project stop and global close without leaking timers', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'architect-sync-timers-'));
+  const store = new ProjectStore(dir);
+  const p1 = await store.create({ name: 'TimerLeak1' });
+  const p2 = await store.create({ name: 'TimerLeak2' });
+
+  await writeFile(join(p1.root, 'main.ts'), 'export const p1 = 1;');
+  await writeFile(join(p2.root, 'main.ts'), 'export const p2 = 1;');
+
+  const sync = new SyncService(store, {
+   watch: false,
+   debounceMs: 300,
+   reconcileIntervalMs: 60000,
+  });
+
+  vi.useFakeTimers();
+  try {
+   await sync.start(p1.id);
+   await sync.start(p2.id);
+
+   // Schedule debounce events on both projects
+   sync.schedule(p1.id, 'change', join(p1.root, 'main.ts'));
+   sync.schedule(p2.id, 'change', join(p2.root, 'main.ts'));
+
+   expect(sync.hasPendingDebounce(p1.id)).toBe(true);
+   expect(sync.hasPendingDebounce(p2.id)).toBe(true);
+
+   // Stop project 1 individually: timers for p1 must be cleared immediately
+   await sync.close(p1.id);
+
+   expect(sync.hasPendingDebounce(p1.id)).toBe(false);
+   expect(sync.hasSession(p1.id)).toBe(false);
+   // Project 2 remains active
+   expect(sync.hasPendingDebounce(p2.id)).toBe(true);
+   expect(sync.hasSession(p2.id)).toBe(true);
+
+   // Close all remaining sessions
+   await sync.close();
+
+   expect(sync.hasPendingDebounce(p2.id)).toBe(false);
+   expect(sync.hasSession(p2.id)).toBe(false);
+
+   // Assert zero pending timers remain
+   expect(vi.getTimerCount()).toBe(0);
+  } finally {
+   vi.useRealTimers();
    await sync.close();
    await rm(dir, { recursive: true, force: true });
   }

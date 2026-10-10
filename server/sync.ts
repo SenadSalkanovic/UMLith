@@ -19,12 +19,13 @@ export function isGeneratedOrTemporaryFile(filePath: string): boolean {
  if (!filePath) return false;
  const name = basename(filePath);
  return (
-  /\.(?:tmp|temp|bak|swp|swo|swx)(?:\.|$)/i.test(name) ||
+  /\.(?:tmp|temp|bak|swp|swo|swx|crswap|part)(?:\.|$)/i.test(name) ||
   name.endsWith('~') ||
   name.startsWith('.#') ||
   (name.startsWith('#') && name.endsWith('#')) ||
   name.includes('___jb_tmp___') ||
   name.includes('___jb_old___') ||
+  name === '4913' ||
   name === '.DS_Store' ||
   name === 'Thumbs.db'
  );
@@ -83,12 +84,15 @@ export function areHashesEqual(a: Record<string, string>, b: Record<string, stri
 }
 
 type Session = {
+ root: string;
  worker: AnalysisWorker;
  watcher?: FSWatcher;
  generation: number;
  running?: Promise<void>;
  debounce?: ReturnType<typeof setTimeout>;
  timer?: ReturnType<typeof setInterval>;
+ stabilizationTimer?: ReturnType<typeof setTimeout>;
+ startTimeout?: ReturnType<typeof setTimeout>;
  closed: boolean;
 };
 
@@ -98,10 +102,49 @@ export class SyncService extends EventEmitter {
   super();
  }
 
+ getDebounceMs(): number {
+  return this.options.debounceMs ?? 300;
+ }
+
+ hasPendingDebounce(id: string): boolean {
+  return Boolean(this.sessions.get(id)?.debounce !== undefined);
+ }
+
+ schedule(id: string, event?: string, filePath?: string): void {
+  const session = this.sessions.get(id);
+  if (!session || session.closed) return;
+  const rel = filePath ? relative(session.root, filePath).replace(/\\/g, '/') : undefined;
+  this.emit('change', id, { event, path: rel });
+  if (session.debounce) {
+   clearTimeout(session.debounce);
+   session.debounce = undefined;
+  }
+  const debounceMs = this.getDebounceMs();
+  session.debounce = setTimeout(() => {
+   session.debounce = undefined;
+   if (session.closed) return;
+   this.emit('reconcile-scheduled', id, { event, path: rel });
+   void this.request(id).catch(error =>
+    this.emit('notification', id, { type: 'error', message: error.message })
+   );
+  }, debounceMs);
+ }
+
+ handleFileEvent(id: string, event: string, filePath: string): boolean {
+  const session = this.sessions.get(id);
+  if (!session || session.closed) return false;
+  const rel = relative(session.root, filePath).replace(/\\/g, '/');
+  if (isPathExcluded(rel) || isGeneratedOrTemporaryFile(rel)) return false;
+  const isDir = event === 'addDir' || event === 'unlinkDir';
+  if (!isDir && !isRelevantAnalysisInput(rel)) return false;
+  this.schedule(id, event, filePath);
+  return true;
+ }
+
  async start(id: string): Promise<void> {
   if (this.sessions.has(id)) return this.request(id);
   const project = await this.store.get(id);
-  const session: Session = { worker: new AnalysisWorker(), generation: 0, closed: false };
+  const session: Session = { root: project.root, worker: new AnalysisWorker(), generation: 0, closed: false };
   this.sessions.set(id, session);
 
   if (this.options.watch !== false) {
@@ -122,28 +165,9 @@ export class SyncService extends EventEmitter {
    });
    session.watcher = watcher;
 
-   const schedule = (event?: string, filePath?: string) => {
-    if (session.closed) return;
-    const rel = filePath ? relative(project.root, filePath).replace(/\\/g, '/') : undefined;
-    this.emit('change', id, { event, path: rel });
-    clearTimeout(session.debounce);
-    const debounceMs = this.options.debounceMs ?? 300;
-    session.debounce = setTimeout(() => {
-     if (session.closed) return;
-     this.emit('reconcile-scheduled', id, { event, path: rel });
-     void this.request(id).catch(error =>
-      this.emit('notification', id, { type: 'error', message: error.message })
-     );
-    }, debounceMs);
-   };
-
    watcher.on('all', (event, filePath) => {
     if (session.closed) return;
-    const rel = relative(project.root, filePath).replace(/\\/g, '/');
-    if (isPathExcluded(rel) || isGeneratedOrTemporaryFile(rel)) return;
-    const isDir = event === 'addDir' || event === 'unlinkDir';
-    if (!isDir && !isRelevantAnalysisInput(rel)) return;
-    schedule(event, filePath);
+    this.handleFileEvent(id, event, filePath);
    });
 
    watcher.on('error', (err) => {
@@ -167,13 +191,17 @@ export class SyncService extends EventEmitter {
     const done = () => {
      if (!resolved) {
       resolved = true;
+      if (session.startTimeout) {
+       clearTimeout(session.startTimeout);
+       session.startTimeout = undefined;
+      }
       resolve();
      }
     };
     watcher.once('ready', done);
     watcher.once('error', done);
-    const timeout = setTimeout(done, 2000);
-    timeout.unref();
+    session.startTimeout = setTimeout(done, 2000);
+    session.startTimeout.unref();
    });
   }
 
@@ -232,6 +260,18 @@ export class SyncService extends EventEmitter {
     });
     await this.store.updateAnalysis(id, result);
     this.emit('notification', id, update);
+    const isIncompleteRevision = result.quality.diagnostics.some(d => d.code === 'incomplete-revision');
+    if (isIncompleteRevision && !session.closed && !session.debounce) {
+     if (session.stabilizationTimer) clearTimeout(session.stabilizationTimer);
+     const delay = this.options.stabilityThreshold ?? 150;
+     session.stabilizationTimer = setTimeout(() => {
+      session.stabilizationTimer = undefined;
+      if (!session.closed) {
+       void this.reconcile(id).catch(() => {});
+      }
+     }, delay);
+     session.stabilizationTimer.unref?.();
+    }
    } catch (error) {
     if (generation !== session.generation) continue;
     const staleEvidence = { scope: 'all' as const, paths: [], reason: (error as Error).message };
@@ -301,8 +341,22 @@ export class SyncService extends EventEmitter {
   const session = this.sessions.get(id);
   if (!session) return;
   session.closed = true;
-  clearTimeout(session.debounce);
-  clearInterval(session.timer);
+  if (session.debounce) {
+   clearTimeout(session.debounce);
+   session.debounce = undefined;
+  }
+  if (session.timer) {
+   clearInterval(session.timer);
+   session.timer = undefined;
+  }
+  if (session.stabilizationTimer) {
+   clearTimeout(session.stabilizationTimer);
+   session.stabilizationTimer = undefined;
+  }
+  if (session.startTimeout) {
+   clearTimeout(session.startTimeout);
+   session.startTimeout = undefined;
+  }
   if (session.watcher) {
    await session.watcher.close();
    session.watcher = undefined;
@@ -315,13 +369,9 @@ export class SyncService extends EventEmitter {
   if (id !== undefined) {
    return this.stop(id);
   }
-  for (const session of this.sessions.values()) {
-   session.closed = true;
-   clearTimeout(session.debounce);
-   clearInterval(session.timer);
-   await session.watcher?.close();
-   await session.worker.close();
+  const sessionIds = Array.from(this.sessions.keys());
+  for (const sessionId of sessionIds) {
+   await this.stop(sessionId);
   }
-  this.sessions.clear();
  }
 }
