@@ -1742,3 +1742,181 @@ it('compares workflow nodes and branch edges against an expected graph (T037 con
  expect(actual.graph.edges.length).toBe(expectedGraph.edges.length);
  expect(actual.graph).toEqual(expectedGraph);
 });
+
+it('imports unsupported dynamic and evaluated logic as visible opaque nodes (T038 concrete scenario 1 & AC 1-3)', async () => {
+ const fixtureDir = resolve('tests/fixtures/unsupported');
+ const expectedPath = resolve('tests/fixtures/unsupported.expected.json');
+
+ const analyzer = new Analyzer();
+ const a = await analyzer.analyze(fixtureDir);
+
+ // 1. Schema validity and quality separation (checklist item 4)
+ expect(GraphSchema.safeParse(a.graph).success).toBe(true);
+ expect(a.status).toBe('partial'); // partial due to unsupported warnings
+ expect(a.quality.unresolvedReferences).toBe(0);
+ expect(a.quality.inferredItems).toBe(0); // AC 3: opaque logic is not AI-verified
+ expect(a.quality.unsupportedConstructs).toBe(4);
+
+ // 2. Diagnostics verify reasons and codes (checklist item 3)
+ expect(a.quality.diagnostics).toContainEqual(
+  expect.objectContaining({
+   severity: 'warning',
+   code: 'unsupported-eval',
+   message: expect.stringContaining('Dynamic code evaluation via eval'),
+  })
+ );
+ expect(a.quality.diagnostics).toContainEqual(
+  expect.objectContaining({
+   severity: 'warning',
+   code: 'unsupported-eval',
+   message: expect.stringContaining('Dynamic code evaluation via Function constructor'),
+  })
+ );
+ expect(a.quality.diagnostics).toContainEqual(
+  expect.objectContaining({
+   severity: 'warning',
+   code: 'unsupported-dispatch',
+   message: expect.stringContaining('dispatcher[method]'),
+  })
+ );
+ expect(a.quality.diagnostics).toContainEqual(
+  expect.objectContaining({
+   severity: 'warning',
+   code: 'unsupported-switch',
+   message: expect.stringContaining('Switch statement execution paths are not fully reconstructed'),
+  })
+ );
+
+ // 3. Opaque nodes in graph
+ const opaqueNodes = a.graph.nodes.filter(n => n.kind === 'step' && n.stepType === 'opaque');
+ expect(opaqueNodes).toHaveLength(4);
+
+ // AC 2: Unsupported counts correspond to visible findings
+ expect(a.quality.unsupportedConstructs).toBe(opaqueNodes.length);
+
+ // AC 1: Opaque nodes open their original source
+ for (const node of opaqueNodes) {
+  expect(node.source).toBeDefined();
+  expect(node.source?.path).toBe('src/dynamic.ts');
+  expect(node.source?.line).toBeGreaterThan(0);
+  expect(node.source?.start).toBeLessThan(node.source!.end);
+
+  const evidence = resolveSourceEvidence(node.source, a, a.revision);
+  expect(evidence.status).toBe('current');
+  if (evidence.status === 'current') {
+   expect(evidence.text.length).toBeGreaterThan(0);
+   // Slices original file text directly
+   expect(a.files['src/dynamic.ts'].text.slice(node.source!.start, node.source!.end)).toBe(evidence.text);
+  }
+ }
+
+ // AC 3: Opaque content does not become AI-verified behavior
+ for (const node of opaqueNodes) {
+  expect(node.provenance).toBe('extracted');
+  expect(node.policy).toBe('editable');
+ }
+ const opaqueEdges = a.graph.edges.filter(e => opaqueNodes.some(n => n.id === e.source || n.id === e.target));
+ for (const edge of opaqueEdges) {
+  expect(edge.provenance).toBe('extracted');
+ }
+
+ // Supported function (supportedAdd) remains clean workflow with no opaque nodes
+ const addFn = a.graph.nodes.find(n => n.kind === 'function' && n.name === 'supportedAdd')!;
+ expect(addFn).toBeDefined();
+ const addSteps = a.graph.nodes.filter(n => n.kind === 'step' && n.parentId === addFn.id);
+ expect(addSteps).toHaveLength(1);
+ expect(addSteps[0].stepType).toBe('return');
+
+ // Expected graph persistence and verification (R31)
+ const expectedContent = await readFile(expectedPath, 'utf8');
+ const expectedGraph = JSON.parse(expectedContent);
+ expect(GraphSchema.safeParse(expectedGraph).success).toBe(true);
+ expect(a.graph.schemaVersion).toBe(expectedGraph.schemaVersion);
+ expect(a.graph.nodes.length).toBe(expectedGraph.nodes.length);
+ expect(a.graph.edges.length).toBe(expectedGraph.edges.length);
+ expect(a.graph).toEqual(expectedGraph);
+});
+
+it('inspects an opaque node after its source changes (T038 concrete scenario 2 & AC 1)', async () => {
+ const tempDir = resolve('tests/fixtures/temp-unsupported-' + Date.now());
+ const fixtureDir = resolve('tests/fixtures/unsupported');
+
+ try {
+  await cp(fixtureDir, tempDir, { recursive: true });
+  const analyzer = new Analyzer();
+
+  // 1. Initial analysis
+  const a1 = await analyzer.analyze(tempDir);
+  expect(a1.quality.unsupportedConstructs).toBe(4);
+
+  const evalStep1 = a1.graph.nodes.find(
+   n => n.kind === 'step' && n.stepType === 'opaque' && n.name.includes('eval(expression)')
+  )!;
+  expect(evalStep1).toBeDefined();
+
+  const evidence1 = resolveSourceEvidence(evalStep1.source, a1, a1.revision);
+  expect(evidence1.status).toBe('current');
+  if (evidence1.status === 'current') {
+   expect(evidence1.text).toContain('const evaluated = eval(expression);');
+  }
+
+  // 2. Modify source on disk
+  const dynamicFilePath = resolve(tempDir, 'src/dynamic.ts');
+  const originalSource = await readFile(dynamicFilePath, 'utf8');
+  const modifiedSource = '// Prepended comment shifting source positions\n\n' +
+   originalSource.replace('const evaluated = eval(expression);', 'const evaluated = eval(expression.trim()); // modified');
+  await writeFile(dynamicFilePath, modifiedSource, 'utf8');
+
+  // 3. Inspect original opaque node against modified file before re-analyzing:
+  // Content hash mismatch is detected and rejected
+  const hashMismatchEvidence = resolveSourceEvidence(
+   evalStep1.source,
+   { ...a1, files: { 'src/dynamic.ts': { hash: 'modified-unmatched-hash', text: modifiedSource } } },
+   a1.revision
+  );
+  expect(hashMismatchEvidence.status).toBe('invalid');
+  if (hashMismatchEvidence.status === 'invalid') {
+   expect(hashMismatchEvidence.message).toContain('Source content hash does not match');
+  }
+
+  // 4. Re-analyze modified source
+  const a2 = await analyzer.analyze(tempDir);
+  expect(a2.revision).not.toBe(a1.revision);
+
+  const evalStep2 = a2.graph.nodes.find(
+   n => n.kind === 'step' && n.stepType === 'opaque' && n.name.includes('eval(expression.trim())')
+  )!;
+  expect(evalStep2).toBeDefined();
+  expect(evalStep2.source?.revision).toBe(a2.revision);
+  expect(evalStep2.source?.hash).not.toBe(evalStep1.source?.hash);
+  expect(evalStep2.source?.line).toBeGreaterThan(evalStep1.source!.line); // shifted down
+
+  const evidence2 = resolveSourceEvidence(evalStep2.source, a2, a2.revision);
+  expect(evidence2.status).toBe('current');
+  if (evidence2.status === 'current') {
+   expect(evidence2.text).toContain('const evaluated = eval(expression.trim());');
+  }
+
+  // 5. Inspecting old opaque node against new analysis:
+  // Revision is unavailable in the newer analysis snapshot
+  const unavailableEvidence = resolveSourceEvidence(evalStep1.source, a2, a2.revision);
+  expect(unavailableEvidence.status).toBe('unavailable');
+  if (unavailableEvidence.status === 'unavailable') {
+   expect(unavailableEvidence.message).toContain('Captured source revision is unavailable');
+  }
+
+  // 6. Inspecting old opaque node when marked stale:
+  const staleEvidence = resolveSourceEvidence(
+   evalStep1.source,
+   {
+    ...a1,
+    status: 'stale',
+    staleEvidence: { scope: 'paths', paths: ['src/dynamic.ts'], reason: 'File changed on disk' },
+   },
+   a2.revision
+  );
+  expect(staleEvidence.status).toBe('stale');
+ } finally {
+  await rm(tempDir, { recursive: true, force: true });
+ }
+});

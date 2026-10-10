@@ -491,6 +491,14 @@ export class Analyzer {
   const eligible=discovery.eligibleFiles;
   const revision=hash(discovery.trackingInputs.map(p=>p+':'+files[p].hash).join('\n'));
   const diagnostics:Diagnostic[]=[];let unsupported=0,unresolved=0,analyzed=0;
+  const unsupportedLocations=new Set<string>();
+  const recordUnsupported=(locKey:string,d:Diagnostic)=>{
+   if(!unsupportedLocations.has(locKey)){
+    unsupportedLocations.add(locKey);
+    unsupported++;
+    diagnostics.push(d);
+   }
+  };
   if(isIncomplete){
    diagnostics.push({severity:'warning',message:`Source files were modified during capture (${changedPaths.join(', ')||'mixed inputs'}). Revision is incomplete.`,code:'incomplete-revision'});
   }
@@ -910,6 +918,26 @@ export class Analyzer {
     }
     return false;
    }
+   function isDynamicEvaluation(n: ts.CallExpression | ts.NewExpression): { reason: string; code: string } | undefined {
+    const expr = unwrapParentheses(n.expression);
+    if (ts.isIdentifier(expr)) {
+     if (expr.text === 'eval') {
+      return { reason: 'Dynamic code evaluation via eval', code: 'unsupported-eval' };
+     }
+     if (expr.text === 'Function') {
+      return { reason: 'Dynamic code evaluation via Function constructor', code: 'unsupported-eval' };
+     }
+    }
+    if (ts.isPropertyAccessExpression(expr)) {
+     if (expr.name.text === 'eval') {
+      return { reason: 'Dynamic code evaluation via eval', code: 'unsupported-eval' };
+     }
+     if (expr.name.text === 'Function') {
+      return { reason: 'Dynamic code evaluation via Function constructor', code: 'unsupported-eval' };
+     }
+    }
+    return undefined;
+   }
    function resolveAliasSymbol(sym: ts.Symbol | undefined): ts.Symbol | undefined {
     let current = sym;
     while(current && (current.flags & ts.SymbolFlags.Alias)){
@@ -960,9 +988,20 @@ export class Analyzer {
      }
     }
     if(ts.isCallExpression(n)||ts.isNewExpression(n)){
-     if(ts.isCallExpression(n) && isDynamicPropertyCall(n)){
-      unsupported++;
-      diagnostics.push({
+     const dynEval=isDynamicEvaluation(n);
+     const isDynProp=ts.isCallExpression(n) && isDynamicPropertyCall(n);
+     if(dynEval){
+      const locKey=path+':'+n.getStart(sf);
+      recordUnsupported(locKey,{
+       severity:'warning',
+       message:dynEval.reason+': '+n.getText(sf),
+       path,
+       line:sf.getLineAndCharacterOfPosition(n.getStart(sf)).line+1,
+       code:dynEval.code
+      });
+     }else if(isDynProp){
+      const locKey=path+':'+n.getStart(sf);
+      recordUnsupported(locKey,{
        severity:'warning',
        message:'Dynamic property call cannot be resolved statically: '+n.expression.getText(sf),
        path,
@@ -1137,15 +1176,60 @@ export class Analyzer {
        currentExits=[];
        continue;
       }
-      const isCall=ts.isExpressionStatement(stmt)&&(ts.isCallExpression(stmt.expression)||(ts.isAwaitExpression(stmt.expression)&&ts.isCallExpression(stmt.expression.expression)));
-      const isOpaque=ts.isSwitchStatement(stmt)||ts.isBreakStatement(stmt)||ts.isContinueStatement(stmt)||ts.isWithStatement(stmt)||ts.isLabeledStatement(stmt);
+      function getUnsupportedStatementInfo(s: ts.Statement): { reason: string; code: string; locStart: number } | undefined {
+       if(ts.isSwitchStatement(s)){
+        return { reason: 'Switch statement execution paths are not fully reconstructed', code: 'unsupported-switch', locStart: s.getStart(sf) };
+       }
+       if(ts.isBreakStatement(s)){
+        return { reason: 'Break statement jump is not supported in structured workflows', code: 'unsupported-jump', locStart: s.getStart(sf) };
+       }
+       if(ts.isContinueStatement(s)){
+        return { reason: 'Continue statement jump is not supported in structured workflows', code: 'unsupported-jump', locStart: s.getStart(sf) };
+       }
+       if(ts.isWithStatement(s)){
+        return { reason: 'With statement is not supported in structured workflows', code: 'unsupported-with', locStart: s.getStart(sf) };
+       }
+       if(ts.isLabeledStatement(s)){
+        return { reason: 'Labeled statement jump is not supported in structured workflows', code: 'unsupported-labeled', locStart: s.getStart(sf) };
+       }
+       if(ts.isDebuggerStatement(s)){
+        return { reason: 'Debugger statement is not supported in structured workflows', code: 'unsupported-debugger', locStart: s.getStart(sf) };
+       }
+       let dynamicInfo: { reason: string; code: string; locStart: number } | undefined;
+       function checkNode(node: ts.Node){
+        if(dynamicInfo) return;
+        if(ts.isCallExpression(node) || ts.isNewExpression(node)){
+         const dyn = isDynamicEvaluation(node);
+         if(dyn){
+          dynamicInfo = { reason: dyn.reason, code: dyn.code, locStart: node.getStart(sf) };
+          return;
+         }
+         if(ts.isCallExpression(node) && isDynamicPropertyCall(node)){
+          dynamicInfo = { reason: 'Dynamic property call cannot be resolved statically: ' + node.expression.getText(sf), code: 'unsupported-dispatch', locStart: node.getStart(sf) };
+          return;
+         }
+        }
+        ts.forEachChild(node, checkNode);
+       }
+       checkNode(s);
+       return dynamicInfo;
+      }
+      const unsupportedInfo=getUnsupportedStatementInfo(stmt);
+      const isCall=!unsupportedInfo&&ts.isExpressionStatement(stmt)&&(ts.isCallExpression(stmt.expression)||(ts.isAwaitExpression(stmt.expression)&&ts.isCallExpression(stmt.expression.expression)));
+      const isOpaque=!!unsupportedInfo;
       const type:ProgramNode['stepType']=isCall?'call':isOpaque?'opaque':'operation';
       const label=stmt.getText(sf);
       const id=step(stmt,type,label);
       connect(currentExits,id);
       if(type==='opaque'){
-       unsupported++;
-       diagnostics.push({severity:'warning',message:'Workflow contains a source-backed block whose execution paths are not fully reconstructed.',path,line:sf.getLineAndCharacterOfPosition(stmt.getStart()).line+1});
+       const locKey=path+':'+(unsupportedInfo?unsupportedInfo.locStart:stmt.getStart(sf));
+       recordUnsupported(locKey,{
+        severity:'warning',
+        message:'Workflow contains a source-backed block whose execution paths are not fully reconstructed'+(unsupportedInfo?': '+unsupportedInfo.reason:'.'),
+        path,
+        line:sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line+1,
+        code:unsupportedInfo?unsupportedInfo.code:'unsupported-construct'
+       });
       }
       currentExits=[{id,kind:'next'}];
      }
