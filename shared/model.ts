@@ -228,6 +228,7 @@ export const BindingCandidateSchema = z.object({
   source: SourceSchema,
   contract: z.string().default(''),
   matchReason: z.string().optional(),
+  evidenceText: z.string().optional(),
 }).strict();
 export type BindingCandidate = z.infer<typeof BindingCandidateSchema>;
 

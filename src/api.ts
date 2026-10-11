@@ -7,8 +7,10 @@ import type {
   AnalysisStatusResponse,
   ImportQualityReportResponse,
   AnalysisResponse,
+  AcceptBindingRequest,
+  BindingReviewsResponse,
 } from '../shared/api';
-import type { Graph, Layout, Project, Analysis } from '../shared/model';
+import type { Graph, Layout, Project, Analysis, ProgramNode, BindingReviewRecord } from '../shared/model';
 
 export class ApiConnectionError extends Error {
   public actionableSteps: string[];
@@ -319,4 +321,22 @@ export async function reconcileProject(
     method: 'POST',
     body: JSON.stringify(opts),
   }, base);
+}
+
+export async function getBindingReviews(
+  id: string,
+  baseUrl?: string
+): Promise<BindingReviewsResponse> {
+  return request<BindingReviewsResponse>(`/projects/${id}/bindings`, { method: 'GET' }, baseUrl);
+}
+
+export async function acceptBinding(
+  id: string,
+  requestData: AcceptBindingRequest,
+  baseUrl?: string
+): Promise<{ success: boolean; project: Project; node: ProgramNode; bindingReviews: BindingReviewRecord[] }> {
+  return request<{ success: boolean; project: Project; node: ProgramNode; bindingReviews: BindingReviewRecord[] }>(`/projects/${id}/bindings/accept`, {
+    method: 'POST',
+    body: JSON.stringify(requestData),
+  }, baseUrl);
 }

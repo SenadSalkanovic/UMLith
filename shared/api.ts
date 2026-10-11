@@ -10,6 +10,7 @@ import {
   StaleEvidenceSchema,
   GraphDeltaSchema,
   GraphUpdateSchema,
+  BindingReviewRecordSchema,
   type Graph,
   type GraphInput,
   type Layout,
@@ -17,6 +18,7 @@ import {
   type Analysis,
   type GraphDelta,
   type GraphUpdate,
+  type BindingReviewRecord,
 } from './model';
 
 export const CreateProjectRequestSchema = z.object({
@@ -268,3 +270,26 @@ export const SseDiagnosticsEventSchema = z.object({
   quality: QualitySchema.optional(),
 });
 export type SseDiagnosticsEvent = z.infer<typeof SseDiagnosticsEventSchema>;
+
+export const AcceptBindingRequestSchema = z.object({
+  nodeId: z.string().min(1, 'nodeId is required'),
+  candidateId: z.string().min(1, 'candidateId is required'),
+  expectedRevision: z.number().int().nonnegative().optional(),
+  preserveBaseline: z.boolean().default(true),
+});
+export type AcceptBindingRequest = z.infer<typeof AcceptBindingRequestSchema>;
+
+export const BindingReviewsResponseSchema = z.object({
+  projectId: z.string(),
+  records: z.array(BindingReviewRecordSchema),
+});
+export type BindingReviewsResponse = z.infer<typeof BindingReviewsResponseSchema>;
+
+export const SseBindingReviewEventSchema = z.object({
+  event: z.literal('binding-review').optional(),
+  type: z.literal('binding-review').optional(),
+  projectId: z.string(),
+  records: z.array(BindingReviewRecordSchema),
+  timestamp: z.string().optional(),
+});
+export type SseBindingReviewEvent = z.infer<typeof SseBindingReviewEventSchema>;

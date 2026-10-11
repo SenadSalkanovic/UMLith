@@ -12,6 +12,7 @@ import { generateImportQualityReport, type ImportQualityReport } from './analyze
 import { randomUUID } from 'node:crypto';
 import { SyncService, type SyncServiceOptions } from './sync';
 import { AnalysisSchema, emptyGraph, createGraphUpdate, type Analysis } from '../shared/model';
+import { reconcileSourceBindings, acceptBindingCandidate } from './review';
 import {
   CreateProjectRequestSchema,
   UpdateSpecificationRequestSchema,
@@ -27,6 +28,9 @@ import {
   SseStatusEventSchema,
   SseDeltaEventSchema,
   SseDiagnosticsEventSchema,
+  AcceptBindingRequestSchema,
+  BindingReviewsResponseSchema,
+  SseBindingReviewEventSchema,
 } from '../shared/api';
 
 export const DEFAULT_ALLOWED_ORIGINS = [
@@ -856,6 +860,55 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   app.get('/api/projects/:id/files/*', getFileHandler);
   app.get('/api/projects/:id/source', getFileHandler);
 
+  // Binding review endpoints (T061)
+  const getBindingsHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const p = await store.get(id);
+    const records = p.analysis ? reconcileSourceBindings(p.specification, p.analysis) : [];
+    return reply.status(200).send({
+      projectId: id,
+      records,
+    });
+  };
+
+  const acceptBindingHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const reqData = AcceptBindingRequestSchema.parse(request.body);
+    const p = await store.get(id);
+    if (reqData.expectedRevision !== undefined && p.specRevision !== reqData.expectedRevision) {
+      throw new SpecificationConflictError(id, reqData.expectedRevision, p.specRevision);
+    }
+    if (!p.analysis) {
+      throw new AppError('Cannot accept binding without active analysis', 400);
+    }
+    const { graph, updatedNode } = acceptBindingCandidate(
+      p.specification,
+      reqData.nodeId,
+      reqData.candidateId,
+      p.analysis,
+      { preserveBaseline: reqData.preserveBaseline ?? true }
+    );
+    const updatedProject = await store.updateSpec(id, reqData.expectedRevision ?? p.specRevision, graph);
+    const remainingReviews = reconcileSourceBindings(updatedProject.specification, p.analysis);
+    sync.emit('binding-review', id, remainingReviews);
+    sync.emit('notification', id, {
+      type: 'binding-review',
+      projectId: id,
+      records: remainingReviews,
+    });
+    return reply.status(200).send({
+      success: true,
+      project: updatedProject,
+      node: updatedNode,
+      bindingReviews: remainingReviews,
+    });
+  };
+
+  app.get('/api/projects/:id/bindings', getBindingsHandler);
+  app.get('/api/projects/:id/binding-reviews', getBindingsHandler);
+  app.post('/api/projects/:id/bindings/accept', acceptBindingHandler);
+  app.post('/api/projects/:id/binding/accept', acceptBindingHandler);
+
   // Event streams (SSE)
   const createSseHandler = (forProject: boolean) => {
     return async (request: any, reply: any) => {
@@ -1033,6 +1086,15 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
             quality: payload.quality,
           };
           writeSseMessage('diagnostics', diagEventId, diagData);
+        } else if (payload.type === 'binding-review') {
+          const bindingEventId = `${targetProjectId}:binding:${Date.now()}`;
+          writeSseMessage('binding-review', bindingEventId, {
+            event: 'binding-review',
+            type: 'binding-review',
+            projectId: targetProjectId,
+            records: payload.records,
+            timestamp: new Date().toISOString(),
+          });
         } else if (payload.type === 'error') {
           const errorEventId = `${targetProjectId}:error:${Date.now()}`;
           writeSseMessage('error', errorEventId, {

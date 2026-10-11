@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import type { Project, Graph, Layout } from '../shared/model';
+import type { Project, Graph, Layout, BindingReviewRecord } from '../shared/model';
 import type { CreateProjectRequest, RevisionRecord } from '../shared/api';
 import type { ViewState, SpecificationState, AnalysisState, WorkspaceError, SyncStatus } from './types';
 import * as api from './api';
@@ -95,6 +95,8 @@ export const App: React.FC<AppProps> = ({
     };
   });
 
+  const [bindingReviews, setBindingReviews] = useState<BindingReviewRecord[]>([]);
+
   // 5. View State (UI-only, strictly decoupled from Spec and Analysis)
   const [viewState, setViewState] = useState<ViewState>({
     selectedId: null,
@@ -140,6 +142,13 @@ export const App: React.FC<AppProps> = ({
         status: proj.analysis?.status || 'current',
         lastChecked: Date.now(),
       });
+
+      try {
+        const bRes = await api.getBindingReviews(proj.id, apiBaseUrl);
+        setBindingReviews(bRes.records || []);
+      } catch {
+        setBindingReviews([]);
+      }
 
       // Reset selection, scope, historical view, and conflict state on project load
       setActiveHistoricalRevision(null);
@@ -679,6 +688,33 @@ export const App: React.FC<AppProps> = ({
     setConflictState(null);
   };
 
+  const handleAcceptBinding = async (nodeId: string, candidateId: string) => {
+    if (!specificationState.project) return;
+    try {
+      const res = await api.acceptBinding(
+        specificationState.project.id,
+        {
+          nodeId,
+          candidateId,
+          expectedRevision: specificationState.project.specRevision,
+          preserveBaseline: true,
+        },
+        apiBaseUrl
+      );
+      if (res.success && res.project) {
+        setSpecificationState(prev => ({
+          ...prev,
+          project: res.project,
+          specification: res.project.specification,
+          specRevision: res.project.specRevision,
+        }));
+        setBindingReviews(res.bindingReviews || []);
+      }
+    } catch (err) {
+      console.error('Failed to accept binding candidate', err);
+    }
+  };
+
   // Reconcile removed items or deleted nodes/edges to prevent stale selections
   useEffect(() => {
     const currentGraph = viewState.graphContext === 'implemented'
@@ -689,6 +725,7 @@ export const App: React.FC<AppProps> = ({
 
     const resolution = reconcileSelectionAndScope(viewState, currentGraph, {
       specification: specificationState.specification,
+      bindingReviews,
     });
 
     if (
@@ -709,6 +746,7 @@ export const App: React.FC<AppProps> = ({
     viewState.graphContext,
     viewState.selectedId,
     viewState.activeScope,
+    bindingReviews,
     viewState.selectedType,
   ]);
 
@@ -1017,6 +1055,8 @@ export const App: React.FC<AppProps> = ({
                 graph={specificationState.specification}
                 analysisState={analysisState}
                 onOpenImportReview={() => setIsImportReviewOpen(true)}
+                bindingReviews={bindingReviews}
+                onAcceptBinding={handleAcceptBinding}
               />
             </div>
           )}

@@ -12,10 +12,12 @@ import type {
   DesignProposal,
   GraphDelta,
   Analysis,
+  BindingReviewRecord,
 } from '../../shared/model';
 import { graphDelta } from '../../shared/model';
 import type { AnalysisState, SyncStatus } from '../types';
 import { QualityReport } from './QualityReport';
+import { BindingReview } from './BindingReview';
 import {
   CheckSquare,
   Shield,
@@ -32,11 +34,13 @@ import {
   Check,
   X,
   ArrowLeft,
+  ArrowRight,
   Layers,
   Activity,
   Terminal,
   HelpCircle,
   ShieldAlert,
+  Link as LinkIcon,
 } from 'lucide-react';
 
 export type ReviewState = 'empty' | 'pending-review' | 'invalid' | 'stale-review';
@@ -283,8 +287,10 @@ export interface ReviewPanelProps {
   onAccept?: (review: PendingReviewItem) => void | Promise<void>;
   onReject?: (review: PendingReviewItem) => void | Promise<void>;
   onDismiss?: (review: PendingReviewItem) => void;
-  initialTab?: 'overview' | 'architecture' | 'implementation' | 'import';
+  initialTab?: 'overview' | 'architecture' | 'implementation' | 'import' | 'bindings';
   onOpenImportReview?: () => void;
+  bindingReviews?: BindingReviewRecord[];
+  onAcceptBinding?: (nodeId: string, candidateId: string) => void | Promise<void>;
 }
 
 export const ReviewPanel: React.FC<ReviewPanelProps> = ({
@@ -299,9 +305,11 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
   onDismiss,
   initialTab = 'overview',
   onOpenImportReview,
+  bindingReviews = [],
+  onAcceptBinding,
 }) => {
   const [internalActiveId, setInternalActiveId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'architecture' | 'implementation' | 'import'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'overview' | 'architecture' | 'implementation' | 'import' | 'bindings'>(initialTab);
   const [reviewSection, setReviewSection] = useState<'spec' | 'code' | 'diagnostics'>('spec');
 
   const selectedId = activeReviewId !== undefined ? activeReviewId : internalActiveId;
@@ -478,6 +486,18 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
         >
           <FileCode size={13} />
           <span>Import Quality</span>
+        </button>
+        <button
+          type="button"
+          className={`review-tab-btn ${activeTab === 'bindings' ? 'active' : ''}`}
+          onClick={() => {
+            setActiveTab('bindings');
+            handleSelectReviewItem(null);
+          }}
+          data-testid="tab-bindings"
+        >
+          <LinkIcon size={13} />
+          <span>{`Bindings (${bindingReviews.length})`}</span>
         </button>
       </div>
 
@@ -1051,6 +1071,19 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
               </div>
             )}
 
+            {/* TAB: BINDING REVIEWS (T061) */}
+            {activeTab === 'bindings' && (
+              <div className="review-bindings-container" data-testid="review-bindings-container">
+                <BindingReview
+                  project={project}
+                  specification={graph}
+                  analysis={analysisState.analysis || project?.analysis}
+                  bindingReviews={bindingReviews}
+                  onAcceptBinding={onAcceptBinding}
+                />
+              </div>
+            )}
+
             {/* Standard Overview Cards (Preserving all existing T016 & T026 contract tests) */}
             {activeTab === 'overview' && (
               <>
@@ -1105,6 +1138,33 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                     </div>
                   )}
                 </div>
+
+                {bindingReviews.some(r => r.status !== 'unambiguous') && (
+                  <div className="review-card" data-testid="ambiguous-bindings-alert">
+                    <div className="review-card-header text-amber">
+                      <AlertTriangle size={14} />
+                      <span>Source Binding Reviews ({bindingReviews.filter(r => r.status !== 'unambiguous').length})</span>
+                    </div>
+                    <div className="human-review-callout">
+                      <ShieldAlert size={14} className="callout-icon text-amber" />
+                      <span>
+                        Ambiguous renames or moves require binding review before changes can apply. Baselines are preserved.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-review-category"
+                      onClick={() => {
+                        setActiveTab('bindings');
+                        handleSelectReviewItem(null);
+                      }}
+                      data-testid="goto-bindings-btn"
+                    >
+                      <span>Review Source Bindings</span>
+                      <ArrowRight size={12} />
+                    </button>
+                  </div>
+                )}
 
                 <div className="review-card">
                   <div className="review-card-header">

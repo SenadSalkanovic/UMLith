@@ -559,6 +559,12 @@ export class AnalysisClient {
         break;
       }
 
+      case 'binding-review': {
+        const records = Array.isArray(data?.records) ? data.records : (Array.isArray(data) ? data : []);
+        this.emit('binding-review', records);
+        break;
+      }
+
       case 'error': {
         const error = new Error(data?.message || 'SSE server reported error');
         this.options.onError?.(error);

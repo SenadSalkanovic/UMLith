@@ -3,7 +3,7 @@ import {createTwoFilesPatch} from 'diff';
 import {readFile,writeFile,mkdir,rename,rm,readdir} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {NodeSchema,resolveSourceEvidence,sourceIdentityKey,type Project,type ProgramNode,type Analysis,type AgentJob,type ValidationReport,type ValidationIssue,type FileChange,type BindingReviewRecord,type Graph} from '../shared/model';
+import {NodeSchema,GraphSchema,resolveSourceEvidence,sourceIdentityKey,type Project,type ProgramNode,type Analysis,type AgentJob,type ValidationReport,type ValidationIssue,type FileChange,type BindingReviewRecord,type BindingCandidate,type Source,type Graph} from '../shared/model';
 import {Analyzer,reconcileGraphIdentities,type ReconcileGraphResult} from './analyzer';
 import {AppError,atomicJson,captureFiles,hashes,hash,safePath} from './files';
 import {ProjectStore} from './store';
@@ -18,6 +18,17 @@ export function contractSignature(contract: string | undefined): string {
   return normalizeContract(contract.slice(parenIdx));
  }
  return normalizeContract(contract);
+}
+export function extractEvidenceText(
+  source: Source | undefined,
+  files?: Record<string, { text: string }>
+): string | undefined {
+  if (!source || !files || !files[source.path]) return undefined;
+  const file = files[source.path];
+  if (typeof source.start === 'number' && typeof source.end === 'number' && source.end >= source.start) {
+    return file.text.slice(source.start, source.end);
+  }
+  return undefined;
 }
 export interface FreezePreview {
   kind: 'implementation' | 'contract';
@@ -217,6 +228,15 @@ export function resolveBindingRecord(node: ProgramNode, analysis: Analysis): Bin
    : [];
   if (keyMatches.length === 1) {
    const match = keyMatches[0];
+   const cand: BindingCandidate = {
+    id: match.id,
+    name: match.name,
+    kind: match.kind,
+    source: match.source!,
+    contract: match.contract,
+    matchReason: 'Exact declaration key match',
+    evidenceText: extractEvidenceText(match.source, analysis.files),
+   };
    return {
     nodeId: node.id,
     nodeName: node.name,
@@ -226,22 +246,8 @@ export function resolveBindingRecord(node: ProgramNode, analysis: Analysis): Bin
     currentBinding: node.source,
     contract: node.contract,
     baseline: node.baseline,
-    candidates: [{
-     id: match.id,
-     name: match.name,
-     kind: match.kind,
-     source: match.source!,
-     contract: match.contract,
-     matchReason: 'Exact declaration key match',
-    }],
-    selectedCandidate: {
-     id: match.id,
-     name: match.name,
-     kind: match.kind,
-     source: match.source!,
-     contract: match.contract,
-     matchReason: 'Exact declaration key match',
-    },
+    candidates: [cand],
+    selectedCandidate: cand,
     reason: `Unambiguous match preserved for '${node.name}'`,
    };
   }
@@ -262,6 +268,7 @@ export function resolveBindingRecord(node: ProgramNode, analysis: Analysis): Bin
      source: m.source!,
      contract: m.contract,
      matchReason: 'Duplicate matching key in source',
+     evidenceText: extractEvidenceText(m.source, analysis.files),
     })),
     reason: `Ambiguous match: multiple declarations with duplicate key '${key}'`,
    };
@@ -311,6 +318,7 @@ export function resolveBindingRecord(node: ProgramNode, analysis: Analysis): Bin
     source: c.source!,
     contract: c.contract,
     matchReason: 'Matching candidate declaration',
+    evidenceText: extractEvidenceText(c.source, analysis.files),
    })),
    reason: `Ambiguous match: ${candidates.length} candidate declarations match '${node.name}'`,
   };
@@ -318,11 +326,23 @@ export function resolveBindingRecord(node: ProgramNode, analysis: Analysis): Bin
 
  if (candidates.length === 1) {
   const single = candidates[0];
-  const isProtected = node.policy === 'frozen-implementation' || node.policy === 'frozen-contract';
+  const isProtected = node.policy === 'frozen-implementation' || node.policy === 'frozen-contract' || node.policy === 'sensitive';
   const isMovedOrRenamed = Boolean(node.source && (
    node.source.path !== single.source?.path ||
    (node.source.symbol && single.source?.symbol && node.source.symbol !== single.source.symbol)
   ));
+
+  const cand: BindingCandidate = {
+   id: single.id,
+   name: single.name,
+   kind: single.kind,
+   source: single.source!,
+   contract: single.contract,
+   matchReason: isProtected && isMovedOrRenamed
+    ? 'Candidate match requires binding review for protected item'
+    : 'Unique candidate match',
+   evidenceText: extractEvidenceText(single.source, analysis.files),
+  };
 
   if (isProtected && isMovedOrRenamed) {
    return {
@@ -334,14 +354,7 @@ export function resolveBindingRecord(node: ProgramNode, analysis: Analysis): Bin
     currentBinding: node.source,
     contract: node.contract,
     baseline: node.baseline,
-    candidates: [{
-     id: single.id,
-     name: single.name,
-     kind: single.kind,
-     source: single.source!,
-     contract: single.contract,
-     matchReason: 'Candidate match requires binding review for protected item',
-    }],
+    candidates: [cand],
     reason: `Protected item '${node.name}' was moved or renamed; requires explicit binding review`,
    };
   }
@@ -355,22 +368,8 @@ export function resolveBindingRecord(node: ProgramNode, analysis: Analysis): Bin
    currentBinding: node.source,
    contract: node.contract,
    baseline: node.baseline,
-   candidates: [{
-    id: single.id,
-    name: single.name,
-    kind: single.kind,
-    source: single.source!,
-    contract: single.contract,
-    matchReason: 'Unique candidate match',
-   }],
-   selectedCandidate: {
-    id: single.id,
-    name: single.name,
-    kind: single.kind,
-    source: single.source!,
-    contract: single.contract,
-    matchReason: 'Unique candidate match',
-   },
+   candidates: [cand],
+   selectedCandidate: cand,
    reason: `Unambiguous candidate match found for '${node.name}'`,
   };
  }
@@ -435,15 +434,112 @@ export function reconcileSourceBindings(
 
 export {reconcileGraphIdentities, type ReconcileGraphResult};
 
+export interface AcceptBindingOptions {
+  preserveBaseline?: boolean;
+}
+
+export function acceptBinding(
+  node: ProgramNode,
+  candidate: BindingCandidate,
+  options?: AcceptBindingOptions
+): ProgramNode {
+  const preserveBaseline = options?.preserveBaseline ?? true;
+  const updated: ProgramNode = {
+    ...node,
+    source: candidate.source,
+  };
+  if (candidate.name && candidate.name !== node.name) {
+    updated.name = candidate.name;
+  }
+  if (candidate.contract) {
+    updated.contract = candidate.contract;
+  }
+  // Baseline preservation: Retain original baseline unless explicitly instructed otherwise
+  if (preserveBaseline && node.baseline) {
+    updated.baseline = { ...node.baseline };
+  }
+  return NodeSchema.parse(updated);
+}
+
+export function acceptBindingInGraph(
+  specification: Graph,
+  nodeId: string,
+  candidate: BindingCandidate,
+  options?: AcceptBindingOptions
+): Graph {
+  const nodeIndex = specification.nodes.findIndex(n => n.id === nodeId);
+  if (nodeIndex === -1) {
+    throw new AppError(`Node with ID '${nodeId}' not found in specification`, 404);
+  }
+  const targetNode = specification.nodes[nodeIndex];
+  const updatedNode = acceptBinding(targetNode, candidate, options);
+  const newNodes = [...specification.nodes];
+  newNodes[nodeIndex] = updatedNode;
+
+  return GraphSchema.parse({
+    ...specification,
+    nodes: newNodes,
+  });
+}
+
+export function acceptBindingCandidate(
+  specification: Graph,
+  nodeId: string,
+  candidateId: string,
+  analysis: Analysis,
+  options?: AcceptBindingOptions
+): { graph: Graph; updatedNode: ProgramNode } {
+  const targetNode = specification.nodes.find(n => n.id === nodeId);
+  if (!targetNode) {
+    throw new AppError(`Node with ID '${nodeId}' not found in specification`, 404);
+  }
+  const review = resolveBindingRecord(targetNode, analysis);
+  let candidate = review.candidates.find(c => c.id === candidateId);
+  if (!candidate) {
+    const analysisNode = analysis.graph.nodes.find(n => n.id === candidateId);
+    if (analysisNode && analysisNode.source) {
+      candidate = {
+        id: analysisNode.id,
+        name: analysisNode.name,
+        kind: analysisNode.kind,
+        source: analysisNode.source,
+        contract: analysisNode.contract,
+        matchReason: 'Direct candidate selection from analysis',
+        evidenceText: extractEvidenceText(analysisNode.source, analysis.files),
+      };
+    }
+  }
+
+  if (!candidate) {
+    throw new AppError(`Candidate '${candidateId}' not found for node '${nodeId}'`, 404);
+  }
+
+  const updatedNode = acceptBinding(targetNode, candidate, options);
+  const graph = acceptBindingInGraph(specification, nodeId, candidate, options);
+  return { graph, updatedNode };
+}
+
 export function protectionIssues(project:Project,analysis:Analysis):ValidationIssue[]{
  const issues:ValidationIssue[]=[];
+ const reviews = reconcileSourceBindings(project.specification, analysis);
+ const reviewMap = new Map(reviews.map(r => [r.nodeId, r]));
+
  for(const node of project.specification.nodes){
   if(node.policy!=='frozen-implementation'&&node.policy!=='frozen-contract')continue;
-  const review = resolveBindingRecord(node, analysis);
+  const review = reviewMap.get(node.id) || resolveBindingRecord(node, analysis);
   if (review.status === 'ambiguous') {
    issues.push({
     code: 'binding',
     message: `Protected item has ambiguous binding: ${node.name} (${review.candidates.length} candidates)`,
+    nodeId: node.id,
+    path: node.source?.path,
+   });
+   continue;
+  }
+  if (review.status === 'unresolved') {
+   issues.push({
+    code: 'binding',
+    message: `Protected item cannot be resolved: ${node.name}`,
     nodeId: node.id,
     path: node.source?.path,
    });
