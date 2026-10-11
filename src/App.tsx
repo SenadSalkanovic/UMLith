@@ -21,6 +21,7 @@ import { RevisionHistory, type SpecificationConflictState } from './components/R
 import { ProtectionEditor } from './components/ProtectionEditor';
 import { ImportReview } from './components/ImportReview';
 import { AnalysisStatus } from './components/AnalysisStatus';
+import { AgentWorkspace } from './components/AgentWorkspace';
 import { Loader2, Clock, AlertTriangle } from 'lucide-react';
 
 export interface AppProps {
@@ -77,6 +78,7 @@ export const App: React.FC<AppProps> = ({
 
   // Import Review Modal State (T046)
   const [isImportReviewOpen, setIsImportReviewOpen] = useState<boolean>(false);
+  const [isAgentWorkspaceOpen, setIsAgentWorkspaceOpen] = useState(false);
 
   // 3. Specification State (Persistent & Versioned Intent)
   const [specificationState, setSpecificationState] = useState<SpecificationState>(() => ({
@@ -914,6 +916,9 @@ export const App: React.FC<AppProps> = ({
       />
 
       {/* Analysis Status Alert Banner for Stale or Partial states */}
+      <div className="workspace-agent-action">
+        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setIsAgentWorkspaceOpen(true)}>Agent workspace</button>
+      </div>
       {(analysisState.status === 'stale' || analysisState.status === 'partial') && (
         <div className="workspace-analysis-banner-wrapper" data-testid="workspace-analysis-banner">
           <AnalysisStatus
@@ -1225,6 +1230,14 @@ export const App: React.FC<AppProps> = ({
         apiBaseUrl={apiBaseUrl}
         mode="modal"
       />
+      {isAgentWorkspaceOpen && specificationState.project && <AgentWorkspace
+        project={specificationState.project}
+        analysisRevision={analysisState.analysis?.revision}
+        apiBaseUrl={apiBaseUrl}
+        onClose={() => setIsAgentWorkspaceOpen(false)}
+        onChanged={() => loadProjectById(specificationState.project!.id)}
+        onChecksChanged={project => setSpecificationState(prev => ({ ...prev, project }))}
+      />}
     </div>
   );
 };

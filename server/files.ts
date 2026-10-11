@@ -24,8 +24,11 @@ export async function atomicJson(path:string,value:unknown) {
  await mkdir(dirname(path),{recursive:true});
  const temp=path+'.'+randomUUID()+'.tmp';
  try{
-  await writeFile(temp,JSON.stringify(value,null,2),{mode:0o600});
+  const file=await open(temp,'wx',0o600);
+  try{await file.writeFile(JSON.stringify(value,null,2));await file.sync();}finally{await file.close();}
   await rename(temp,path);
+  const directory=await open(dirname(path),constants.O_RDONLY|constants.O_DIRECTORY);
+  try{await directory.sync();}finally{await directory.close();}
  }finally{await rm(temp,{force:true}).catch(()=>{});}
 }
 function projectParts(path:string) {
@@ -138,6 +141,7 @@ export interface CapturedRevision {
  retries: number;
  changedPaths: string[];
 }
+const FILE_MODES=Symbol('fileModes');
 async function captureDirectory(directory:FileHandle,options?:CaptureOptions):Promise<Record<string,Buffer>> {
  let retries=0;
  const maxRetries=options?.maxRetries??2;
@@ -147,7 +151,8 @@ async function captureDirectory(directory:FileHandle,options?:CaptureOptions):Pr
   const changedPaths:string[]=[];
   // File names such as __proto__ must remain ordinary captured entries.
   const files:Record<string,Buffer>=Object.create(null);
-  const initialStats:Record<string,{size:bigint;mtimeMs:number}>=Object.create(null);
+  const modes:Record<string,number>=Object.create(null);
+  const initialStats:Record<string,{size:bigint;mtimeMs:number;mode:number}>=Object.create(null);
   const initialHashes:Record<string,string>=Object.create(null);
   const filePaths=await walkFiles(directory);
   // Source, configuration, manifests and lockfiles retain bytes; analyzers choose eligible source from this capture.
@@ -168,12 +173,13 @@ async function captureDirectory(directory:FileHandle,options?:CaptureOptions):Pr
       return {content,statBefore,statAfter};
      }finally{await file.close();}
     });
-    if(fileData.statBefore.size!==BigInt(fileData.content.length)||fileData.statAfter.size!==BigInt(fileData.content.length)||fileData.statBefore.mtimeMs!==fileData.statAfter.mtimeMs){
+    if(fileData.statBefore.size!==BigInt(fileData.content.length)||fileData.statAfter.size!==BigInt(fileData.content.length)||fileData.statBefore.mtimeMs!==fileData.statAfter.mtimeMs||fileData.statBefore.mode!==fileData.statAfter.mode){
      changedDuringCapture=true;
      changedPaths.push(path);
     }
     files[path]=fileData.content;
-    initialStats[path]={size:fileData.statBefore.size,mtimeMs:Number(fileData.statBefore.mtimeMs)};
+    modes[path]=Number(fileData.statBefore.mode)&0o777;
+    initialStats[path]={size:fileData.statBefore.size,mtimeMs:Number(fileData.statBefore.mtimeMs),mode:modes[path]};
     initialHashes[path]=hash(fileData.content);
    }catch(err){
     const code=(err as NodeJS.ErrnoException).code;
@@ -201,7 +207,7 @@ async function captureDirectory(directory:FileHandle,options?:CaptureOptions):Pr
       const file=await open(full,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
       try{
        const currentStat=await file.stat({bigint:true});
-       if(currentStat.size!==initialStats[path]?.size||Number(currentStat.mtimeMs)!==initialStats[path]?.mtimeMs){
+       if(currentStat.size!==initialStats[path]?.size||Number(currentStat.mtimeMs)!==initialStats[path]?.mtimeMs||(Number(currentStat.mode)&0o777)!==initialStats[path]?.mode){
         return {changed:true};
        }
        const currentContent=await file.readFile();
@@ -230,18 +236,21 @@ async function captureDirectory(directory:FileHandle,options?:CaptureOptions):Pr
     }
     continue;
    }
+   Object.defineProperty(files,FILE_MODES,{value:modes,enumerable:false});
    Object.defineProperty(files,'incomplete',{value:true,enumerable:false,writable:true,configurable:true});
    Object.defineProperty(files,'changedPaths',{value:changedPaths,enumerable:false,writable:true,configurable:true});
    Object.defineProperty(files,'retries',{value:retries,enumerable:false,writable:true,configurable:true});
    return files;
   }
 
+  Object.defineProperty(files,FILE_MODES,{value:modes,enumerable:false});
   Object.defineProperty(files,'incomplete',{value:false,enumerable:false,writable:true,configurable:true});
   Object.defineProperty(files,'changedPaths',{value:[],enumerable:false,writable:true,configurable:true});
   Object.defineProperty(files,'retries',{value:retries,enumerable:false,writable:true,configurable:true});
   return files;
  }
 }
+export function fileModes(files:Record<string,Buffer>):Record<string,number>{return {...(files as Record<string,Buffer>&{[FILE_MODES]?:Record<string,number>})[FILE_MODES]};}
 export async function captureFiles(root:string,options?:CaptureOptions) {return inRoot(root,dir=>captureDirectory(dir,options));}
 export async function captureSourceRevision(root:string,options?:CaptureOptions):Promise<CapturedRevision>{
  const files=await captureFiles(root,options);
@@ -311,5 +320,34 @@ export async function removeFile(root:string,path:string){
   if(code==='ELOOP'||code==='ENOTDIR')throw new AppError('Symlink or non-directory paths are not permitted: '+path);
   if(code!=='ENOENT')throw error;
  }
+ });
+}
+
+export async function replaceProjectFile(root:string,path:string,content:Buffer|null,expected:Buffer|null,desiredMode?:number|null,expectedMode?:number|null){
+ if(isPathExcluded(path))throw new AppError('Excluded project path: '+path);
+ return inRoot(root,async directory=>{
+  const parts=projectParts(path);
+  await inDirectory(directory,parts.slice(0,-1),content!==null,async parent=>{
+   if(!await containsDirectory(directory,parent))throw new AppError('Project directory moved during application',409);
+   const target=descriptor(parent,parts[parts.length-1]);
+   let current:Buffer|null=null;let mode=0o644;
+   try{
+    const file=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+    try{const stat=await file.stat();if(!stat.isFile())throw new AppError('Not a regular project file: '+path);mode=stat.mode&0o777;current=await file.readFile();}finally{await file.close();}
+   }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+   if((current===null)!==(expected===null)||current&&expected&&!current.equals(expected)||current!==null&&expectedMode!=null&&mode!==expectedMode)throw new AppError('Source changed during application: '+path,409);
+   if(content===null){await rm(target,{force:true});await parent.sync();return;}
+   const temporary=descriptor(parent,'.architect-'+randomUUID()+'.tmp');
+   try{
+    const file=await open(temporary,'wx',desiredMode??mode);
+    try{await file.chmod(desiredMode??mode);await file.writeFile(content);await file.sync();}finally{await file.close();}
+    // Recheck the pinned parent before publishing the prepared content.
+    if(!await containsDirectory(directory,parent))throw new AppError('Project directory moved during application',409);
+    let latest:Buffer|null=null;let latestMode:number|null=null;
+    try{const file=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);try{latestMode=(await file.stat()).mode&0o777;latest=await file.readFile();}finally{await file.close();}}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    if((latest===null)!==(expected===null)||latest&&expected&&!latest.equals(expected)||latest!==null&&expectedMode!=null&&latestMode!==expectedMode)throw new AppError('Source changed before publishing candidate: '+path,409);
+    await rename(temporary,target);await parent.sync();
+   }finally{await rm(temporary,{force:true}).catch(()=>{});}
+  });
  });
 }

@@ -335,8 +335,8 @@ export type Project={
   checks:Record<string,{command:string;args:string[]}>;
 };
 export type ValidationIssue={code:string;message:string;nodeId?:string;path?:string};
-export type FileChange={path:string;kind:'added'|'modified'|'deleted';before:string|null;after:string|null;diff:string;encoding?:'utf8'|'base64'};
-export type ValidationReport={passed:boolean;issues:ValidationIssue[];warnings:string[];checks:Record<string,{passed:boolean;output:string}>;changes:FileChange[];candidate?:Analysis};
+export type FileChange={path:string;kind:'added'|'modified'|'deleted';before:string|null;after:string|null;diff:string;encoding?:'utf8'|'base64';beforeMode?:number|null;afterMode?:number|null};
+export type ValidationReport={passed:boolean;issues:ValidationIssue[];warnings:string[];checks:Record<string,{passed:boolean;output:string;command?:string;args?:string[];candidateRevision?:string}>;changes:FileChange[];candidate?:Analysis;candidateHashes?:Record<string,string>;candidateModes?:Record<string,number>;architectureDiff?:{implemented:SpecificationDiff;intended:SpecificationDiff}};
 export const DesignProposalSchema = z.object({
   schemaVersion: z.literal(GRAPH_SCHEMA_VERSION).default(GRAPH_SCHEMA_VERSION).optional(),
   graph: GraphSchema,
@@ -449,7 +449,11 @@ export type AgentJob={
   id:string; projectId:string;kind:'implementation'|'design'|'import';
   status:'preparing'|'running'|'review'|'failed'|'cancelled'|'applied';
   createdAt:string;specRevision:number;sourceHashes:Record<string,string>;task:string;scope:string[];
-  workspace:string;events:{time:string;message:string}[];report?:ValidationReport;
+  workspace:string;baseline?:string;sourceRevision?:string|null;
+  settings?:{provider:'hosted'|'ollama'|'lmstudio';model?:string;timeoutMinutes:number};
+  checkDefinitions?:Project['checks'];
+  sourceModes?:Record<string,number>;
+  events:{time:string;message:string;type?:string;stream?:'stdout'|'stderr';data?:unknown}[];report?:ValidationReport;
   proposal?:DesignProposal;preview?:Analysis;error?:string;
 };
 export const emptyGraph=():Graph=>({schemaVersion:GRAPH_SCHEMA_VERSION,nodes:[],edges:[],requirements:[]});

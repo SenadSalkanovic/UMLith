@@ -12,7 +12,7 @@ import type {
   DivergenceReportResponse,
   ProposalReviewResponse,
 } from '../shared/api';
-import type { Graph, Layout, Project, Analysis, ProgramNode, BindingReviewRecord, DivergenceReport } from '../shared/model';
+import type { Graph, Layout, Project, Analysis, ProgramNode, BindingReviewRecord, DivergenceReport, AgentJob } from '../shared/model';
 import { ProposalReviewResponseSchema } from '../shared/api';
 
 export async function getProposals(id: string, baseUrl?: string): Promise<ProposalReviewResponse[]> {
@@ -71,7 +71,7 @@ function resolveUrl(path: string, baseUrl?: string): string {
   return `${cleanBase}${cleanPath}`;
 }
 
-async function request<T>(path: string, options: RequestInit = {}, baseUrl?: string): Promise<T> {
+async function request<T>(path: string, options: RequestInit = {}, baseUrl?: string, asBlob = false): Promise<T> {
   const url = resolveUrl(path, baseUrl);
   let res: Response;
   try {
@@ -127,8 +127,27 @@ async function request<T>(path: string, options: RequestInit = {}, baseUrl?: str
     );
   }
 
-  return res.json() as Promise<T>;
+  return (asBlob ? res.blob() : res.json()) as Promise<T>;
 }
+
+export type AgentTaskRequest = {
+  task: string; scope: string[]; kind: 'implementation' | 'design';
+  settings: { provider: 'hosted' | 'ollama' | 'lmstudio'; model?: string; timeoutMinutes: number };
+};
+export type AgentCapabilities = { available: boolean; reason: string | null; providers: string[] };
+export type ResultEnvelope = {
+  schemaVersion: 1; handoffId: string; projectId: string; specRevision: number; sourceHashes: Record<string, string>;
+  task: string; scope: string[]; files: Record<string, string | null>;
+};
+export const getAgentCapabilities = (baseUrl?: string) => request<AgentCapabilities>('/agent/capabilities', {}, baseUrl);
+export const getJobs = (id: string, baseUrl?: string) => request<AgentJob[]>(`/projects/${id}/jobs`, {}, baseUrl);
+export const getJob = (id: string, jobId: string, baseUrl?: string) => request<AgentJob>(`/projects/${id}/jobs/${jobId}`, {}, baseUrl);
+export const createJob = (id: string, task: AgentTaskRequest, baseUrl?: string) => request<AgentJob>(`/projects/${id}/jobs`, { method: 'POST', body: JSON.stringify(task) }, baseUrl);
+export const decideJob = (id: string, jobId: string, action: 'cancel' | 'apply' | 'revalidate', baseUrl?: string) => request<AgentJob>(`/projects/${id}/jobs/${jobId}/${action}`, { method: 'POST', body: '{}' }, baseUrl);
+export const importResult = (id: string, result: unknown, baseUrl?: string) => request<AgentJob>(`/projects/${id}/results`, { method: 'POST', body: JSON.stringify(result) }, baseUrl);
+export const exportPackage = (id: string, task: string, scope: string[], baseUrl?: string) => request<Blob>(`/projects/${id}/export`, { method: 'POST', body: JSON.stringify({ task, scope }) }, baseUrl, true);
+export const getHandoff = (id: string, task: string, scope: string[], baseUrl?: string) => request<{ handoffId: string; specRevision: number; sourceHashes: Record<string, string> }>(`/projects/${id}/handoff?${new URLSearchParams({ task, scope: JSON.stringify(scope) })}`, {}, baseUrl);
+export const getRecovery = (id: string, retry = false, baseUrl?: string) => request<{ conflicts: string[] }>(`/projects/${id}/recovery`, retry ? { method: 'POST', body: '{}' } : {}, baseUrl);
 
 export async function checkHealth(baseUrl?: string): Promise<{ status: string }> {
   return request<{ status: string }>('/health', { method: 'GET' }, baseUrl);

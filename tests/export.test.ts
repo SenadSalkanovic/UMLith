@@ -12,6 +12,110 @@ import {freezeNode,inScope} from '../server/review';
 
 const emptyProject:Project={id:'test',name:'Test',target:'Other',description:'',root:'',managed:true,createdAt:'2026-10-11T00:00:00Z',specRevision:0,specification:emptyGraph(),layout:{},checks:{}};
 
+it('renders description-only functions beside nested optional workflows with stable identities and uncertainty',()=>{
+ const specification=GraphSchema.parse({nodes:[
+  {id:'app',kind:'system',name:'Editor'},
+  {id:'documents',kind:'module',name:'Documents',parentId:'app'},
+  {id:'describe',kind:'function',name:'save',parentId:'documents',description:'Save text without losing changes'},
+  {id:'flow',kind:'function',name:'save',inputs:'text: string',outputs:'Saved document',rules:'Retain original until success',errors:'DiskFull',scenarios:['When interrupted\nThen retain original']},
+  {id:'condition',kind:'step',name:'Check destination',parentId:'flow',stepType:'condition'},
+  {id:'operation',kind:'step',name:'Write temporary file',parentId:'condition',stepType:'operation'},
+  {id:'return',kind:'step',name:'Complete',parentId:'flow',stepType:'return'},
+  {id:'loop',kind:'step',name:'Retry',parentId:'flow',stepType:'loop'},
+  {id:'call',kind:'step',name:'Call save',parentId:'loop',stepType:'call'},
+  {id:'try',kind:'step',name:'Try write',parentId:'flow',stepType:'try'},
+  {id:'throw',kind:'step',name:'Disk full',parentId:'flow',stepType:'throw'},
+  {id:'opaque',kind:'step',name:'Unsupported expression',parentId:'flow',stepType:'opaque',provenance:'extracted',
+   source:{path:'src/save.ts',start:10,end:40,line:3,hash:'opaque-hash',revision:'captured-expression'}},
+ ],edges:[
+  {id:'ownership',source:'documents',target:'flow',kind:'contains'},
+  {id:'valid',source:'condition',target:'operation',kind:'true',label:'Writable'},
+  {id:'finish',source:'operation',target:'return',kind:'next',provenance:'ai'},
+  {id:'invalid',source:'condition',target:'throw',kind:'false'},
+  {id:'retry',source:'loop',target:'call',kind:'true'},
+  {id:'repeat',source:'call',target:'loop',kind:'next'},
+  {id:'invoke',source:'call',target:'describe',kind:'calls',uncertain:true},
+  {id:'failure',source:'try',target:'throw',kind:'exception'},
+ ]});
+ const before=structuredClone(specification);
+ const bundle=readHandoff(unzipSync(exportBundle({...emptyProject,specification},'Implement saving',['src/'])));
+ expect(bundle.specification.graph).toEqual(before);
+ const text=bundle.architecture;
+ for(const line of ['Node ID: describe','Node ID: flow','Save text without losing changes','Parents: Editor [app]',
+  'Parents: Documents [documents]','Parents: Check destination [condition]','Step type: condition','Step type: operation','Step type: return',
+  'Workflow: unspecified','Workflow: see contained steps and relationships','Inputs: text: string','Outputs: Saved document',
+  'Rules: Retain original until success','Errors: DiskFull','When interrupted\nThen retain original',
+  'valid: Check destination [condition] true Write temporary file [operation] (Writable)',
+  'finish: Write temporary file [operation] next Complete [return]; provenance: ai; uncertain: true',
+  'invalid: Check destination [condition] false Disk full [throw]',
+  'retry: Retry [loop] true Call save [call]','repeat: Call save [call] next Retry [loop]',
+  'invoke: Call save [call] calls save [describe]; provenance: human; uncertain: true',
+  'failure: Try write [try] exception Disk full [throw]',
+  'Step type: loop','Step type: call','Step type: try','Step type: throw','Step type: opaque','Provenance: extracted',
+  'src/save.ts; offsets [10, 40); line 3; hash opaque-hash; revision captured-expression'])expect(text).toContain(line);
+ expect(specification).toEqual(before);
+});
+
+it.each(['Desktop','Other'])('renders %s target intent and full ER constraints alongside matching JSON',target=>{
+ const specification=GraphSchema.parse({nodes:[
+  {id:'document',kind:'entity',name:'Document',mappedName:'documents',fields:[
+   {name:'id',type:'Int',key:'PK',defaultValue:'autoincrement()'},
+   {name:'title',type:'String',optional:true,mappedName:'document_title',defaultValue:'"Untitled"'},
+  ],compositeKeys:[{fields:['id','title'],type:'UNIQUE',name:'document_identity',mappedName:'document_identity_db'}],
+   indexes:[{fields:['title'],type:'INDEX',name:'title_index',mappedName:'title_index_db'}]},
+  {id:'owner',kind:'entity',name:'Owner'},
+  {id:'format',kind:'enum',name:'Format',fields:[{name:'TEXT',type:'',mappedName:'plain_text'}]},
+  {id:'api',kind:'interface',name:'DocumentAPI',contract:'load(): Document\n  save(text: string): void'},
+ ],edges:[{id:'owned-by',source:'document',target:'owner',kind:'relates-to',label:'Many documents per owner'}],requirements:[
+  {id:'offline',text:'Read and edit local documents',nodeIds:['document'],edgeIds:['owned-by'],constraints:['No network','Preserve Unicode ✓\r\n  Keep whitespace'],scenarios:['Given offline\nThen save successfully']},
+ ]});
+ const project={...emptyProject,target,description:'Local document tool; choose the implementation appropriate to the target',specification};
+ const bundle=readHandoff(unzipSync(exportBundle(project,'Implement documents',['src/','schema.prisma'])));
+ expect(bundle.specification.project).toMatchObject({target,description:project.description});
+ expect(bundle.specification.graph).toEqual(specification);
+ for(const value of ['Target: '+target,project.description,'Mapped name: documents','id: Int [PK]','Default: autoincrement()',
+  'title: String (optional)','Mapped name: document_title','Default: "Untitled"','UNIQUE (id, title)',
+  'Name: document_identity','Mapped name: document_identity_db','INDEX (title)','Name: title_index','Mapped name: title_index_db',
+  'Mapped name: plain_text','load(): Document\n  save(text: string): void','owned-by: Document [document] relates-to Owner [owner] (Many documents per owner)',
+  'offline','Read and edit local documents','No network','Preserve Unicode ✓\r\n  Keep whitespace','Given offline\nThen save successfully'])expect(bundle.architecture).toContain(value);
+ expect(bundle.task).toContain('No generation template is implied by the target.');
+ expect(bundle.task).toContain('Allowed changes: src/, schema.prisma');
+});
+
+it('renders protected evidence, required check commands and unavailable checks without erasing stale uncertainty',()=>{
+ const source={path:'src/save.ts',symbol:'save',start:4,end:29,line:2,hash:'original-hash',revision:'original-source'};
+ const baselineText='  save();\r\n```\nNever change this text\n';
+ const specification=GraphSchema.parse({nodes:[
+  {id:'frozen',kind:'function',name:'save',policy:'frozen-implementation',source,baseline:{text:baselineText,source},outputPath:'src/save.ts'},
+  {id:'api',kind:'interface',name:'SaveAPI',policy:'frozen-contract',contract:'save(): void',baseline:{contract:'save(): void'}},
+  {id:'sensitive',kind:'function',name:'reviewSave',policy:'sensitive',instructions:'Never overwrite a backup\nKeep Unicode ✓',requiredChecks:['unit','missing'],provenance:'ai'},
+  {id:'document',kind:'entity',name:'Document',fields:[{name:'id',type:'Int',source:{...source,path:'schema.prisma',symbol:'Document.id'}}]},
+ ],edges:[]});
+ const analysis:NonNullable<Project['analysis']>={revision:'captured-source',sequence:1,analyzedAt:emptyProject.createdAt,status:'stale',graph:emptyGraph(),files:{},durationMs:0,
+  staleEvidence:{scope:'paths',paths:['src/save.ts'],reason:'Saved source changed'},
+  quality:{eligibleFiles:1,analyzedFiles:1,unresolvedReferences:0,unsupportedConstructs:0,inferredItems:0,prismaValidation:'not-applicable',diagnostics:[]}};
+ const project={...emptyProject,specRevision:7,specification,analysis,checks:{unit:{command:'npm',args:['test','--','name with spaces']}}};
+ const before=structuredClone(project);
+ const bundle=readHandoff(unzipSync(exportBundle(project,'Review saving',['src/save.ts'])));
+ expect(bundle.specification).toMatchObject({revision:7,sourceRevision:'captured-source',analysisStatus:'stale',staleEvidence:analysis.staleEvidence,checks:project.checks});
+ expect(bundle.specification.graph).toEqual(specification);
+ for(const value of ['Specification revision: 7','Source revision: captured-source','Analysis status: stale','Stale evidence scope: paths',
+  'Stale paths: src/save.ts','Saved source changed','Node ID: frozen','Policy: frozen-implementation','Output boundary: src/save.ts',
+  'Source binding: src/save.ts :: save; offsets [4, 29); line 2; hash original-hash; revision original-source',
+  'Baseline source: src/save.ts :: save; offsets [4, 29); line 2; hash original-hash; revision original-source',
+  'Frozen implementation baseline:',baselineText,'````\n'+baselineText+'\n````','Frozen contract baseline:','save(): void',
+  'Never overwrite a backup\nKeep Unicode ✓','Required checks: unit, missing','Unavailable required check: missing',
+  'Provenance: ai (inferred; unverified)','schema.prisma :: Document.id; offsets [4, 29); line 2; hash original-hash; revision original-source'])expect(bundle.architecture).toContain(value);
+ for(const text of [bundle.architecture,bundle.task]){
+  expect(text).toContain('Allowed changes: src/save.ts');
+  expect(text).toContain('unit: ["npm","test","--","name with spaces"]');
+  expect(text).toContain('Required but unavailable evidence or checks block application.');
+  expect(text).toContain('Runtime behavior and business intent remain uncertain; tests and human review complement structural analysis.');
+  expect(text).toContain('Sensitive items require highlighted human review.');
+ }
+ expect(project).toEqual(before);
+});
+
 function readHandoff(files:Record<string,Uint8Array>):HandoffPackage {
  return HandoffPackageSchema.parse({
   manifest:JSON.parse(strFromU8(files['manifest.json'])),specification:JSON.parse(strFromU8(files['specification.json'])),

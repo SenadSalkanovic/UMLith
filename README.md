@@ -2,7 +2,7 @@
 
 A local visual architecture workspace for defining software architecture, ER models, interfaces, and optional function workflows with AI assistance. Humans own the intended specification; source analysis reconstructs the implemented model. A separate coding agent implements approved changes in an isolated workspace for human review.
 
-This repository is a work in progress. It contains the preserved product plan, a detailed task backlog, and initial TypeScript modules and tests. The complete browser application is still under development.
+The local application provides architecture/ER/function editing, saved-source analysis and synchronization, human-reviewed proposals, portable agent handoffs, candidate review, and guarded application with recovery. Optional integrated Codex execution requires usable Linux Bubblewrap isolation. Runtime behavior and business intent still require human judgment.
 
 ## Plan and task backlog
 
@@ -19,17 +19,19 @@ Task files record dependencies, acceptance criteria, validation scenarios, and c
 
 React, Vite, React Flow, Node.js/Fastify, shared TypeScript types with Zod, TypeScript compiler API pinned to 6.0.3, and Prisma schema parsing. Integrated agent execution initially targets Linux with Bubblewrap isolation.
 
-## Development checks
+## Build and run
 
 Requires Node.js 22.12 or newer.
 
 ```bash
-npm ci
-npm test
+npm install
 npm run build
+npm start
 ```
 
-At the initial project upload on 2026-10-08, all 12 tests across 7 test files passed. The build failed with TypeScript error TS2367 at `server/jobs.ts:99`, involving a comparison between the running and cancelled job states. This records the initial snapshot; future task completion should include fresh validation evidence.
+Open [http://127.0.0.1:4317](http://127.0.0.1:4317). For development, run `npm run dev` and open [http://127.0.0.1:5173](http://127.0.0.1:5173). `npm test` runs the existing automated suite; `npm run test:watch` watches it.
+
+Use **Agent workspace** on an open project to export a handoff, download a result template, import returned files, launch an isolated task, review a candidate, or inspect recovery. See [local operation](OPERATIONS.md) for setup, constraints, and the external-agent result format. Later milestones such as collaboration, runtime tracing, additional analyzers, and live database introspection remain deferred.
 
 ## License
 

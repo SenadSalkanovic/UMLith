@@ -10,13 +10,13 @@ import {
  type Schema as PrismaSchemaAst,
 } from '@mrleebo/prisma-ast';
 import {constants} from 'node:fs';
-import {access,mkdtemp,symlink,rm} from 'node:fs/promises';
+import {access,mkdtemp,symlink,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve,relative,basename,dirname,join} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {NodeSchema,GraphSchema,GRAPH_SCHEMA_VERSION,type Analysis,type Graph,type ProgramNode,type Source,type Diagnostic,type ProgramEdge,type KeyDefinition,type Quality,QualitySchema,sourceIdentityKey,type BindingReviewRecord} from '../shared/model';
 import {captureFiles,captureSourceRevision,isRevisionIncomplete,type CaptureOptions,type CapturedRevision,scanProjectDirectory,hash,AppError,copySnapshot} from './files';
-import {runSandbox,sandboxAvailable,type SandboxExecutor} from './sandbox';
+import {runSandbox,sandboxAvailable,type SandboxExecutor,type SandboxOptions} from './sandbox';
 const idFor=(key:string)=>hash(key).slice(0,24);
 const normalize=(value:string)=>value.replace(/\s+/g,' ').trim();
 
@@ -864,6 +864,8 @@ export interface PrismaValidationOptions {
  timeoutMs?: number;
  schemaPaths?: string[];
  sandboxExecutor?: SandboxExecutor;
+ signal?: SandboxOptions['signal'];
+ onProcess?: SandboxOptions['onProcess'];
 }
 
 export async function resolveProjectPrismaValidator(root: string): Promise<string | null> {
@@ -928,7 +930,7 @@ export async function validatePrismaSchemaInIsolation(
  try {
   await copySnapshot(resolvedRoot, isolatedDir);
 
-  const origNodeModules = join(resolvedRoot, 'node_modules');
+  const origNodeModules = await realpath(join(resolvedRoot, 'node_modules'));
   const destNodeModules = join(isolatedDir, 'node_modules');
   try {
    await access(origNodeModules, constants.F_OK);
@@ -943,12 +945,15 @@ export async function validatePrismaSchemaInIsolation(
   let exitCode = 0;
 
   for (const schemaPath of schemas) {
+   options?.signal?.throwIfAborted();
    const args = ['validate', '--schema', schemaPath];
    const res = options?.sandboxExecutor
     ? await options.sandboxExecutor(isolatedValidator, args, isolatedDir, {
        writable: true,
        network: false,
        timeoutMs,
+       signal: options?.signal,
+       onProcess: options?.onProcess,
        env: {
         PATH: process.env.PATH,
         HOME: isolatedDir,
@@ -961,6 +966,8 @@ export async function validatePrismaSchemaInIsolation(
        writable: true,
        network: false,
        timeoutMs,
+       signal: options?.signal,
+       onProcess: options?.onProcess,
        env: {
         PATH: process.env.PATH,
         HOME: isolatedDir,

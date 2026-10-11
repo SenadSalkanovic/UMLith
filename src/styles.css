@@ -7763,3 +7763,27 @@ button {
 .review-bindings-container {
   height: 100%;
 }
+
+/* Agent handoff and candidate review use the existing editor form vocabulary. */
+.workspace-agent-action { padding: 6px 16px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: flex-end; }
+.agent-workspace { width: min(1120px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: auto; padding: 24px; background: var(--bg-panel, #111827); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 8px; }
+.agent-workspace::backdrop { background: rgba(0, 0, 0, .65); }
+.agent-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.agent-heading h2 { margin: 0; }
+.agent-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border-color); }
+.agent-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.agent-actions, .agent-jobs { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.agent-jobs .agent-job-selected { border-color: var(--accent-blue); }
+.agent-workspace details { margin: 10px 0; }
+.agent-workspace summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+.agent-workspace pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+.agent-code { font-family: monospace; width: 100%; box-sizing: border-box; }
+.agent-workspace .form-group { margin-bottom: 12px; }
+.agent-workspace input:not([type=checkbox]), .agent-workspace select, .agent-workspace textarea { width: 100%; box-sizing: border-box; }
+.agent-workspace .text-muted { color: var(--text-muted); }
+.agent-graph-comparison ul { max-height: 240px; overflow: auto; padding-left: 20px; }
+.agent-sensitive { border-left: 3px solid var(--accent-yellow, #f59e0b); padding-left: 12px; }
+.agent-confirm { display: flex; gap: 8px; align-items: flex-start; margin-top: 16px; }
+.agent-progress { max-height: 260px; overflow: auto; }
+.agent-workspace button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 640px) { .agent-workspace { width: calc(100vw - 20px); padding: 16px; } .agent-columns { grid-template-columns: 1fr; } }

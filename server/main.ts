@@ -4,9 +4,12 @@ import { stat, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ZodError } from 'zod';
+import { z, ZodError } from 'zod';
 import { ProjectStore, SpecificationConflictError } from './store';
-import { AppError, safePath, hash, isPathExcluded } from './files';
+import { AppError, atomicJson, safePath, hash, isPathExcluded, captureFiles, hashes, isRevisionIncomplete } from './files';
+import { bundleFiles, exportBundle } from './export';
+import { HandoffPackageSchema, HandoffSpecificationSchema } from '../shared/export';
+import { recoverPending, recoveryStatus } from './application';
 import { AnalysisWorker } from './worker';
 import { generateImportQualityReport, type ImportQualityReport } from './analyzer';
 import { randomUUID } from 'node:crypto';
@@ -142,6 +145,9 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   const ownsSync = !options.sync;
   const sync = options.sync ?? new SyncService(store, { worker, ...options.syncOptions });
   const jobs = new JobService(store, sync);
+  await recoverPending(store);
+  await jobs.recover();
+  jobs.on('notification', (projectId, event) => sync.emit('notification', projectId, event));
 
   const defaultHost = options.host ?? '127.0.0.1';
   if (!isLoopbackHost(defaultHost)) {
@@ -158,6 +164,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
 
   const app = Fastify({
     logger: options.logger ?? false,
+    bodyLimit: 32 * 1024 * 1024,
   });
 
   app.decorate('store', store);
@@ -345,6 +352,60 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
 
   // Health check
   app.get('/api/health', async () => ({ status: 'ok' }));
+
+  const handoffRequest = z.object({task: HandoffSpecificationSchema.shape.task, scope: HandoffSpecificationSchema.shape.scope}).strict();
+  const jobParams = z.object({id: ProjectIdParamSchema.shape.id, jobId: z.string().regex(/^[a-zA-Z0-9-]+$/)}).strict();
+  app.get('/api/agent/capabilities', () => jobs.capabilities());
+  app.post('/api/projects/:id/export', async (request, reply) => {
+    const {id} = ProjectIdParamSchema.parse(request.params);
+    const input = handoffRequest.parse(request.body);
+    const archive = exportBundle(await store.get(id), input.task, input.scope);
+    return reply.type('application/zip').header('Content-Disposition', 'attachment; filename="umlith-handoff.zip"').send(Buffer.from(archive));
+  });
+  app.get('/api/projects/:id/handoff', async request => {
+    const {id} = ProjectIdParamSchema.parse(request.params);
+    const query = z.object({task: z.string().default('Implement the approved specification'), scope: z.string().default('["."]')}).strict().parse(request.query);
+    let scope: unknown;
+    try {scope = JSON.parse(query.scope);} catch {throw new AppError('Scope must be a JSON array');}
+    const input = handoffRequest.parse({task: query.task, scope});
+    const project = await store.get(id);
+    const files = await captureFiles(project.root);
+    if (isRevisionIncomplete(files)) throw new AppError('Source changed while preparing the handoff. Retry.',409);
+    const output = bundleFiles(project,input.task,input.scope);
+    const handoff = HandoffPackageSchema.parse({manifest: JSON.parse(output['manifest.json']), specification: JSON.parse(output['specification.json']), architecture: output['ARCHITECTURE.md'], task: output['AGENT_TASK.md'], importReport: JSON.parse(output['IMPORT_REPORT.json'])});
+    const handoffId=randomUUID();
+    const record={handoffId,projectId:id,specRevision:project.specRevision,sourceHashes:hashes(files),task:input.task,scope:input.scope};
+    if((await store.get(id)).specRevision!==project.specRevision)throw new AppError('Specification changed while preparing the handoff. Retry.',409);
+    await atomicJson(join(store.projectDir(id),'handoffs',handoffId+'.json'),record);
+    return {...handoff,handoffId,specRevision:record.specRevision,sourceHashes:record.sourceHashes};
+  });
+  app.get('/api/projects/:id/jobs', async request => {
+    const {id} = ProjectIdParamSchema.parse(request.params);return jobs.list(id);
+  });
+  app.post('/api/projects/:id/jobs', async (request, reply) => {
+    const {id} = ProjectIdParamSchema.parse(request.params);return reply.status(202).send(await jobs.create(id,request.body));
+  });
+  app.get('/api/projects/:id/jobs/:jobId', async request => {
+    const {id,jobId} = jobParams.parse(request.params);await store.get(id);return jobs.get(id,jobId);
+  });
+  app.post('/api/projects/:id/jobs/:jobId/cancel', async request => {
+    const {id,jobId} = jobParams.parse(request.params);return jobs.cancel(id,jobId);
+  });
+  app.post('/api/projects/:id/jobs/:jobId/apply', async request => {
+    const {id,jobId} = jobParams.parse(request.params);return jobs.apply(id,jobId);
+  });
+  app.post('/api/projects/:id/jobs/:jobId/revalidate', async request => {
+    const {id,jobId} = jobParams.parse(request.params);return jobs.revalidate(id,jobId);
+  });
+  app.post('/api/projects/:id/results', async (request,reply) => {
+    const {id} = ProjectIdParamSchema.parse(request.params);return reply.status(201).send(await jobs.importResult(id,request.body));
+  });
+  app.get('/api/projects/:id/recovery', async request => {
+    const {id} = ProjectIdParamSchema.parse(request.params);return {conflicts: await recoveryStatus(store,id)};
+  });
+  app.post('/api/projects/:id/recovery', async request => {
+    const {id} = ProjectIdParamSchema.parse(request.params);await recoverPending(store,id);await sync.request(id);return {conflicts: await recoveryStatus(store,id)};
+  });
 
   // Projects endpoints
   app.get('/api/projects', async (request, reply) => {
