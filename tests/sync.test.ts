@@ -1,7 +1,7 @@
 import {it,expect,describe,vi} from 'vitest';
-import {mkdtemp,writeFile,rm,rename,unlink,mkdir} from 'node:fs/promises';
+import {mkdtemp,writeFile,rm,rename,unlink,mkdir,cp,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join,resolve} from 'node:path';
 import {ProjectStore} from '../server/store';
 import {
  SyncService,
@@ -12,10 +12,11 @@ import {
 } from '../server/sync';
 import {Analyzer} from '../server/analyzer';
 import {AnalysisWorker} from '../server/worker';
-import {AnalysisSchema,GraphUpdateSchema,applyGraphUpdate,resolveSourceEvidence} from '../shared/model';
+import {AnalysisSchema,GraphSchema,GraphUpdateSchema,applyGraphUpdate,resolveSourceEvidence} from '../shared/model';
 import {getOutdatedPortions} from '../src/components/AnalysisStatus';
 import {createServer} from '../server/main';
 import {AnalysisClient} from '../src/analysis-client';
+import {freezeNode} from '../server/review';
 
 it('updates the implemented graph while preserving human intent and retains a stale model on invalid saves',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'architect-sync-'));
@@ -2202,4 +2203,214 @@ describe('T060: Reconcile on resume and expose manual full rescan', () => {
    await rm(dir, { recursive: true, force: true });
   }
  }, 20000);
+});
+
+describe('T063: Live synchronization equivalence and recovery', () => {
+  it('converges to fresh-import oracle after missed watcher events via periodic and forced hash reconciliation (R33, R16, AC 1)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-sync-missed-events-'));
+    const storeDir = await mkdtemp(join(tmpdir(), 'architect-sync-missed-store-'));
+    const store = new ProjectStore(storeDir);
+    const worker = new AnalysisWorker();
+    const sync = new SyncService(store, { worker, watch: true, reconcileIntervalMs: 60000 });
+
+    try {
+      await cp(resolve('tests/fixtures/mutation-matrix'), dir, { recursive: true });
+      const p = await store.create({ name: 'MissedEventsMatrix', root: dir });
+
+      // Start sync
+      await sync.start(p.id);
+      const initialProject = await store.get(p.id);
+      expect(initialProject.analysis?.status).toBe('current');
+
+      // Setup human specification and layout
+      const orderNode = initialProject.analysis!.graph.nodes.find(n => n.name === 'OrderDto')!;
+      const procNode = initialProject.analysis!.graph.nodes.find(n => n.name === 'processOrder')!;
+      const frozenOrder = { ...freezeNode(orderNode, 'frozen-contract', initialProject.analysis!), parentId: undefined };
+      const frozenProc = { ...freezeNode(procNode, 'frozen-implementation', initialProject.analysis!), parentId: undefined };
+      await store.updateSpec(p.id, 0, { nodes: [frozenOrder, frozenProc], edges: [] });
+      await store.updateLayout(p.id, { [frozenOrder.id]: { x: 100, y: 100 }, [frozenProc.id]: { x: 300, y: 100 } });
+
+      const specBefore = (await store.get(p.id)).specification;
+
+      // Simulate missed watcher events: disable event delivery
+      sync.disableEventDelivery(p.id);
+
+      // Perform file mutations on disk directly (TypeScript and Prisma)
+      await writeFile(
+        join(dir, 'orders.ts'),
+        `export interface OrderDto { id: string; total: number; }\nexport function validateOrder(order: OrderDto): boolean { return order.total > 10; }\nexport async function processOrder(order: OrderDto): Promise<boolean> { return true; }\nexport function extraHelper(): string { return 'helped'; }\n`
+      );
+      await writeFile(
+        join(dir, 'schema.prisma'),
+        `datasource db {
+  provider = "sqlite"
+}
+
+model Customer {
+  id     Int     @id @default(autoincrement())
+  email  String  @unique
+  name   String?
+  orders Order[]
+}
+
+model Order {
+  id         Int      @id @default(autoincrement())
+  customerId Int
+  amount     Float
+  customer   Customer @relation(fields: [customerId], references: [id])
+  @@map("orders")
+}
+
+model AuditLog {
+  id     Int    @id @default(autoincrement())
+  action String
+}
+`
+      );
+
+      // Re-enable event delivery
+      sync.enableEventDelivery(p.id);
+
+      // Trigger hash reconciliation (reconcile evaluates hash diffs)
+      const reconciled = await sync.reconcile(p.id);
+      expect(reconciled).toBe(true);
+
+      const reconciledProject = await store.get(p.id);
+      expect(reconciledProject.analysis?.status).toBe('current');
+
+      // Independent fresh full import oracle
+      const fresh = await new Analyzer().analyze(dir);
+      expect(reconciledProject.analysis?.graph.nodes.length).toBe(fresh.graph.nodes.length);
+      expect(reconciledProject.analysis?.graph.edges.length).toBe(fresh.graph.edges.length);
+      expect(reconciledProject.analysis?.graph.nodes.some(n => n.name === 'AuditLog')).toBe(true);
+      expect(reconciledProject.analysis?.graph.nodes.some(n => n.name === 'extraHelper')).toBe(true);
+
+      // Verify specification, baselines, and layout are strictly preserved
+      expect(reconciledProject.specification).toEqual(specBefore);
+      expect(reconciledProject.specification.nodes.find(n => n.id === frozenProc.id)?.baseline).toEqual(frozenProc.baseline);
+      expect(reconciledProject.layout[frozenOrder.id]).toEqual({ x: 100, y: 100 });
+      expect(reconciledProject.layout[frozenProc.id]).toEqual({ x: 300, y: 100 });
+    } finally {
+      await sync.close();
+      await worker.close();
+      await rm(dir, { recursive: true, force: true });
+      await rm(storeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers with fresh snapshot upon client reconnection after missed mutations and matches fresh-import oracle (R33, R13, AC 1 & 3)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-sync-reconnect-'));
+    const storeDir = await mkdtemp(join(tmpdir(), 'architect-sync-reconnect-store-'));
+    const store = new ProjectStore(storeDir);
+    const worker = new AnalysisWorker();
+    const sync = new SyncService(store, { worker, watch: false });
+    const app = await createServer({ store, sync, worker });
+    const serverAddress = await app.listen({ host: '127.0.0.1', port: 0 });
+    const apiBaseUrl = `${serverAddress}/api`;
+
+    try {
+      await cp(resolve('tests/fixtures/mutation-matrix'), dir, { recursive: true });
+      const p = await store.create({ name: 'ReconnectMatrix', root: dir });
+      await sync.start(p.id);
+
+      const client = new AnalysisClient({
+        projectId: p.id,
+        baseUrl: apiBaseUrl,
+        origin: 'http://127.0.0.1:5173',
+      });
+
+      await client.connect();
+      const initialSnapshot = await client.rescan();
+      expect(initialSnapshot).toBeDefined();
+      expect(initialSnapshot?.status).toBe('current');
+
+      // Client disconnects
+      client.disconnect();
+
+      // Files mutate while disconnected
+      await writeFile(
+        join(dir, 'orders.ts'),
+        `export interface OrderDto { id: string; total: number; }\nexport function validateOrder(order: OrderDto): boolean { return order.total > 50; }\nexport async function processOrder(order: OrderDto): Promise<boolean> { return true; }\nexport function invoiceCustomer(): string { return 'invoiced'; }\n`
+      );
+      await sync.reconcile(p.id);
+
+      // Client reconnects and rescan fetches fresh snapshot
+      await client.connect();
+      const freshSnapshot = await client.rescan();
+
+      expect(freshSnapshot.status).toBe('current');
+      expect(freshSnapshot.revision).not.toBe(initialSnapshot?.revision);
+
+      const freshOracle = await new Analyzer().analyze(dir);
+      expect(freshSnapshot.graph.nodes.length).toBe(freshOracle.graph.nodes.length);
+      expect(freshSnapshot.graph.nodes.some(n => n.name === 'invoiceCustomer')).toBe(true);
+
+      client.disconnect();
+    } finally {
+      await app.close();
+      await sync.close();
+      await worker.close();
+      await rm(dir, { recursive: true, force: true });
+      await rm(storeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('continuously reports architecture and protection divergence across live mutations without altering human specification (R18, R34, AC 3)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'architect-sync-drift-'));
+    const storeDir = await mkdtemp(join(tmpdir(), 'architect-sync-drift-store-'));
+    const store = new ProjectStore(storeDir);
+    const worker = new AnalysisWorker();
+    const sync = new SyncService(store, { worker, watch: false });
+
+    try {
+      await cp(resolve('tests/fixtures/mutation-matrix'), dir, { recursive: true });
+      const p = await store.create({ name: 'DriftMatrix', root: dir });
+      await sync.start(p.id);
+
+      const initialAnalysis = (await store.get(p.id)).analysis!;
+      const procNode = initialAnalysis.graph.nodes.find(n => n.name === 'processOrder')!;
+      const frozenProc = { ...freezeNode(procNode, 'frozen-implementation', initialAnalysis), parentId: undefined };
+
+      await store.updateSpec(p.id, 0, { nodes: [frozenProc], edges: [] });
+      const specBefore = (await store.get(p.id)).specification;
+
+      // 1. External edit modifies frozen code
+      await writeFile(
+        join(dir, 'orders.ts'),
+        `export interface OrderDto { id: string; total: number; }\nexport function validateOrder(order: OrderDto): boolean { return order.total > 0; }\nexport async function processOrder(order: OrderDto): Promise<boolean> { console.log('tampered'); return false; }\n`
+      );
+      await sync.reconcile(p.id);
+
+      const driftReport = sync.getDivergenceReport(p.id)!;
+      expect(driftReport).toBeDefined();
+      expect(driftReport.summary.hasBlockingViolations).toBe(true);
+      expect(driftReport.summary.protectionViolations).toBe(1);
+      expect(driftReport.items.some(i => i.kind === 'frozen-implementation-violation')).toBe(true);
+
+      // Verify specification baseline is preserved without resetting
+      const projectAfterDrift = await store.get(p.id);
+      expect(projectAfterDrift.specification).toEqual(specBefore);
+      expect(projectAfterDrift.specification.nodes[0].baseline).toEqual(frozenProc.baseline);
+
+      // 2. Restore frozen code
+      await writeFile(
+        join(dir, 'orders.ts'),
+        `export interface OrderDto { id: string; total: number; }\nexport function validateOrder(order: OrderDto): boolean { return order.total > 0; }\nexport async function processOrder(order: OrderDto): Promise<boolean> {\n  if (!validateOrder(order)) {\n    throw new Error('Invalid order total');\n  }\n  return true;\n}\n`
+      );
+      await sync.reconcile(p.id);
+
+      const clearedReport = sync.getDivergenceReport(p.id)!;
+      expect(clearedReport.summary.hasBlockingViolations).toBe(false);
+      expect(clearedReport.summary.protectionViolations).toBe(0);
+
+      const projectFinal = await store.get(p.id);
+      expect(projectFinal.specification).toEqual(specBefore);
+      expect(projectFinal.specification.nodes[0].baseline).toEqual(frozenProc.baseline);
+    } finally {
+      await sync.close();
+      await worker.close();
+      await rm(dir, { recursive: true, force: true });
+      await rm(storeDir, { recursive: true, force: true });
+    }
+  });
 });
