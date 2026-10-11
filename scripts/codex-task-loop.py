@@ -677,7 +677,13 @@ def run(args):
                           'tests/test_parallel_task_loop.py, runner state/logs, task documents or original plan. '
                           'Do not add private paths, credentials, auth files, or logs to source. '
                           'Partial work may already exist after quota interruption; inspect it and continue. '
-                          'Use meaningful task tests and return blocked when acceptance cannot be verified.\n'
+                          'Use meaningful task tests and return blocked for unresolved task defects or missing task-specific evidence. '
+                          'The controller runs the required checks below outside your CLI sandbox after you return completed, '
+                          'and refuses review or commit if any fail. Do not duplicate those full checks in the sandbox. '
+                          'If you already attempted them, report sandbox permission failures honestly; they alone do not '
+                          'require blocked when task-specific acceptance is verified. Completed hands the candidate to '
+                          'controller validation; it does not certify those pending checks. '
+                          'Require browser or live-agent evidence only when the task actually calls for it.\n'
                           f"Required controller checks: {json.dumps(args.check)}\n"
                           f"Previous check/review feedback: {state.get('feedback') or 'None'}\n")
                 result = run_agent(args, repo, state_dir, state, prompt)
@@ -721,6 +727,10 @@ def run(args):
                                  f"git diff {state['base']} {tree}, and the original plan/contract. "
                                  'Verify every acceptance criterion and concrete scenario, correctness, regression risk, '
                                  'scope, and potential credential/privacy leaks. Verify configured checks and task-specific evidence. '
+                                 'The controller has already run the configured checks outside your read-only CLI sandbox '
+                                 'against this unchanged candidate. Use that controller evidence for those checks; '
+                                 'do not repeat them in the sandbox or block solely because its permissions prevent rerunning them. '
+                                 'Independently inspect source and task-specific evidence; missing required evidence still blocks approval. '
                                  'A claimed implementation summary is not proof. Return approve only with zero unresolved findings. '
                                  'The findings array contains only unresolved actionable defects, never positive observations or passed checks. '
                                  'Put verification evidence in summary. When approving, return exactly "findings": []. '

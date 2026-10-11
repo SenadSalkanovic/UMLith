@@ -62,7 +62,16 @@ if role == 'implement':
     if mode == 'expose-docs':
         (root / '.gitignore').write_text('/.codex-task-loop/\n')
     result = {'status': 'completed', 'summary': 'Task implemented', 'checks': ['fixture check passed']}
+    if mode in ('sandbox-checks', 'task-blocked'):
+        assert 'outside your CLI sandbox after you return completed' in prompt
+        result['checks'].append('Full suite unavailable in sandbox: listen EPERM; deferred to controller')
+        if mode == 'task-blocked':
+            result['status'] = 'blocked'
+            result['summary'] = 'Task-specific acceptance remains unverified'
 else:
+    if mode == 'sandbox-checks':
+        assert 'Controller checks passed:' in prompt
+        assert 'do not repeat them in the sandbox' in prompt
     result = {'decision': 'approve', 'summary': 'Reviewed actual diff', 'findings': []}
     if mode == 'reject' or (mode == 'fix' and history.count('review') == 1):
         result = {'decision': 'request_changes', 'summary': 'Fix required', 'findings': ['Missing edge case']}
@@ -187,6 +196,24 @@ class TaskLoopTests(unittest.TestCase):
         self.assertEqual(self.run_loop(), 0)
         self.assertEqual(self.git('rev-list', '--count', 'HEAD').strip(), '3')
         self.assertNotIn('docs/', self.git('ls-files'))
+
+    def test_sandbox_check_limitations_still_require_controller_checks(self):
+        with patch.object(self.runner, 'checks', wraps=self.runner.checks) as required:
+            self.assertEqual(self.run_loop('sandbox-checks', max_tasks=1), 0)
+        self.assertEqual(required.call_count, 1)
+        self.assertIn('UMLith-Task: T001', self.git('log', '-1', '--format=%B'))
+        with self.assertRaises(self.runner.LoopError):
+            self.run_loop('sandbox-checks', max_tasks=1, check='false', rounds=1)
+        self.assertNotIn('UMLith-Task: T002', self.git('log', '-1', '--format=%B'))
+        self.assertEqual(json.loads((self.repo / '.codex-task-loop/fake-calls.json').read_text()),
+                         ['implement', 'review', 'implement'])
+
+    def test_missing_task_evidence_remains_blocked(self):
+        with patch.object(self.runner, 'checks', wraps=self.runner.checks) as required:
+            with self.assertRaisesRegex(self.runner.LoopError, 'T001 is blocked'):
+                self.run_loop('task-blocked', max_tasks=1)
+        self.assertEqual(required.call_count, 0)
+        self.assertEqual(self.git('rev-list', '--count', 'HEAD').strip(), '1')
 
     def test_quota_wait_preserves_partial_files_and_retries_same_task(self):
         self.assertEqual(self.run_loop('quota', max_tasks=1), 0)
