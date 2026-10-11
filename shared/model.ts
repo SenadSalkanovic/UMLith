@@ -337,7 +337,48 @@ export type Project={
 export type ValidationIssue={code:string;message:string;nodeId?:string;path?:string};
 export type FileChange={path:string;kind:'added'|'modified'|'deleted';before:string|null;after:string|null;diff:string;encoding?:'utf8'|'base64'};
 export type ValidationReport={passed:boolean;issues:ValidationIssue[];warnings:string[];checks:Record<string,{passed:boolean;output:string}>;changes:FileChange[];candidate?:Analysis};
-export type DesignProposal={graph:Graph;explanation:string;questions:string[]};
+export const DesignProposalSchema = z.object({
+  schemaVersion: z.literal(GRAPH_SCHEMA_VERSION).default(GRAPH_SCHEMA_VERSION).optional(),
+  graph: GraphSchema,
+  explanation: z.string().refine(val => !!val.trim(), { message: 'Proposal requires an explanation' }),
+  questions: z.array(z.string()).default([]),
+  sourceRevision: z.string().nullable().optional(),
+  baseRevision: z.number().int().nonnegative().optional(),
+  intendedBaseRevision: z.number().int().nonnegative().optional(),
+  specRevision: z.number().int().nonnegative().optional(),
+});
+export type DesignProposal = z.infer<typeof DesignProposalSchema>;
+
+export const ProposalDiagnosticSchema = z.object({
+  severity: z.enum(['error', 'warning']),
+  code: z.enum([
+    'schema',
+    'stale-spec',
+    'stale-source',
+    'policy',
+    'scope',
+    'provenance',
+    'reference',
+    'workflow',
+    'containment',
+  ]),
+  message: z.string(),
+  nodeId: z.string().optional(),
+  edgeId: z.string().optional(),
+  path: z.string().optional(),
+}).strict();
+export type ProposalDiagnostic = z.infer<typeof ProposalDiagnosticSchema>;
+
+export const ProposalValidationReportSchema = z.object({
+  valid: z.boolean(),
+  diagnostics: z.array(ProposalDiagnosticSchema),
+  proposal: DesignProposalSchema.optional(),
+}).strict();
+export type ProposalValidationReport = z.infer<typeof ProposalValidationReportSchema>;
+
+export function getProposalBaseRevision(proposal: DesignProposal): number | undefined {
+  return proposal.baseRevision ?? proposal.intendedBaseRevision ?? proposal.specRevision;
+}
 export type AgentJob={
   id:string; projectId:string;kind:'implementation'|'design'|'import';
   status:'preparing'|'running'|'review'|'failed'|'cancelled'|'applied';

@@ -19,10 +19,24 @@ process.stdin.on('end',async()=>{
  }
  if(config.mode==='fail'){fs.writeSync(2,'fake failure');process.exit(2);}
  if(config.mode==='design'){
-  const proposal=JSON.parse(fs.readFileSync('_architect/specification.json','utf8')).graph;
-  proposal.nodes[0].description='Proposed description';
+  const spec=JSON.parse(fs.readFileSync('_architect/specification.json','utf8'));
+  const proposal=spec.graph;
   const output=args[args.indexOf('-o')+1];
-  fs.writeFileSync(output,JSON.stringify({graph:proposal,explanation:'Clarifies purpose',questions:[]}));
+  if(config.designMode==='malformed'){
+   fs.writeFileSync(output,JSON.stringify({graph:{schemaVersion:1,nodes:[{id:'invalid-node'}],edges:[],requirements:[]},explanation:'Malformed graph',questions:[]}));
+  }else if(config.designMode==='stale'){
+   if(proposal.nodes.length>0)proposal.nodes[0].description='Proposed description';
+   fs.writeFileSync(output,JSON.stringify({graph:proposal,explanation:'Clarifies purpose',questions:[],baseRevision:(spec.revision||1)-1}));
+  }else if(config.designMode==='frozen-violation'){
+   if(proposal.nodes.length>0)proposal.nodes[0].description='Modified frozen description';
+   fs.writeFileSync(output,JSON.stringify({graph:proposal,explanation:'Violates frozen node',questions:[],baseRevision:spec.revision}));
+  }else if(config.designMode==='scope-violation'){
+   proposal.nodes.push({id:'out-of-scope-1',kind:'module',name:'OutOfScope',policy:'editable',provenance:'ai',outputPath:'outside/unapproved.ts',fields:[],requiredChecks:[],contract:'',description:'',instructions:''});
+   fs.writeFileSync(output,JSON.stringify({graph:proposal,explanation:'Scope violation',questions:[],baseRevision:spec.revision}));
+  }else{
+   if(proposal.nodes.length>0)proposal.nodes[0].description='Proposed description';
+   fs.writeFileSync(output,JSON.stringify({graph:proposal,explanation:'Clarifies purpose',questions:[],baseRevision:spec.revision}));
+  }
  }else{
   fs.writeFileSync('main.ts','export function value(): number { return 2; }\n');
   if(config.mode==='scope')fs.writeFileSync('outside.ts','export const outside = true;');

@@ -6,7 +6,8 @@ import {homedir} from 'node:os';
 import type {ChildProcess} from 'node:child_process';
 import chokidar from 'chokidar';
 import {z} from 'zod';
-import {GraphSchema,type AgentJob,type Project,type Graph,type DesignProposal} from '../shared/model';
+import {GraphSchema,DesignProposalSchema,getProposalBaseRevision,type AgentJob,type Project,type Graph,type DesignProposal} from '../shared/model';
+import {validateProposal} from './proposals';
 import {ProjectStore} from './store';
 import {SyncService} from './sync';
 import {bundleFiles} from './export';
@@ -14,9 +15,10 @@ import {AppError,copySnapshot,captureFiles,hashes,atomicJson,ignoredDirs,exclude
 import {validateCandidate,applyReviewed} from './review';
 import {runSandbox,sandboxAvailable} from './sandbox';
 import {AnalysisWorker} from './worker';
+export {validateProposal};
 export const SettingsSchema=z.object({provider:z.enum(['hosted','ollama','lmstudio']).default('hosted'),model:z.string().max(2000).optional(),timeoutMinutes:z.number().min(1).max(120).default(30)});
 export const TaskSchema=z.object({task:z.string().min(1).max(30000),scope:z.array(z.string().min(1)).min(1),settings:SettingsSchema.default({provider:'hosted',timeoutMinutes:30}),kind:z.enum(['implementation','design']).default('implementation')});
-const ProposalSchema=z.object({graph:GraphSchema,explanation:z.string(),questions:z.array(z.string())});
+export const ProposalSchema=DesignProposalSchema;
 type Runner={executable?:string;prefixArgs?:string[]};
 type Active={job:AgentJob;child?:ChildProcess;done:Promise<void>};
 export class JobService extends EventEmitter {
@@ -84,10 +86,10 @@ export class JobService extends EventEmitter {
    let task=await readFile(join(bundle,'AGENT_TASK.md'),'utf8');
    if(job.kind==='design'){
     const schemaPath=join(bundle,'proposal-schema.json');
-    const schema={type:'object',additionalProperties:false,required:['graph','explanation','questions'],properties:{graph:z.toJSONSchema(GraphSchema,{unrepresentable:'any'}),explanation:{type:'string'},questions:{type:'array',items:{type:'string'}}}};
+    const schema={type:'object',additionalProperties:false,required:['graph','explanation','questions'],properties:{schemaVersion:{type:'integer'},graph:z.toJSONSchema(GraphSchema,{unrepresentable:'any'}),explanation:{type:'string'},questions:{type:'array',items:{type:'string'}},sourceRevision:{type:'string'},baseRevision:{type:'integer'},intendedBaseRevision:{type:'integer'}}};
     await atomicJson(schemaPath,schema);
     args.push('--output-schema',schemaPath,'-o',join(bundle,'proposal.json'));
-    task='Propose a revised specification for this request: '+job.task+'\nRead _architect/specification.json. Return a complete proposed graph with explanation and questions. Preserve all policies, protection baselines, source bindings, and protected specification nodes. Do not modify project code.';
+    task='Propose a revised specification for this request: '+job.task+'\nRead _architect/specification.json. Return a complete proposed graph with explanation, questions, and baseRevision matching the specification revision ('+p.specRevision+'). Preserve all policies, protection baselines, source bindings, and protected specification nodes. Do not modify project code.';
    }
    args.push('-');
    job.status='running';await this.persist(job);
@@ -100,32 +102,50 @@ export class JobService extends EventEmitter {
    if(result.code!==0)throw new Error('Agent exited with status '+result.code+'. '+result.output.slice(-3000));
    clearTimeout(previewTimer);await watcher.close();
    if(job.kind==='design'){
-    const proposal=ProposalSchema.parse(JSON.parse(await readFile(join(bundle,'proposal.json'),'utf8')));
-    this.checkProposal(p,proposal.graph);
-    job.proposal=proposal;job.status='review';
+    let raw: unknown;
+    try {
+     raw = JSON.parse(await readFile(join(bundle,'proposal.json'),'utf8'));
+    } catch (err) {
+     throw new AppError('Malformed proposal JSON: ' + (err as Error).message);
+    }
+    const report = validateProposal(p, raw, { scope: job.scope, specRevision: job.specRevision });
+    if (!report.valid) {
+     const firstError = report.diagnostics.find(d => d.severity === 'error')?.message || 'Proposal validation failed';
+     throw new AppError(firstError);
+    }
+    job.proposal = report.proposal!;
+    job.status = 'review';
    }else{
     await this.validate(p,job,worker);job.status='review';
    }
    await this.persist(job);
   }finally{clearTimeout(previewTimer);await watcher.close();await worker.close();await rm(state,{recursive:true,force:true});active.child=undefined;}
  }
- private checkProposal(p:Project,graph:Graph){
-  for(const node of p.specification.nodes){
-   const next=graph.nodes.find(n=>n.id===node.id);
-   if(node.policy.startsWith('frozen')&&JSON.stringify(node)!==JSON.stringify(next))throw new AppError('AI proposal changes a protected specification item: '+node.name);
-   if(next&&(next.policy!==node.policy||JSON.stringify(next.baseline)!==JSON.stringify(node.baseline)||JSON.stringify(next.source)!==JSON.stringify(node.source)))throw new AppError('AI proposal changes policies, baselines, or source bindings: '+node.name);
+ private checkProposal(p:Project,proposal:Graph|DesignProposal,options?:{scope?:string[];specRevision?:number}){
+  const payload: unknown = 'graph' in proposal && 'explanation' in proposal ? proposal : {
+   graph: proposal,
+   explanation: 'Proposal review',
+   questions: [],
+  };
+  const report = validateProposal(p, payload, options);
+  if (!report.valid) {
+   const firstError = report.diagnostics.find(d => d.severity === 'error')?.message || 'Proposal validation failed';
+   throw new AppError(firstError);
   }
-  for(const node of graph.nodes)if(!p.specification.nodes.some(n=>n.id===node.id)&&(node.policy!=='editable'||node.baseline||node.source))throw new AppError('New AI nodes cannot establish protection baselines or source evidence.');
  }
  async acceptProposal(projectId:string,id:string){
   const job=await this.get(projectId,id);const p=await this.store.get(projectId);
   if(job.status!=='review'||!job.proposal)throw new AppError('No design proposal is ready for review.');
   if(p.specRevision!==job.specRevision)throw new AppError('Specification changed. Request a fresh proposal.',409);
-  this.checkProposal(p,job.proposal.graph);
+  const baseRev = getProposalBaseRevision(job.proposal);
+  if(baseRev !== undefined && baseRev !== p.specRevision)throw new AppError('Specification changed. Request a fresh proposal.',409);
+  this.checkProposal(p,job.proposal,{scope:job.scope,specRevision:job.specRevision});
   const graph=structuredClone(job.proposal.graph);
   for(const node of graph.nodes){const old=p.specification.nodes.find(n=>n.id===node.id);if(JSON.stringify(node)!==JSON.stringify(old))node.provenance='ai';}
   const updated=await this.store.updateSpec(projectId,job.specRevision,graph);
-  job.status='applied';await this.persist(job);return updated;
+  job.status='applied';
+  const active=this.active.get(id);if(active)active.job=job;
+  await this.persist(job);return updated;
  }
  private async validate(p:Project,job:AgentJob,worker:AnalysisWorker){
   const report=await validateCandidate(p,job);
