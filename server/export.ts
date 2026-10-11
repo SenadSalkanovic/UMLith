@@ -1,9 +1,10 @@
 import {zipSync,strToU8} from 'fflate';
 import type {Project} from '../shared/model';
+import {HANDOFF_FILES,HANDOFF_SCHEMA_VERSION,HandoffPackageSchema,HandoffSpecificationSchema} from '../shared/export';
 export function bundleFiles(project:Project,task:string,scope:string[]){
- const graph=structuredClone(project.specification);
- for(const node of graph.nodes){if(node.source)node.source={...node.source,path:node.source.path};}
- const blueprint={schemaVersion:1,project:{id:project.id,name:project.name,target:project.target,description:project.description},revision:project.specRevision,graph,scope,sourceRevision:project.analysis?.revision||null};
+ const blueprint=HandoffSpecificationSchema.parse({schemaVersion:HANDOFF_SCHEMA_VERSION,project:{id:project.id,name:project.name,target:project.target,description:project.description},revision:project.specRevision,graph:project.specification,
+  task,scope,checks:project.checks,sourceRevision:project.analysis?.revision||null,analysisStatus:project.analysis?.status??null,staleEvidence:project.analysis?.staleEvidence});
+ const graph=blueprint.graph;
  const sections=graph.nodes.map(n=>[
   '## '+n.name+' ('+n.kind+')',
   n.description||'Description has not been specified.',
@@ -36,7 +37,10 @@ export function bundleFiles(project:Project,task:string,scope:string[]){
  'Missing function details and workflows are unspecified; supplied details and scenarios do not prove implementation completeness.',
  'Return a concise implementation summary and any unresolved requirements. Code will be independently analyzed and reviewed before application.',
  ].join('\n\n');
- return {'specification.json':JSON.stringify(blueprint,null,2),'ARCHITECTURE.md':['# '+project.name,'Target: '+project.target,project.description,...sections,...(requirements.length?['## Requirements',...requirements]:[]),'## Relationships',...graph.edges.map(e=>'- '+e.source+' '+e.kind+' '+e.target+(e.label?' ('+e.label+')':''))].join('\n\n'),'AGENT_TASK.md':taskText,'IMPORT_REPORT.json':JSON.stringify(project.analysis?.quality||{message:'No source has been analyzed.'},null,2)};
+ const bundle=HandoffPackageSchema.parse({manifest:{schemaVersion:HANDOFF_SCHEMA_VERSION,projectId:blueprint.project.id,revision:blueprint.revision,sourceRevision:blueprint.sourceRevision,files:HANDOFF_FILES},specification:blueprint,
+  architecture:['# '+project.name,'Target: '+project.target,project.description,...sections,...(requirements.length?['## Requirements',...requirements]:[]),'## Relationships',...graph.edges.map(e=>'- '+e.source+' '+e.kind+' '+e.target+(e.label?' ('+e.label+')':''))].join('\n\n'),
+  task:taskText,importReport:project.analysis?.quality??{message:'No source has been analyzed.'}});
+ return {[HANDOFF_FILES.manifest]:JSON.stringify(bundle.manifest,null,2),[HANDOFF_FILES.specification]:JSON.stringify(bundle.specification,null,2),[HANDOFF_FILES.architecture]:bundle.architecture,[HANDOFF_FILES.task]:bundle.task,[HANDOFF_FILES.importReport]:JSON.stringify(bundle.importReport,null,2)};
 }
 export function exportBundle(project:Project,task:string,scope:string[]){
  return zipSync(Object.fromEntries(Object.entries(bundleFiles(project,task,scope)).map(([path,text])=>[path,strToU8(text)])));
