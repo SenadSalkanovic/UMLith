@@ -1465,6 +1465,10 @@ button {
   color: var(--text-primary);
   line-height: 1.4;
 }
+
+.proposal-semantic-diff table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.proposal-semantic-diff th, .proposal-semantic-diff td { text-align: left; vertical-align: top; padding: 6px; }
+.proposal-semantic-diff pre, .proposal-graph-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .proposal-questions {
   font-size: 11px;
   color: var(--text-secondary);

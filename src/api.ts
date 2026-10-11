@@ -10,8 +10,23 @@ import type {
   AcceptBindingRequest,
   BindingReviewsResponse,
   DivergenceReportResponse,
+  ProposalReviewResponse,
 } from '../shared/api';
 import type { Graph, Layout, Project, Analysis, ProgramNode, BindingReviewRecord, DivergenceReport } from '../shared/model';
+import { ProposalReviewResponseSchema } from '../shared/api';
+
+export async function getProposals(id: string, baseUrl?: string): Promise<ProposalReviewResponse[]> {
+  const proposals = await request<unknown[]>(`/projects/${id}/proposals`, {}, baseUrl);
+  return proposals.map(proposal => ProposalReviewResponseSchema.parse(proposal));
+}
+export async function acceptProposal(id: string, proposalId: string, expectedRevision: number, baseUrl?: string): Promise<Project> {
+  return request<Project>(`/projects/${id}/proposals/${proposalId}/accept`, {
+    method: 'POST', body: JSON.stringify({ expectedRevision }),
+  }, baseUrl);
+}
+export async function rejectProposal(id: string, proposalId: string, baseUrl?: string): Promise<{ success: boolean }> {
+  return request<{ success: boolean }>(`/projects/${id}/proposals/${proposalId}/reject`, { method: 'POST', body: '{}' }, baseUrl);
+}
 
 export class ApiConnectionError extends Error {
   public actionableSteps: string[];

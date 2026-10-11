@@ -9,7 +9,7 @@ import { ProjectTree } from './components/ProjectTree';
 import { Canvas } from './components/Canvas';
 import { PropertyInspector } from './components/PropertyInspector';
 import { SourceViewer } from './components/SourceViewer';
-import { ReviewPanel } from './components/ReviewPanel';
+import { ReviewPanel, type ArchitectureProposalReview, type PendingReviewItem } from './components/ReviewPanel';
 import { EmptyWorkspace } from './components/EmptyWorkspace';
 import { ErrorView } from './components/ErrorView';
 import { ProjectModal } from './components/ProjectModal';
@@ -97,6 +97,50 @@ export const App: React.FC<AppProps> = ({
 
   const [bindingReviews, setBindingReviews] = useState<BindingReviewRecord[]>([]);
   const [divergenceReport, setDivergenceReport] = useState<DivergenceReport | null>(null);
+  const [proposalReviews, setProposalReviews] = useState<ArchitectureProposalReview[]>([]);
+  const [proposalError, setProposalError] = useState<string | null>(null);
+  const [isDecidingProposal, setIsDecidingProposal] = useState(false);
+  const [proposalRefresh, setProposalRefresh] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const project = specificationState.project;
+    setProposalReviews([]);
+    if (!project || project.root.startsWith('/test')) return;
+    api.getProposals(project.id, apiBaseUrl).then(proposals => {
+      if (!cancelled) setProposalReviews(proposals.filter(p => p.status === 'review').map(p => ({
+        id: p.id, kind: 'architecture', title: p.task, createdAt: p.createdAt, specRevision: p.specRevision,
+        proposal: p.proposal, specificationDiff: p.diff, diagnostics: p.diagnostics,
+        isStale: p.diagnostics.some(d => d.code === 'stale-spec'),
+        staleReason: p.diagnostics.find(d => d.code === 'stale-spec')?.message,
+      })));
+    }).catch(err => { if (!cancelled) setProposalError(err.message); });
+    return () => { cancelled = true; };
+  }, [specificationState.project?.id, specificationState.specRevision, apiBaseUrl, proposalRefresh]);
+
+  const decideProposal = async (review: PendingReviewItem, decision: 'accept' | 'reject') => {
+    const projectId = specificationState.project?.id;
+    if (!projectId || review.kind !== 'architecture' || isDecidingProposal) return;
+    setIsDecidingProposal(true);
+    setProposalError(null);
+    try {
+      if (decision === 'accept') {
+        const updated = await api.acceptProposal(projectId, review.id, review.specRevision, apiBaseUrl);
+        setSpecificationState(prev => prev.project?.id === projectId ? {
+          ...prev, project: updated, specRevision: updated.specRevision, specification: updated.specification,
+        } : prev);
+        await fetchRevisionsList(projectId);
+      } else {
+        await api.rejectProposal(projectId, review.id, apiBaseUrl);
+      }
+      setProposalReviews(reviews => reviews.filter(r => r.id !== review.id));
+    } catch (err: any) {
+      if (err.statusCode === 409) setProposalRefresh(value => value + 1);
+      throw err;
+    } finally {
+      setIsDecidingProposal(false);
+    }
+  };
 
   // 5. View State (UI-only, strictly decoupled from Spec and Analysis)
   const [viewState, setViewState] = useState<ViewState>({
@@ -1066,6 +1110,13 @@ export const App: React.FC<AppProps> = ({
                 bindingReviews={bindingReviews}
                 onAcceptBinding={handleAcceptBinding}
                 divergenceReport={divergenceReport}
+                pendingReviews={proposalReviews}
+                onAccept={review => decideProposal(review, 'accept')}
+                onReject={review => decideProposal(review, 'reject')}
+                onDismiss={() => { setProposalError(null); }}
+                actionError={proposalError}
+                isDeciding={isDecidingProposal}
+                onRefreshProposals={() => { setProposalError(null); setProposalRefresh(value => value + 1); }}
               />
             </div>
           )}

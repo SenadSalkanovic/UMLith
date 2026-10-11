@@ -1,4 +1,5 @@
 import {EventEmitter} from 'node:events';
+import {isDeepStrictEqual} from 'node:util';
 import {randomUUID} from 'node:crypto';
 import {readFile,writeFile,mkdir,copyFile,rm,symlink,access} from 'node:fs/promises';
 import {join,resolve,dirname,isAbsolute} from 'node:path';
@@ -7,8 +8,9 @@ import type {ChildProcess} from 'node:child_process';
 import chokidar from 'chokidar';
 import {z} from 'zod';
 import {GraphSchema,DesignProposalSchema,getProposalBaseRevision,type AgentJob,type Project,type Graph,type DesignProposal} from '../shared/model';
-import {validateProposal} from './proposals';
-import {ProjectStore} from './store';
+import {validateProposal,computeSpecificationDiff} from './proposals';
+import {ProposalReviewResponseSchema,type ProposalReviewResponse} from '../shared/api';
+import {ProjectStore,SpecificationConflictError} from './store';
 import {SyncService} from './sync';
 import {bundleFiles} from './export';
 import {AppError,copySnapshot,captureFiles,hashes,atomicJson,ignoredDirs,excluded} from './files';
@@ -23,6 +25,7 @@ type Runner={executable?:string;prefixArgs?:string[]};
 type Active={job:AgentJob;child?:ChildProcess;done:Promise<void>};
 export class JobService extends EventEmitter {
  private active=new Map<string,Active>();
+ private decisions=new Map<string,Promise<unknown>>();
  private closed=false;
  constructor(public store:ProjectStore,public sync:SyncService,private runner:Runner={}){super();}
  async get(projectId:string,id:string):Promise<AgentJob>{
@@ -121,31 +124,50 @@ export class JobService extends EventEmitter {
    await this.persist(job);
   }finally{clearTimeout(previewTimer);await watcher.close();await worker.close();await rm(state,{recursive:true,force:true});active.child=undefined;}
  }
- private checkProposal(p:Project,proposal:Graph|DesignProposal,options?:{scope?:string[];specRevision?:number}){
-  const payload: unknown = 'graph' in proposal && 'explanation' in proposal ? proposal : {
-   graph: proposal,
-   explanation: 'Proposal review',
-   questions: [],
-  };
-  const report = validateProposal(p, payload, options);
-  if (!report.valid) {
-   const firstError = report.diagnostics.find(d => d.severity === 'error')?.message || 'Proposal validation failed';
-   throw new AppError(firstError);
-  }
- }
- async acceptProposal(projectId:string,id:string){
+ async getProposalReview(projectId:string,id:string):Promise<ProposalReviewResponse>{
   const job=await this.get(projectId,id);const p=await this.store.get(projectId);
-  if(job.status!=='review'||!job.proposal)throw new AppError('No design proposal is ready for review.');
-  if(p.specRevision!==job.specRevision)throw new AppError('Specification changed. Request a fresh proposal.',409);
+  if(job.kind!=='design'||!job.proposal)throw new AppError('Design proposal not found',404);
+  const proposal=DesignProposalSchema.parse(job.proposal);
+  const report=validateProposal(p,proposal,{scope:job.scope,specRevision:job.specRevision});
+  // Preview exactly the AI attribution that acceptance will persist.
+  for(const node of proposal.graph.nodes)if(!isDeepStrictEqual(node,p.specification.nodes.find(n=>n.id===node.id)))node.provenance='ai';
+  for(const edge of proposal.graph.edges)if(!isDeepStrictEqual(edge,p.specification.edges.find(e=>e.id===edge.id))){edge.provenance='ai';edge.uncertain=true;}
+  return ProposalReviewResponseSchema.parse({id:job.id,task:job.task,createdAt:job.createdAt,status:job.status,specRevision:job.specRevision,
+   proposal,diff:computeSpecificationDiff(p.specification,proposal.graph,{explanation:proposal.explanation}),valid:report.valid,diagnostics:report.diagnostics});
+ }
+ private async decide<T>(projectId:string,fn:()=>Promise<T>):Promise<T>{
+  const previous=this.decisions.get(projectId)||Promise.resolve();
+  const decision=previous.catch(()=>{}).then(fn);this.decisions.set(projectId,decision);
+  try{return await decision;}finally{if(this.decisions.get(projectId)===decision)this.decisions.delete(projectId);}
+ }
+ async acceptProposal(projectId:string,id:string,expectedRevision?:number){
+  return this.decide(projectId,async()=>{
+  const job=await this.get(projectId,id);const p=await this.store.get(projectId);
+  if(job.kind!=='design'||job.status!=='review'||!job.proposal)throw new AppError('No design proposal is ready for review.',409);
+  const expected=expectedRevision??job.specRevision;
   const baseRev = getProposalBaseRevision(job.proposal);
-  if(baseRev !== undefined && baseRev !== p.specRevision)throw new AppError('Specification changed. Request a fresh proposal.',409);
-  this.checkProposal(p,job.proposal,{scope:job.scope,specRevision:job.specRevision});
-  const graph=structuredClone(job.proposal.graph);
-  for(const node of graph.nodes){const old=p.specification.nodes.find(n=>n.id===node.id);if(JSON.stringify(node)!==JSON.stringify(old))node.provenance='ai';}
-  const updated=await this.store.updateSpec(projectId,job.specRevision,graph);
+  if(expected!==p.specRevision||expected!==job.specRevision||(baseRev!==undefined&&baseRev!==p.specRevision)){
+   const conflict=new SpecificationConflictError(projectId,expected,p.specRevision);
+   conflict.message='Specification changed. Request a fresh proposal. '+conflict.message;
+   throw conflict;
+  }
+  const review=await this.getProposalReview(projectId,id);
+  if(!review.valid)throw new AppError(review.diagnostics.find(d=>d.severity==='error')?.message||'Proposal validation failed');
+  const updated=await this.store.updateSpec(projectId,expected,review.proposal.graph);
   job.status='applied';
+  this.event(job,`Human accepted proposal: specification revision ${expected} → ${updated.specRevision}.`);
   const active=this.active.get(id);if(active)active.job=job;
   await this.persist(job);return updated;
+  });
+ }
+ async rejectProposal(projectId:string,id:string){
+  return this.decide(projectId,async()=>{
+   const job=await this.get(projectId,id);
+   if(job.kind!=='design'||job.status!=='review'||!job.proposal)throw new AppError('No design proposal is ready for review.',409);
+   job.status='cancelled';this.event(job,'Human rejected proposal without changing the specification.');
+   const active=this.active.get(id);if(active)active.job=job;
+   await this.persist(job);
+  });
  }
  private async validate(p:Project,job:AgentJob,worker:AnalysisWorker){
   const report=await validateCandidate(p,job);

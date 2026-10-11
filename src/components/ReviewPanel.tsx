@@ -14,12 +14,14 @@ import type {
   Analysis,
   BindingReviewRecord,
   DivergenceReport,
+  SpecificationDiff,
 } from '../../shared/model';
 import { graphDelta } from '../../shared/model';
 import type { AnalysisState, SyncStatus } from '../types';
 import { QualityReport } from './QualityReport';
 import { BindingReview } from './BindingReview';
 import { DivergencePanel } from './DivergencePanel';
+import { ProposalReview } from './ProposalReview';
 import {
   CheckSquare,
   Shield,
@@ -58,6 +60,7 @@ export interface ArchitectureProposalReview {
   targetRevision?: number;
   status?: 'pending' | 'applied' | 'rejected' | 'stale' | 'invalid';
   proposal: DesignProposal;
+  specificationDiff?: SpecificationDiff;
   delta?: GraphDelta;
   validationIssues?: ValidationIssue[];
   diagnostics?: Diagnostic[];
@@ -295,6 +298,9 @@ export interface ReviewPanelProps {
   onAcceptBinding?: (nodeId: string, candidateId: string) => void | Promise<void>;
   divergenceReport?: DivergenceReport | null;
   onRefreshDivergence?: () => void;
+  actionError?: string | null;
+  isDeciding?: boolean;
+  onRefreshProposals?: () => void;
 }
 
 export const ReviewPanel: React.FC<ReviewPanelProps> = ({
@@ -313,14 +319,19 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
   onAcceptBinding,
   divergenceReport,
   onRefreshDivergence,
+  actionError,
+  isDeciding = false,
+  onRefreshProposals,
 }) => {
   const [internalActiveId, setInternalActiveId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'overview' | 'architecture' | 'implementation' | 'import' | 'bindings' | 'divergence'>(initialTab);
   const [reviewSection, setReviewSection] = useState<'spec' | 'code' | 'diagnostics'>('spec');
+  const [decisionError, setDecisionError] = useState<string | null>(null);
 
   const selectedId = activeReviewId !== undefined ? activeReviewId : internalActiveId;
 
   const handleSelectReviewItem = (id: string | null) => {
+    setDecisionError(null);
     if (onSelectReview) {
       onSelectReview(id);
     } else {
@@ -386,15 +397,15 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
   const checkEntries = Object.entries(checks);
 
   // Deliberate actions: never trigger mutation automatically
-  const handleAccept = () => {
-    if (!activeReview || !evaluation.canAccept) return;
-    if (onAccept) {
-      onAccept(activeReview);
-    }
+  const handleAccept = async () => {
+    if (!activeReview || !evaluation.canAccept || isDeciding) return;
+    setDecisionError(null);
+    try { await onAccept?.(activeReview); }
+    catch (error) { setDecisionError((error as Error).message); }
   };
 
   const handleDismiss = () => {
-    if (!activeReview) return;
+    if (!activeReview || isDeciding) return;
     if (onDismiss) {
       onDismiss(activeReview);
     } else if (onReject) {
@@ -403,14 +414,16 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
     handleSelectReviewItem(null);
   };
 
-  const handleReject = () => {
-    if (!activeReview) return;
-    if (onReject) {
-      onReject(activeReview);
-    } else if (onDismiss) {
-      onDismiss(activeReview);
+  const handleReject = async () => {
+    if (!activeReview || isDeciding) return;
+    setDecisionError(null);
+    try {
+      if (onReject) await onReject(activeReview);
+      else onDismiss?.(activeReview);
+      handleSelectReviewItem(null);
+    } catch (error) {
+      setDecisionError((error as Error).message);
     }
-    handleSelectReviewItem(null);
   };
 
   return (
@@ -520,6 +533,8 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
       </div>
 
       <div className="panel-content review-content">
+        {(actionError || decisionError) && <p role="alert" className="blocked-explanation" data-testid="proposal-action-error">{actionError || decisionError}</p>}
+        {onRefreshProposals && <button type="button" onClick={() => { setDecisionError(null); onRefreshProposals(); }} disabled={isDeciding}>Refresh proposals</button>}
         {/* VIEW 1: ACTIVE REVIEW INSPECTION */}
         {activeReview ? (
           <div className="active-review-view" data-testid="active-review-view">
@@ -674,7 +689,9 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                   </div>
                 )}
 
-                {specDiff && (
+                {activeReview.kind === 'architecture' && activeReview.specificationDiff ? (
+                  <ProposalReview key={activeReview.id} proposal={activeReview.proposal} diff={activeReview.specificationDiff} currentGraph={graph} />
+                ) : specDiff && (
                   <div className="spec-diff-container" data-testid="spec-diff-container">
                     {/* Added Nodes */}
                     {specDiff.addedNodes.length > 0 && (
@@ -957,6 +974,7 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                 <button
                   type="button"
                   className="btn-review-action btn-dismiss"
+                  disabled={isDeciding}
                   onClick={handleDismiss}
                   data-testid="review-dismiss-btn"
                   title="Dismiss review candidate without applying mutations"
@@ -967,6 +985,7 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                 <button
                   type="button"
                   className="btn-review-action btn-reject"
+                  disabled={isDeciding}
                   onClick={handleReject}
                   data-testid="review-reject-btn"
                   title="Reject review candidate without mutation"
@@ -977,8 +996,8 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
                 <button
                   type="button"
                   className="btn-review-action btn-accept"
-                  disabled={!evaluation.canAccept}
-                  aria-disabled={!evaluation.canAccept}
+                  disabled={!evaluation.canAccept || isDeciding}
+                  aria-disabled={!evaluation.canAccept || isDeciding}
                   onClick={handleAccept}
                   data-testid="review-accept-btn"
                   title={

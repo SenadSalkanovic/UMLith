@@ -20,6 +20,163 @@ import { SyncService } from '../server/sync';
 import { JobService } from '../server/jobs';
 import { validateProposal, computeSpecificationDiff } from '../server/proposals';
 import { sandboxAvailable } from '../server/sandbox';
+import { createServer } from '../server/main';
+import type { AgentJob } from '../shared/model';
+
+describe('T067: Revision-checked human proposal decisions', () => {
+  async function fixture() {
+    const dir = await mkdtemp(join(tmpdir(), 'proposal-review-'));
+    const store = new ProjectStore(dir);
+    let project = await store.create({ name: 'Human review' });
+    const graph = GraphSchema.parse({ ...emptyGraph(), nodes: [{ id: 'module', kind: 'module', name: 'Original' }],
+      requirements: [{ id: 'req', text: 'Original requirement', nodeIds: ['module'] }] });
+    project = await store.updateSpec(project.id, 0, graph);
+    await writeFile(join(project.root, 'module.ts'), 'export const original = true;\n');
+    const proposed = structuredClone(graph);
+    proposed.nodes[0].name = 'Reviewed module';
+    proposed.nodes[0].contract = 'Reviewed contract';
+    proposed.requirements[0].text = 'Reviewed requirement';
+    const job: AgentJob = { id: 'design-review', projectId: project.id, kind: 'design', status: 'review',
+      createdAt: new Date().toISOString(), specRevision: 1, sourceHashes: {}, task: 'Clarify architecture', scope: ['.'],
+      workspace: join(dir, 'candidate'), events: [], proposal: { graph: proposed, explanation: 'Clarify intent', questions: [], baseRevision: 1 } };
+    await store.saveJob(job);
+    const app = await createServer({ store, syncOptions: { watch: false } });
+    const url = `/api/projects/${project.id}/proposals/${job.id}`;
+    const before = await readFile(join(store.projectDir(project.id), 'project.json'), 'utf8');
+    return { store, project, job, app, url, before, async close() { await app.close(); await rm(dir, { recursive: true, force: true }); } };
+  }
+
+  it.each(['accept', 'reject'] as const)('opens then explicitly %ss the same proposal in independent fixture runs', async decision => {
+    const f = await fixture();
+    try {
+      const list = await f.app.inject({ method: 'GET', url: `/api/projects/${f.project.id}/proposals` });
+      expect(list.statusCode).toBe(200);
+      expect(list.json()).toHaveLength(1);
+      const opened = await f.app.inject({ method: 'GET', url: f.url });
+      expect(opened.statusCode).toBe(200);
+      const review = opened.json();
+      expect(review.valid).toBe(true);
+      expect(review.diff.requirements[0].changes).toContainEqual({ property: 'text', before: 'Original requirement', after: 'Reviewed requirement' });
+      expect(review.diff.nodes[0].contractChanged).toBe(true);
+      expect(review).not.toHaveProperty('workspace');
+      expect(await readFile(join(f.store.projectDir(f.project.id), 'project.json'), 'utf8')).toBe(f.before);
+      expect(await f.store.history(f.project.id)).toHaveLength(2);
+      const result = await f.app.inject({ method: 'POST', url: `${f.url}/${decision}`, payload: decision === 'accept' ? { expectedRevision: 1 } : {} });
+      expect(result.statusCode).toBe(200);
+      const stored = await f.store.get(f.project.id);
+      const job = (await f.store.jobs(f.project.id))[0];
+      if (decision === 'accept') {
+        expect(stored.specRevision).toBe(2);
+        expect(stored.specification).toEqual(review.proposal.graph);
+        expect(stored.specification.nodes[0].provenance).toBe('ai');
+        const history = await f.store.history(f.project.id);
+        expect(history.map(r => r.revision)).toEqual([0, 1, 2]);
+        expect(history[1].graph).toEqual(f.project.specification);
+        expect(history[2].graph).toEqual(stored.specification);
+        expect(job.status).toBe('applied');
+        expect(job.events).toContainEqual(expect.objectContaining({ message: 'Human accepted proposal: specification revision 1 → 2.' }));
+      } else {
+        expect(stored.specRevision).toBe(1);
+        expect(await readFile(join(f.store.projectDir(f.project.id), 'project.json'), 'utf8')).toBe(f.before);
+        expect(await f.store.history(f.project.id)).toHaveLength(2);
+        expect(job.status).toBe('cancelled');
+        expect((await f.app.inject({ method: 'POST', url: `${f.url}/accept`, payload: { expectedRevision: 1 } })).statusCode).toBe(409);
+      }
+      expect(await readFile(join(f.project.root, 'module.ts'), 'utf8')).toBe('export const original = true;\n');
+    } finally { await f.close(); }
+  });
+
+  it('previews and persists AI attribution for added and modified edges while preserving unchanged edges', async () => {
+    const f = await fixture();
+    try {
+      const graph = GraphSchema.parse({ ...f.project.specification,
+        nodes: [...f.project.specification.nodes, { id: 'other', kind: 'module', name: 'Other' }, { id: 'last', kind: 'module', name: 'Last' }],
+        edges: [{ id: 'modified', source: 'module', target: 'other', kind: 'depends-on', label: 'Original' },
+          { id: 'unchanged', source: 'module', target: 'last', kind: 'depends-on' }] });
+      await f.store.updateSpec(f.project.id, 1, graph);
+      const proposed = structuredClone(graph);
+      proposed.edges[0].label = 'Proposed';
+      proposed.edges.push({ id: 'added', source: 'other', target: 'last', kind: 'depends-on', label: '', provenance: 'human', uncertain: false });
+      f.job.specRevision = 2;
+      f.job.proposal = { graph: proposed, explanation: 'Clarify dependencies', questions: [], baseRevision: 2 };
+      await f.store.saveJob(f.job);
+      const opened = await f.app.inject({ method: 'GET', url: f.url });
+      expect(opened.statusCode).toBe(200);
+      const review = opened.json();
+      expect(review.valid).toBe(true);
+      for (const id of ['added', 'modified']) {
+        expect(review.proposal.graph.edges.find((e: ProgramEdge) => e.id === id)).toMatchObject({ provenance: 'ai', uncertain: true });
+        expect(review.diff.edges.find((e: { edgeId: string }) => e.edgeId === id).changes).toContainEqual(
+          expect.objectContaining({ property: 'provenance', after: 'ai' }));
+      }
+      expect(review.proposal.graph.edges.find((e: ProgramEdge) => e.id === 'unchanged')).toEqual(graph.edges[1]);
+      const accepted = await f.app.inject({ method: 'POST', url: `${f.url}/accept`, payload: { expectedRevision: 2 } });
+      expect(accepted.statusCode).toBe(200);
+      expect((await f.store.get(f.project.id)).specification).toEqual(review.proposal.graph);
+    } finally { await f.close(); }
+  });
+
+  it('rejects stale acceptance after a human edits intent and returns reload diagnostics', async () => {
+    const f = await fixture();
+    try {
+      const humanEdit = structuredClone(f.project.specification);
+      humanEdit.nodes[0].description = 'Human edit after generation';
+      await f.store.updateSpec(f.project.id, 1, humanEdit);
+      const review = await f.app.inject({ method: 'GET', url: f.url });
+      expect(review.statusCode).toBe(200);
+      expect(review.json().diagnostics).toContainEqual(expect.objectContaining({ code: 'stale-spec', severity: 'error' }));
+      const result = await f.app.inject({ method: 'POST', url: `${f.url}/accept`, payload: { expectedRevision: 1 } });
+      expect(result.statusCode).toBe(409);
+      expect(result.json()).toMatchObject({ projectId: f.project.id, expectedRevision: 1, currentRevision: 2 });
+      expect((await f.store.get(f.project.id)).specification).toEqual(humanEdit);
+      expect(await f.store.history(f.project.id)).toHaveLength(3);
+      expect((await f.store.jobs(f.project.id))[0].status).toBe('review');
+      expect((await f.app.inject({ method: 'POST', url: `${f.url}/accept`, payload: { expectedRevision: 2 } })).statusCode).toBe(409);
+      expect((await f.app.inject({ method: 'POST', url: `${f.url}/reject`, payload: {} })).statusCode).toBe(200);
+      expect((await f.store.get(f.project.id)).specification).toEqual(humanEdit);
+    } finally { await f.close(); }
+  });
+
+  it('requires a valid expected revision and never accepts a caller-supplied graph', async () => {
+    const f = await fixture();
+    try {
+      for (const payload of [{}, { expectedRevision: -1 }, { expectedRevision: 1.5 }, { expectedRevision: '1' }, { expectedRevision: 1, graph: emptyGraph() }]) {
+        expect((await f.app.inject({ method: 'POST', url: `${f.url}/accept`, payload })).statusCode).toBe(400);
+      }
+      expect(await readFile(join(f.store.projectDir(f.project.id), 'project.json'), 'utf8')).toBe(f.before);
+      const other = await f.store.create({ name: 'Other project' });
+      expect((await f.app.inject({ method: 'GET', url: `/api/projects/${other.id}/proposals/${f.job.id}` })).statusCode).toBe(404);
+    } finally { await f.close(); }
+  });
+
+  it('revalidates policy at acceptance and exposes blocking diagnostics on review', async () => {
+    const f = await fixture();
+    try {
+      f.job.proposal!.graph.nodes[0].policy = 'sensitive';
+      await f.store.saveJob(f.job);
+      const opened = await f.app.inject({ method: 'GET', url: f.url });
+      expect(opened.statusCode).toBe(200);
+      expect(opened.json().valid).toBe(false);
+      expect(opened.json().diagnostics).toContainEqual(expect.objectContaining({ code: 'policy', severity: 'error' }));
+      expect((await f.app.inject({ method: 'POST', url: `${f.url}/accept`, payload: { expectedRevision: 1 } })).statusCode).toBe(400);
+      expect(await readFile(join(f.store.projectDir(f.project.id), 'project.json'), 'utf8')).toBe(f.before);
+    } finally { await f.close(); }
+  });
+
+  it('serializes competing human decisions so an accepted proposal cannot then be rejected', async () => {
+    const f = await fixture();
+    try {
+      const results = await Promise.all([
+        f.app.inject({ method: 'POST', url: `${f.url}/accept`, payload: { expectedRevision: 1 } }),
+        f.app.inject({ method: 'POST', url: `${f.url}/reject`, payload: {} }),
+      ]);
+      expect(results.map(r => r.statusCode).sort()).toEqual([200, 409]);
+      const job = (await f.store.jobs(f.project.id))[0];
+      const stored = await f.store.get(f.project.id);
+      expect(job.status).toBe(stored.specRevision === 2 ? 'applied' : 'cancelled');
+    } finally { await f.close(); }
+  });
+});
 
 describe('T065: Validate architecture, ER, and workflow proposal payloads', () => {
   describe('Proposal schema definitions and explanation separation', () => {

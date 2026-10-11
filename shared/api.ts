@@ -12,6 +12,9 @@ import {
   GraphUpdateSchema,
   BindingReviewRecordSchema,
   DivergenceReportSchema,
+  DesignProposalSchema,
+  SpecificationDiffSchema,
+  ProposalDiagnosticSchema,
   type Graph,
   type GraphInput,
   type Layout,
@@ -77,6 +80,18 @@ export const ProjectIdParamSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9-]+$/, 'Invalid project ID'),
 });
 export type ProjectIdParam = z.infer<typeof ProjectIdParamSchema>;
+
+export const ProposalIdParamSchema = ProjectIdParamSchema.extend({
+  proposalId: z.string().regex(/^[a-zA-Z0-9-]+$/, 'Invalid proposal ID'),
+});
+export const AcceptProposalRequestSchema = z.object({ expectedRevision: z.int().nonnegative() }).strict();
+export const ProposalReviewResponseSchema = z.object({
+  id: z.string(), task: z.string(), createdAt: z.string(), specRevision: z.int().nonnegative(),
+  status: z.enum(['preparing', 'running', 'review', 'failed', 'cancelled', 'applied']),
+  proposal: DesignProposalSchema, diff: SpecificationDiffSchema,
+  valid: z.boolean(), diagnostics: z.array(ProposalDiagnosticSchema),
+}).strict();
+export type ProposalReviewResponse = z.infer<typeof ProposalReviewResponseSchema>;
 
 export const ChecksSchema = z.record(
   z.string(),

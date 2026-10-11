@@ -11,6 +11,7 @@ import { AnalysisWorker } from './worker';
 import { generateImportQualityReport, type ImportQualityReport } from './analyzer';
 import { randomUUID } from 'node:crypto';
 import { SyncService, type SyncServiceOptions } from './sync';
+import { JobService } from './jobs';
 import { AnalysisSchema, emptyGraph, createGraphUpdate, type Analysis } from '../shared/model';
 import { reconcileSourceBindings, acceptBindingCandidate, computeDivergenceReport } from './review';
 import {
@@ -32,6 +33,8 @@ import {
   BindingReviewsResponseSchema,
   SseBindingReviewEventSchema,
   DivergenceReportResponseSchema,
+  ProposalIdParamSchema,
+  AcceptProposalRequestSchema,
   SseDivergenceEventSchema,
 } from '../shared/api';
 
@@ -138,6 +141,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
 
   const ownsSync = !options.sync;
   const sync = options.sync ?? new SyncService(store, { worker, ...options.syncOptions });
+  const jobs = new JobService(store, sync);
 
   const defaultHost = options.host ?? '127.0.0.1';
   if (!isLoopbackHost(defaultHost)) {
@@ -179,6 +183,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     activeSubscriptions.clear();
     projectSubscriptions.clear();
 
+    await jobs.close();
     await sync.close();
     if (ownsWorker) {
       await worker.close();
@@ -375,6 +380,27 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     const { id } = ProjectIdParamSchema.parse(request.params);
     const project = await store.get(id);
     return reply.send(project);
+  });
+
+  app.get('/api/projects/:id/proposals', async request => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    await store.get(id);
+    const proposals = (await store.jobs(id)).filter(job => job.kind === 'design' && job.proposal);
+    return Promise.all(proposals.map(job => jobs.getProposalReview(id, job.id)));
+  });
+  app.get('/api/projects/:id/proposals/:proposalId', async request => {
+    const { id, proposalId } = ProposalIdParamSchema.parse(request.params);
+    return jobs.getProposalReview(id, proposalId);
+  });
+  app.post('/api/projects/:id/proposals/:proposalId/accept', async request => {
+    const { id, proposalId } = ProposalIdParamSchema.parse(request.params);
+    const { expectedRevision } = AcceptProposalRequestSchema.parse(request.body);
+    return jobs.acceptProposal(id, proposalId, expectedRevision);
+  });
+  app.post('/api/projects/:id/proposals/:proposalId/reject', async request => {
+    const { id, proposalId } = ProposalIdParamSchema.parse(request.params);
+    await jobs.rejectProposal(id, proposalId);
+    return { success: true };
   });
 
   // Specification endpoints
