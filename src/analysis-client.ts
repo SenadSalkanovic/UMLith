@@ -565,6 +565,12 @@ export class AnalysisClient {
         break;
       }
 
+      case 'divergence': {
+        const report = data?.report || data;
+        this.emit('divergence', report);
+        break;
+      }
+
       case 'error': {
         const error = new Error(data?.message || 'SSE server reported error');
         this.options.onError?.(error);

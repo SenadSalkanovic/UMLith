@@ -11,6 +11,7 @@ import {
   GraphDeltaSchema,
   GraphUpdateSchema,
   BindingReviewRecordSchema,
+  DivergenceReportSchema,
   type Graph,
   type GraphInput,
   type Layout,
@@ -19,6 +20,7 @@ import {
   type GraphDelta,
   type GraphUpdate,
   type BindingReviewRecord,
+  type DivergenceReport,
 } from './model';
 
 export const CreateProjectRequestSchema = z.object({
@@ -293,3 +295,19 @@ export const SseBindingReviewEventSchema = z.object({
   timestamp: z.string().optional(),
 });
 export type SseBindingReviewEvent = z.infer<typeof SseBindingReviewEventSchema>;
+
+export const DivergenceReportResponseSchema = z.object({
+  success: z.boolean(),
+  projectId: z.string().optional(),
+  report: DivergenceReportSchema,
+});
+export type DivergenceReportResponse = z.infer<typeof DivergenceReportResponseSchema>;
+
+export const SseDivergenceEventSchema = z.object({
+  event: z.literal('divergence').optional(),
+  type: z.literal('divergence').optional(),
+  projectId: z.string(),
+  report: DivergenceReportSchema,
+  timestamp: z.string().optional(),
+});
+export type SseDivergenceEvent = z.infer<typeof SseDivergenceEventSchema>;

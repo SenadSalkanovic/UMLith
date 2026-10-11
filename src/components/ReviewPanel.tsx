@@ -13,11 +13,13 @@ import type {
   GraphDelta,
   Analysis,
   BindingReviewRecord,
+  DivergenceReport,
 } from '../../shared/model';
 import { graphDelta } from '../../shared/model';
 import type { AnalysisState, SyncStatus } from '../types';
 import { QualityReport } from './QualityReport';
 import { BindingReview } from './BindingReview';
+import { DivergencePanel } from './DivergencePanel';
 import {
   CheckSquare,
   Shield,
@@ -287,10 +289,12 @@ export interface ReviewPanelProps {
   onAccept?: (review: PendingReviewItem) => void | Promise<void>;
   onReject?: (review: PendingReviewItem) => void | Promise<void>;
   onDismiss?: (review: PendingReviewItem) => void;
-  initialTab?: 'overview' | 'architecture' | 'implementation' | 'import' | 'bindings';
+  initialTab?: 'overview' | 'architecture' | 'implementation' | 'import' | 'bindings' | 'divergence';
   onOpenImportReview?: () => void;
   bindingReviews?: BindingReviewRecord[];
   onAcceptBinding?: (nodeId: string, candidateId: string) => void | Promise<void>;
+  divergenceReport?: DivergenceReport | null;
+  onRefreshDivergence?: () => void;
 }
 
 export const ReviewPanel: React.FC<ReviewPanelProps> = ({
@@ -307,9 +311,11 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
   onOpenImportReview,
   bindingReviews = [],
   onAcceptBinding,
+  divergenceReport,
+  onRefreshDivergence,
 }) => {
   const [internalActiveId, setInternalActiveId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'architecture' | 'implementation' | 'import' | 'bindings'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'overview' | 'architecture' | 'implementation' | 'import' | 'bindings' | 'divergence'>(initialTab);
   const [reviewSection, setReviewSection] = useState<'spec' | 'code' | 'diagnostics'>('spec');
 
   const selectedId = activeReviewId !== undefined ? activeReviewId : internalActiveId;
@@ -498,6 +504,18 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
         >
           <LinkIcon size={13} />
           <span>{`Bindings (${bindingReviews.length})`}</span>
+        </button>
+        <button
+          type="button"
+          className={`review-tab-btn ${activeTab === 'divergence' ? 'active' : ''}`}
+          onClick={() => {
+            setActiveTab('divergence');
+            handleSelectReviewItem(null);
+          }}
+          data-testid="tab-divergence"
+        >
+          <Layers size={13} />
+          <span>{`Divergence (${divergenceReport?.summary.totalDrift ?? 0})`}</span>
         </button>
       </div>
 
@@ -1084,9 +1102,55 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
               </div>
             )}
 
+            {/* TAB: DIVERGENCE (T062) */}
+            {activeTab === 'divergence' && (
+              <div className="review-divergence-container" data-testid="review-divergence-container">
+                <DivergencePanel
+                  report={divergenceReport}
+                  project={project}
+                  onRefresh={onRefreshDivergence}
+                />
+              </div>
+            )}
+
             {/* Standard Overview Cards (Preserving all existing T016 & T026 contract tests) */}
             {activeTab === 'overview' && (
               <>
+                {divergenceReport && divergenceReport.summary.totalDrift > 0 && (
+                  <div
+                    className={`review-card overview-divergence-banner ${
+                      divergenceReport.summary.hasBlockingViolations
+                        ? 'border-red-500/50 bg-red-500/5 text-red-400'
+                        : 'border-blue-500/30 bg-blue-500/5'
+                    }`}
+                    data-testid="overview-divergence-banner"
+                  >
+                    <div className="review-card-header flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        {divergenceReport.summary.hasBlockingViolations ? (
+                          <ShieldAlert size={14} className="text-red-500" />
+                        ) : (
+                          <Layers size={14} className="text-blue-400" />
+                        )}
+                        <span className="font-semibold">Architecture & Protection Divergence</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground font-medium"
+                        onClick={() => setActiveTab('divergence')}
+                        data-testid="btn-overview-open-divergence"
+                      >
+                        {`View Details (${divergenceReport.summary.totalDrift})`}
+                      </button>
+                    </div>
+                    <p className="text-xs text-muted mt-1 leading-relaxed">
+                      {divergenceReport.summary.hasBlockingViolations
+                        ? `${divergenceReport.summary.protectionViolations} blocking protection violation(s) detected. External edits to frozen code raise violations without resetting the protected baseline.`
+                        : `${divergenceReport.summary.totalDrift} structural drift item(s) detected between intended architecture and implemented code.`}
+                    </p>
+                  </div>
+                )}
+
                 <div className="review-card">
                   <div className="review-card-header">
                     <Clock size={14} />

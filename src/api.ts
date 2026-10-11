@@ -9,8 +9,9 @@ import type {
   AnalysisResponse,
   AcceptBindingRequest,
   BindingReviewsResponse,
+  DivergenceReportResponse,
 } from '../shared/api';
-import type { Graph, Layout, Project, Analysis, ProgramNode, BindingReviewRecord } from '../shared/model';
+import type { Graph, Layout, Project, Analysis, ProgramNode, BindingReviewRecord, DivergenceReport } from '../shared/model';
 
 export class ApiConnectionError extends Error {
   public actionableSteps: string[];
@@ -339,4 +340,11 @@ export async function acceptBinding(
     method: 'POST',
     body: JSON.stringify(requestData),
   }, baseUrl);
+}
+
+export async function getDivergenceReport(
+  id: string,
+  baseUrl?: string
+): Promise<DivergenceReportResponse> {
+  return request<DivergenceReportResponse>(`/projects/${id}/divergence`, { method: 'GET' }, baseUrl);
 }

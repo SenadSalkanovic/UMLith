@@ -12,7 +12,7 @@ import { generateImportQualityReport, type ImportQualityReport } from './analyze
 import { randomUUID } from 'node:crypto';
 import { SyncService, type SyncServiceOptions } from './sync';
 import { AnalysisSchema, emptyGraph, createGraphUpdate, type Analysis } from '../shared/model';
-import { reconcileSourceBindings, acceptBindingCandidate } from './review';
+import { reconcileSourceBindings, acceptBindingCandidate, computeDivergenceReport } from './review';
 import {
   CreateProjectRequestSchema,
   UpdateSpecificationRequestSchema,
@@ -31,6 +31,8 @@ import {
   AcceptBindingRequestSchema,
   BindingReviewsResponseSchema,
   SseBindingReviewEventSchema,
+  DivergenceReportResponseSchema,
+  SseDivergenceEventSchema,
 } from '../shared/api';
 
 export const DEFAULT_ALLOWED_ORIGINS = [
@@ -909,6 +911,42 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   app.post('/api/projects/:id/bindings/accept', acceptBindingHandler);
   app.post('/api/projects/:id/binding/accept', acceptBindingHandler);
 
+  const getDivergenceHandler = async (request: any, reply: any) => {
+    const { id } = ProjectIdParamSchema.parse(request.params);
+    const p = await store.get(id);
+    let report = sync.getDivergenceReport(id);
+    if (!report) {
+      const activeAnalysis: Analysis = p.analysis ?? {
+        revision: '',
+        sequence: 0,
+        analyzedAt: new Date().toISOString(),
+        status: 'stale' as const,
+        graph: emptyGraph(),
+        files: {},
+        durationMs: 0,
+        staleEvidence: { scope: 'all' as const, paths: ['project'], reason: 'No analysis has run yet' },
+        quality: {
+          eligibleFiles: 0,
+          analyzedFiles: 0,
+          unresolvedReferences: 0,
+          unsupportedConstructs: 0,
+          inferredItems: 0,
+          prismaValidation: 'not-applicable' as const,
+          diagnostics: [],
+        },
+      };
+      report = computeDivergenceReport(p, activeAnalysis);
+    }
+    return reply.status(200).send({
+      success: true,
+      projectId: id,
+      report,
+    });
+  };
+
+  app.get('/api/projects/:id/divergence', getDivergenceHandler);
+  app.get('/api/projects/:id/drift', getDivergenceHandler);
+
   // Event streams (SSE)
   const createSseHandler = (forProject: boolean) => {
     return async (request: any, reply: any) => {
@@ -1093,6 +1131,15 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
             type: 'binding-review',
             projectId: targetProjectId,
             records: payload.records,
+            timestamp: new Date().toISOString(),
+          });
+        } else if (payload.type === 'divergence') {
+          const divergenceEventId = `${targetProjectId}:${payload.report?.revision ?? 'divergence'}:${payload.report?.sequence ?? Date.now()}`;
+          writeSseMessage('divergence', divergenceEventId, {
+            event: 'divergence',
+            type: 'divergence',
+            projectId: targetProjectId,
+            report: payload.report,
             timestamp: new Date().toISOString(),
           });
         } else if (payload.type === 'error') {

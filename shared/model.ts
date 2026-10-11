@@ -454,3 +454,77 @@ export function applyGraphUpdate(before:Pick<Analysis,'revision'|'sequence'|'gra
     requirements:merge(graph.requirements,update.delta.changedRequirements,update.delta.deletedRequirements),
   });
 }
+
+export const DivergenceKindSchema = z.enum([
+  'frozen-implementation-violation',
+  'frozen-contract-violation',
+  'unverified-contract',
+  'unresolved-protected-binding',
+  'ambiguous-protected-binding',
+  'contract-drift',
+  'added-node',
+  'missing-node',
+  'relationship-drift',
+  'implementation-drift',
+  'uncertain-intent',
+]);
+export type DivergenceKind = z.infer<typeof DivergenceKindSchema>;
+
+export const DivergenceCategorySchema = z.enum([
+  'protection-violation',
+  'structural-drift',
+  'uncertainty',
+]);
+export type DivergenceCategory = z.infer<typeof DivergenceCategorySchema>;
+
+export const DivergenceEvidenceSchema = z.object({
+  path: z.string(),
+  line: z.number().int().positive().optional(),
+  start: z.number().int().nonnegative().optional(),
+  end: z.number().int().nonnegative().optional(),
+  hash: z.string().optional(),
+  revision: z.string().optional(),
+  symbol: z.string().optional(),
+  expectedText: z.string().optional(),
+  actualText: z.string().optional(),
+  expectedContract: z.string().optional(),
+  actualContract: z.string().optional(),
+  snippet: z.string().optional(),
+}).strict();
+export type DivergenceEvidence = z.infer<typeof DivergenceEvidenceSchema>;
+
+export const DivergenceItemSchema = z.object({
+  id: z.string(),
+  nodeId: z.string().optional(),
+  nodeName: z.string().optional(),
+  nodeKind: z.enum(nodeKinds).optional(),
+  policy: z.enum(policies).optional(),
+  kind: DivergenceKindSchema,
+  category: DivergenceCategorySchema,
+  isDeterministicDefect: z.boolean(),
+  message: z.string(),
+  details: z.string().optional(),
+  evidence: DivergenceEvidenceSchema.optional(),
+  timestamp: z.string().optional(),
+}).strict();
+export type DivergenceItem = z.infer<typeof DivergenceItemSchema>;
+
+export const DivergenceSummarySchema = z.object({
+  totalDrift: z.number().int().nonnegative(),
+  protectionViolations: z.number().int().nonnegative(),
+  structuralDriftCount: z.number().int().nonnegative(),
+  uncertainCount: z.number().int().nonnegative(),
+  hasBlockingViolations: z.boolean(),
+}).strict();
+export type DivergenceSummary = z.infer<typeof DivergenceSummarySchema>;
+
+export const DivergenceReportSchema = z.object({
+  projectId: z.string().optional(),
+  revision: z.string(),
+  sequence: z.number().int().nonnegative(),
+  analyzedAt: z.string(),
+  status: AnalysisStatusSchema,
+  items: z.array(DivergenceItemSchema),
+  summary: DivergenceSummarySchema,
+}).strict();
+export type DivergenceReport = z.infer<typeof DivergenceReportSchema>;

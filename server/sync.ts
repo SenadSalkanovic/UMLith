@@ -1,12 +1,12 @@
 import {EventEmitter} from 'node:events';
 import chokidar,{type FSWatcher} from 'chokidar';
 import {basename,relative} from 'node:path';
-import type {Analysis,GraphUpdate,BindingReviewRecord,Diagnostic} from '../shared/model';
+import type {Analysis,GraphUpdate,BindingReviewRecord,Diagnostic,DivergenceReport} from '../shared/model';
 import {graphDelta,emptyGraph,GRAPH_SCHEMA_VERSION,AnalysisSchema,GraphUpdateSchema,createGraphUpdate} from '../shared/model';
 import {AnalysisWorker} from './worker';
 import {ProjectStore} from './store';
 import {captureFiles,hashes,isPathExcluded} from './files';
-import {reconcileGraphIdentities,reconcileSourceBindings} from './review';
+import {reconcileGraphIdentities,reconcileSourceBindings,computeDivergenceReport} from './review';
 
 export interface SyncServiceOptions {
  watch?: boolean;
@@ -123,6 +123,7 @@ type Session = {
  startTimeout?: ReturnType<typeof setTimeout>;
  closed: boolean;
  bindingReviews?: BindingReviewRecord[];
+ divergenceReport?: DivergenceReport;
  eventDeliveryDisabled?: boolean;
 };
 
@@ -134,6 +135,10 @@ export class SyncService extends EventEmitter {
 
  getBindingReviews(id: string): BindingReviewRecord[] {
   return this.sessions.get(id)?.bindingReviews ?? [];
+ }
+
+ getDivergenceReport(id: string): DivergenceReport | undefined {
+  return this.sessions.get(id)?.divergenceReport;
  }
 
  getDebounceMs(): number {
@@ -547,6 +552,15 @@ export class SyncService extends EventEmitter {
     };
     this.emit('status', id, staleStatusEvent);
     this.emit('notification', id, staleStatusEvent);
+
+    const staleDivergence = computeDivergenceReport(p, stale);
+    session.divergenceReport = staleDivergence;
+    this.emit('divergence', id, staleDivergence);
+    this.emit('notification', id, {
+     type: 'divergence',
+     projectId: id,
+     report: staleDivergence,
+    });
     return;
    }
 
@@ -571,6 +585,10 @@ export class SyncService extends EventEmitter {
    // Produce explicit binding review records for human specification nodes
    const bindingReviews = reconcileSourceBindings(latestP.specification, result, currentBefore);
    session.bindingReviews = bindingReviews;
+
+   // Compute continuous divergence report between intended architecture and implemented code
+   const divergenceReport = computeDivergenceReport(latestP, result);
+   session.divergenceReport = divergenceReport;
 
    const update = createGraphUpdate(currentBefore, result, id);
 
@@ -619,6 +637,13 @@ export class SyncService extends EventEmitter {
      records: bindingReviews,
     });
    }
+
+   this.emit('divergence', id, divergenceReport);
+   this.emit('notification', id, {
+    type: 'divergence',
+    projectId: id,
+    report: divergenceReport,
+   });
 
    const isIncompleteRevision = result.quality.diagnostics.some(d => d.code === 'incomplete-revision');
    if (isIncompleteRevision && !session.closed && !session.debounce) {

@@ -3,7 +3,7 @@ import {createTwoFilesPatch} from 'diff';
 import {readFile,writeFile,mkdir,rename,rm,readdir} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {NodeSchema,GraphSchema,resolveSourceEvidence,sourceIdentityKey,type Project,type ProgramNode,type Analysis,type AgentJob,type ValidationReport,type ValidationIssue,type FileChange,type BindingReviewRecord,type BindingCandidate,type Source,type Graph} from '../shared/model';
+import {NodeSchema,GraphSchema,resolveSourceEvidence,sourceIdentityKey,DivergenceReportSchema,type Project,type ProgramNode,type Analysis,type AgentJob,type ValidationReport,type ValidationIssue,type FileChange,type BindingReviewRecord,type BindingCandidate,type Source,type Graph,type DivergenceReport,type DivergenceItem,type DivergenceEvidence} from '../shared/model';
 import {Analyzer,reconcileGraphIdentities,type ReconcileGraphResult} from './analyzer';
 import {AppError,atomicJson,captureFiles,hashes,hash,safePath} from './files';
 import {ProjectStore} from './store';
@@ -564,6 +564,400 @@ export function protectionIssues(project:Project,analysis:Analysis):ValidationIs
   }
  }
  return issues;
+}
+
+export function computeDivergenceReport(project: Project, analysis: Analysis): DivergenceReport {
+  const items: DivergenceItem[] = [];
+  const reviews = reconcileSourceBindings(project.specification, analysis);
+  const reviewMap = new Map(reviews.map(r => [r.nodeId, r]));
+
+  // 1. Process specification nodes against implemented analysis
+  for (const node of project.specification.nodes) {
+    if (node.kind === 'system' || node.kind === 'step') continue;
+    const review = reviewMap.get(node.id) || resolveBindingRecord(node, analysis);
+
+    // Protected nodes: check deterministic frozen boundary violations
+    if (node.policy === 'frozen-implementation' || node.policy === 'frozen-contract') {
+      if (review.status === 'ambiguous') {
+        items.push({
+          id: `divergence-ambiguous-${node.id}`,
+          nodeId: node.id,
+          nodeName: node.name,
+          nodeKind: node.kind,
+          policy: node.policy,
+          kind: 'ambiguous-protected-binding',
+          category: 'protection-violation',
+          isDeterministicDefect: true,
+          message: `Protected item has ambiguous binding: ${node.name} (${review.candidates.length} candidates)`,
+          details: `Multiple candidate declarations match this protected symbol. Explicit binding review is required before verification.`,
+          evidence: node.source ? {
+            path: node.source.path,
+            line: node.source.line,
+            start: node.source.start,
+            end: node.source.end,
+            hash: node.source.hash,
+            revision: node.source.revision,
+            symbol: node.source.symbol,
+          } : undefined,
+          timestamp: analysis.analyzedAt,
+        });
+        continue;
+      }
+
+      if (review.status === 'unresolved') {
+        items.push({
+          id: `divergence-unresolved-${node.id}`,
+          nodeId: node.id,
+          nodeName: node.name,
+          nodeKind: node.kind,
+          policy: node.policy,
+          kind: 'unresolved-protected-binding',
+          category: 'protection-violation',
+          isDeterministicDefect: true,
+          message: `Protected item cannot be resolved in source: ${node.name}`,
+          details: `The declaration was not found in analyzed source files. Protected boundary cannot be verified.`,
+          evidence: node.source ? {
+            path: node.source.path,
+            line: node.source.line,
+            start: node.source.start,
+            end: node.source.end,
+            hash: node.source.hash,
+            revision: node.source.revision,
+            symbol: node.source.symbol,
+          } : undefined,
+          timestamp: analysis.analyzedAt,
+        });
+        continue;
+      }
+
+      const actual = review.selectedCandidate ? analysis.graph.nodes.find(n => n.id === review.selectedCandidate?.id) : undefined;
+      if (!actual?.source) {
+        items.push({
+          id: `divergence-unresolved-${node.id}`,
+          nodeId: node.id,
+          nodeName: node.name,
+          nodeKind: node.kind,
+          policy: node.policy,
+          kind: 'unresolved-protected-binding',
+          category: 'protection-violation',
+          isDeterministicDefect: true,
+          message: `Protected item cannot be resolved in source: ${node.name}`,
+          details: `No bound source declaration found for protected item.`,
+          evidence: node.source ? {
+            path: node.source.path,
+            line: node.source.line,
+            hash: node.source.hash,
+            revision: node.source.revision,
+          } : undefined,
+          timestamp: analysis.analyzedAt,
+        });
+        continue;
+      }
+
+      const evidence = resolveSourceEvidence(actual.source, analysis, analysis.revision);
+      if (evidence.status !== 'current') {
+        items.push({
+          id: `divergence-stale-evidence-${node.id}`,
+          nodeId: node.id,
+          nodeName: node.name,
+          nodeKind: node.kind,
+          policy: node.policy,
+          kind: 'unresolved-protected-binding',
+          category: 'protection-violation',
+          isDeterministicDefect: true,
+          message: `Protected source evidence is ${evidence.status}: ${'message' in evidence ? evidence.message : node.name}`,
+          details: `Captured evidence is ${evidence.status}.`,
+          evidence: {
+            path: actual.source.path,
+            line: actual.source.line,
+            hash: actual.source.hash,
+            revision: actual.source.revision,
+            symbol: actual.source.symbol,
+          },
+          timestamp: analysis.analyzedAt,
+        });
+        continue;
+      }
+
+      if (node.policy === 'frozen-implementation') {
+        if (node.baseline?.text === undefined) {
+          items.push({
+            id: `divergence-missing-baseline-${node.id}`,
+            nodeId: node.id,
+            nodeName: node.name,
+            nodeKind: node.kind,
+            policy: node.policy,
+            kind: 'frozen-implementation-violation',
+            category: 'protection-violation',
+            isDeterministicDefect: true,
+            message: `Missing implementation baseline for '${node.name}'`,
+            details: `Frozen implementation requires an exact text baseline.`,
+            evidence: {
+              path: actual.source.path,
+              line: actual.source.line,
+              hash: actual.source.hash,
+              revision: actual.source.revision,
+              symbol: actual.source.symbol,
+            },
+            timestamp: analysis.analyzedAt,
+          });
+        } else if (evidence.text !== node.baseline.text) {
+          items.push({
+            id: `divergence-frozen-impl-${node.id}`,
+            nodeId: node.id,
+            nodeName: node.name,
+            nodeKind: node.kind,
+            policy: node.policy,
+            kind: 'frozen-implementation-violation',
+            category: 'protection-violation',
+            isDeterministicDefect: true,
+            message: `Frozen implementation changed for '${node.name}'`,
+            details: `External edit modified source code inside frozen implementation boundary without authorization. Protected baseline remains intact.`,
+            evidence: {
+              path: actual.source.path,
+              line: actual.source.line,
+              start: actual.source.start,
+              end: actual.source.end,
+              hash: actual.source.hash,
+              revision: actual.source.revision,
+              symbol: actual.source.symbol,
+              expectedText: node.baseline.text,
+              actualText: evidence.text,
+              snippet: evidence.text.slice(0, 300),
+            },
+            timestamp: analysis.analyzedAt,
+          });
+        }
+      } else if (node.policy === 'frozen-contract') {
+        const expectedContract = node.baseline?.contract || node.contract;
+        if (!expectedContract || normalizeContract(actual.contract) !== normalizeContract(expectedContract)) {
+          items.push({
+            id: `divergence-frozen-contract-${node.id}`,
+            nodeId: node.id,
+            nodeName: node.name,
+            nodeKind: node.kind,
+            policy: node.policy,
+            kind: 'frozen-contract-violation',
+            category: 'protection-violation',
+            isDeterministicDefect: true,
+            message: `Frozen interface contract changed for '${node.name}'`,
+            details: `External edit modified declared contract of a frozen boundary. Protected baseline remains intact.`,
+            evidence: {
+              path: actual.source.path,
+              line: actual.source.line,
+              start: actual.source.start,
+              end: actual.source.end,
+              hash: actual.source.hash,
+              revision: actual.source.revision,
+              symbol: actual.source.symbol,
+              expectedContract,
+              actualContract: actual.contract,
+              snippet: actual.contract,
+            },
+            timestamp: analysis.analyzedAt,
+          });
+        }
+        if (analysis.quality.diagnostics.some(d => d.severity === 'error' && (!d.path || d.path === actual.source?.path))) {
+          items.push({
+            id: `divergence-unverified-contract-${node.id}`,
+            nodeId: node.id,
+            nodeName: node.name,
+            nodeKind: node.kind,
+            policy: node.policy,
+            kind: 'unverified-contract',
+            category: 'protection-violation',
+            isDeterministicDefect: true,
+            message: `Compiler/schema errors prevent verifying protected interface for '${node.name}'`,
+            details: `Diagnostics exist in source file preventing contract verification.`,
+            evidence: {
+              path: actual.source.path,
+              line: actual.source.line,
+              symbol: actual.source.symbol,
+            },
+            timestamp: analysis.analyzedAt,
+          });
+        }
+      }
+    } else {
+      // Editable or sensitive node: structural drift (not a deterministic defect)
+      if (review.status === 'unresolved') {
+        items.push({
+          id: `divergence-missing-${node.id}`,
+          nodeId: node.id,
+          nodeName: node.name,
+          nodeKind: node.kind,
+          policy: node.policy,
+          kind: 'missing-node',
+          category: 'structural-drift',
+          isDeterministicDefect: false,
+          message: `Intended specification item '${node.name}' is not present in implemented code`,
+          details: `Item declared in specification does not exist in analyzed source files. Business intent is pending implementation or was removed; not a deterministic code defect.`,
+          evidence: node.source ? {
+            path: node.source.path,
+            line: node.source.line,
+            start: node.source.start,
+            end: node.source.end,
+            hash: node.source.hash,
+            revision: node.source.revision,
+            symbol: node.source.symbol,
+          } : undefined,
+          timestamp: analysis.analyzedAt,
+        });
+      } else if (review.selectedCandidate) {
+        const actual = analysis.graph.nodes.find(n => n.id === review.selectedCandidate?.id);
+        if (actual) {
+          if (node.contract.trim() && actual.contract.trim() && normalizeContract(node.contract) !== normalizeContract(actual.contract)) {
+            items.push({
+              id: `divergence-contract-${node.id}`,
+              nodeId: node.id,
+              nodeName: node.name,
+              nodeKind: node.kind,
+              policy: node.policy,
+              kind: 'contract-drift',
+              category: 'structural-drift',
+              isDeterministicDefect: false,
+              message: `Implemented contract for '${node.name}' drifted from intended specification`,
+              details: `Source code declaration differs from human specification contract. Intended: "${node.contract.trim()}", Implemented: "${actual.contract.trim()}". Human review can adopt or align.`,
+              evidence: {
+                path: actual.source?.path || node.source?.path || '',
+                line: actual.source?.line,
+                start: actual.source?.start,
+                end: actual.source?.end,
+                hash: actual.source?.hash,
+                revision: actual.source?.revision,
+                symbol: actual.source?.symbol,
+                expectedContract: node.contract,
+                actualContract: actual.contract,
+                snippet: actual.contract,
+              },
+              timestamp: analysis.analyzedAt,
+            });
+          } else if (node.source && actual.source && node.source.hash !== actual.source.hash) {
+            const evidenceText = extractEvidenceText(actual.source, analysis.files);
+            items.push({
+              id: `divergence-impl-${node.id}`,
+              nodeId: node.id,
+              nodeName: node.name,
+              nodeKind: node.kind,
+              policy: node.policy,
+              kind: 'implementation-drift',
+              category: 'structural-drift',
+              isDeterministicDefect: false,
+              message: `Implementation updated in source for editable '${node.name}'`,
+              details: `External source changes were detected. The intended contract and architecture remain aligned. Unknown business intent is retained without defect.`,
+              evidence: {
+                path: actual.source.path,
+                line: actual.source.line,
+                start: actual.source.start,
+                end: actual.source.end,
+                hash: actual.source.hash,
+                revision: actual.source.revision,
+                symbol: actual.source.symbol,
+                actualContract: actual.contract,
+                snippet: evidenceText ? evidenceText.slice(0, 300) : actual.contract,
+              },
+              timestamp: analysis.analyzedAt,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Discover newly added nodes in implemented code (not in specification)
+  for (const actualNode of analysis.graph.nodes) {
+    if (actualNode.kind === 'system' || actualNode.kind === 'step') continue;
+    const isMapped = project.specification.nodes.some(sn => {
+      const rev = reviewMap.get(sn.id);
+      return (
+        rev?.selectedCandidate?.id === actualNode.id ||
+        (sn.source && actualNode.source && sn.source.path === actualNode.source.path && sn.name === actualNode.name)
+      );
+    });
+    if (!isMapped) {
+      items.push({
+        id: `divergence-added-${actualNode.id}`,
+        nodeName: actualNode.name,
+        nodeKind: actualNode.kind,
+        kind: 'added-node',
+        category: 'structural-drift',
+        isDeterministicDefect: false,
+        message: `Implemented code '${actualNode.name}' (${actualNode.kind}) is not yet declared in architecture specification`,
+        details: `Newly analyzed code declaration found in ${actualNode.source?.path || 'source'}. Human review can adopt into intended architecture.`,
+        evidence: actualNode.source ? {
+          path: actualNode.source.path,
+          line: actualNode.source.line,
+          start: actualNode.source.start,
+          end: actualNode.source.end,
+          hash: actualNode.source.hash,
+          revision: actualNode.source.revision,
+          symbol: actualNode.source.symbol,
+          actualContract: actualNode.contract,
+          snippet: actualNode.contract || extractEvidenceText(actualNode.source, analysis.files),
+        } : undefined,
+        timestamp: analysis.analyzedAt,
+      });
+    }
+  }
+
+  // 3. Check uncertain relationships and quality indicators (R39)
+  for (const edge of analysis.graph.edges) {
+    if (edge.uncertain) {
+      items.push({
+        id: `divergence-uncertain-edge-${edge.id}`,
+        kind: 'uncertain-intent',
+        category: 'uncertainty',
+        isDeterministicDefect: false,
+        message: `Inferred relationship (${edge.kind}) retains runtime uncertainty`,
+        details: `AI-inferred or dynamic relationship cannot be proved structurally. Tests and human review complement structural analysis.`,
+        timestamp: analysis.analyzedAt,
+      });
+    }
+  }
+
+  if (analysis.quality.unresolvedReferences > 0) {
+    items.push({
+      id: `divergence-unresolved-refs-${analysis.revision || 'init'}`,
+      kind: 'uncertain-intent',
+      category: 'uncertainty',
+      isDeterministicDefect: false,
+      message: `${analysis.quality.unresolvedReferences} call targets retain runtime uncertainty`,
+      details: `Static compiler analysis could not resolve all call targets. Tests and human review complement structural analysis; not a deterministic code defect.`,
+      timestamp: analysis.analyzedAt,
+    });
+  }
+
+  if (analysis.quality.unsupportedConstructs > 0) {
+    items.push({
+      id: `divergence-unsupported-constructs-${analysis.revision || 'init'}`,
+      kind: 'uncertain-intent',
+      category: 'uncertainty',
+      isDeterministicDefect: false,
+      message: `${analysis.quality.unsupportedConstructs} workflow blocks retain control-flow uncertainty`,
+      details: `Unsupported constructs remain visible as source-backed opaque nodes. Runtime behavior retains uncertainty.`,
+      timestamp: analysis.analyzedAt,
+    });
+  }
+
+  const protectionViolations = items.filter(i => i.category === 'protection-violation').length;
+  const structuralDriftCount = items.filter(i => i.category === 'structural-drift').length;
+  const uncertainCount = items.filter(i => i.category === 'uncertainty').length;
+
+  return DivergenceReportSchema.parse({
+    projectId: project.id,
+    revision: analysis.revision,
+    sequence: analysis.sequence,
+    analyzedAt: analysis.analyzedAt,
+    status: analysis.status,
+    items,
+    summary: {
+      totalDrift: items.length,
+      protectionViolations,
+      structuralDriftCount,
+      uncertainCount,
+      hasBlockingViolations: protectionViolations > 0,
+    },
+  });
 }
 export function inScope(path:string,scope:string[]){
  return scope.some(prefix=>prefix==='.'||path===prefix||(prefix.endsWith('/')&&path.startsWith(prefix)));

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import type { Project, Graph, Layout, BindingReviewRecord } from '../shared/model';
+import type { Project, Graph, Layout, BindingReviewRecord, DivergenceReport } from '../shared/model';
 import type { CreateProjectRequest, RevisionRecord } from '../shared/api';
 import type { ViewState, SpecificationState, AnalysisState, WorkspaceError, SyncStatus } from './types';
 import * as api from './api';
@@ -96,6 +96,7 @@ export const App: React.FC<AppProps> = ({
   });
 
   const [bindingReviews, setBindingReviews] = useState<BindingReviewRecord[]>([]);
+  const [divergenceReport, setDivergenceReport] = useState<DivergenceReport | null>(null);
 
   // 5. View State (UI-only, strictly decoupled from Spec and Analysis)
   const [viewState, setViewState] = useState<ViewState>({
@@ -148,6 +149,13 @@ export const App: React.FC<AppProps> = ({
         setBindingReviews(bRes.records || []);
       } catch {
         setBindingReviews([]);
+      }
+
+      try {
+        const dRes = await api.getDivergenceReport(proj.id, apiBaseUrl);
+        setDivergenceReport(dRes.report || null);
+      } catch {
+        setDivergenceReport(null);
       }
 
       // Reset selection, scope, historical view, and conflict state on project load
@@ -1057,6 +1065,7 @@ export const App: React.FC<AppProps> = ({
                 onOpenImportReview={() => setIsImportReviewOpen(true)}
                 bindingReviews={bindingReviews}
                 onAcceptBinding={handleAcceptBinding}
+                divergenceReport={divergenceReport}
               />
             </div>
           )}
