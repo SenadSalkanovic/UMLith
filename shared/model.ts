@@ -376,6 +376,72 @@ export const ProposalValidationReportSchema = z.object({
 }).strict();
 export type ProposalValidationReport = z.infer<typeof ProposalValidationReportSchema>;
 
+export const PropertyChangeSchema = z.object({
+  property: z.string(),
+  before: z.string().nullable(),
+  after: z.string().nullable(),
+}).strict();
+export type PropertyChange = z.infer<typeof PropertyChangeSchema>;
+
+export const NodeDiffEntrySchema = z.object({
+  nodeId: z.string(),
+  name: z.string(),
+  kind: z.enum(nodeKinds),
+  action: z.enum(['added', 'modified', 'deleted']),
+  policy: z.enum(policies),
+  previousPolicy: z.enum(policies).optional(),
+  isProtected: z.boolean(),
+  isSensitive: z.boolean(),
+  policyChanged: z.boolean(),
+  provenanceChanged: z.boolean(),
+  contractChanged: z.boolean(),
+  changes: z.array(PropertyChangeSchema),
+  explanation: z.string(),
+}).strict();
+export type NodeDiffEntry = z.infer<typeof NodeDiffEntrySchema>;
+
+export const EdgeDiffEntrySchema = z.object({
+  edgeId: z.string(),
+  action: z.enum(['added', 'modified', 'deleted']),
+  kind: z.string(),
+  sourceNodeName: z.string(),
+  targetNodeName: z.string(),
+  label: z.string().optional(),
+  isProtected: z.boolean(),
+  isSensitive: z.boolean(),
+  changes: z.array(PropertyChangeSchema),
+  explanation: z.string(),
+}).strict();
+export type EdgeDiffEntry = z.infer<typeof EdgeDiffEntrySchema>;
+
+export const RequirementDiffEntrySchema = z.object({
+  requirementId: z.string(),
+  action: z.enum(['added', 'modified', 'deleted']),
+  text: z.string(),
+  isProtected: z.boolean(),
+  isSensitive: z.boolean(),
+  changes: z.array(PropertyChangeSchema),
+  explanation: z.string(),
+}).strict();
+export type RequirementDiffEntry = z.infer<typeof RequirementDiffEntrySchema>;
+
+export const SpecificationDiffSchema = z.object({
+  nodes: z.array(NodeDiffEntrySchema),
+  edges: z.array(EdgeDiffEntrySchema),
+  requirements: z.array(RequirementDiffEntrySchema),
+  summary: z.object({
+    totalChanges: z.number().int().nonnegative(),
+    additions: z.number().int().nonnegative(),
+    modifications: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+    policyChanges: z.number().int().nonnegative(),
+    protectedItemChanges: z.number().int().nonnegative(),
+    sensitiveItemChanges: z.number().int().nonnegative(),
+  }).strict(),
+  explanation: z.string().optional(),
+}).strict();
+export type SpecificationDiff = z.infer<typeof SpecificationDiffSchema>;
+
 export function getProposalBaseRevision(proposal: DesignProposal): number | undefined {
   return proposal.baseRevision ?? proposal.intendedBaseRevision ?? proposal.specRevision;
 }

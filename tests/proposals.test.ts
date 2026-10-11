@@ -6,6 +6,8 @@ import {
   GRAPH_SCHEMA_VERSION,
   emptyGraph,
   DesignProposalSchema,
+  GraphSchema,
+  SpecificationDiffSchema,
   getProposalBaseRevision,
   type Graph,
   type DesignProposal,
@@ -16,7 +18,7 @@ import {
 import { ProjectStore } from '../server/store';
 import { SyncService } from '../server/sync';
 import { JobService } from '../server/jobs';
-import { validateProposal } from '../server/proposals';
+import { validateProposal, computeSpecificationDiff } from '../server/proposals';
 import { sandboxAvailable } from '../server/sandbox';
 
 describe('T065: Validate architecture, ER, and workflow proposal payloads', () => {
@@ -1433,5 +1435,176 @@ describe('T065: Validate architecture, ER, and workflow proposal payloads', () =
         await rm(dir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('T066: human-readable specification diffs', () => {
+  function fixture(): Graph {
+    return GraphSchema.parse({
+      nodes: [
+        { id: 'order', kind: 'function', name: 'placeOrder', contract: '(id: string): Order',
+          policy: 'frozen-contract', baseline: { contract: '(id: string): Order' },
+          source: { path: 'src/order.ts', symbol: 'placeOrder', start: 0, end: 30, line: 1, hash: 'hash-1', revision: 'rev-1' } },
+        { id: 'stock', kind: 'function', name: 'checkStock', policy: 'sensitive',
+          instructions: 'Review stock integrity', requiredChecks: ['stock-check'] },
+      ],
+      edges: [{ id: 'call', source: 'order', target: 'stock', kind: 'calls', label: 'check availability' }],
+      requirements: [{ id: 'req-order', text: 'Check stock before ordering', nodeIds: ['order'], edgeIds: ['call'],
+        constraints: ['No overselling'], scenarios: ['Reject out of stock orders'] }],
+    });
+  }
+
+  it('diffs a stable-ID rename, changed contract and requirement without mutating intent', () => {
+    const before = fixture();
+    const saved = structuredClone(before);
+    const after = structuredClone(before);
+    Object.assign(after.nodes[0], { name: 'submitOrder', contract: '(id: string, quantity: number): Order' });
+    after.requirements[0].text = 'Check stock and requested quantity before ordering';
+    after.requirements[0].scenarios.push('Reject excessive quantity');
+    const diff = computeSpecificationDiff(before, after, { explanation: 'AI suggests quantity validation' });
+    expect(SpecificationDiffSchema.safeParse(diff).success).toBe(true);
+    expect(diff.nodes).toHaveLength(1);
+    expect(diff.nodes[0]).toMatchObject({ nodeId: 'order', action: 'modified', isProtected: true, contractChanged: true });
+    expect(diff.nodes[0].changes).toEqual([
+      { property: 'name', before: 'placeOrder', after: 'submitOrder' },
+      { property: 'contract', before: '(id: string): Order', after: '(id: string, quantity: number): Order' },
+    ]);
+    expect(diff.requirements[0].changes).toEqual([
+      { property: 'text', before: 'Check stock before ordering', after: 'Check stock and requested quantity before ordering' },
+      { property: 'scenarios', before: '["Reject out of stock orders"]', after: '["Reject out of stock orders","Reject excessive quantity"]' },
+    ]);
+    expect(diff.nodes[0].explanation).toContain('contract');
+    expect(diff.explanation).toBe('AI suggests quantity validation');
+    expect(diff.summary.totalChanges).toBe(2);
+    expect(before).toEqual(saved);
+  });
+
+  it('ignores layout and graph collection ordering, but keeps semantic workflow and ER changes', () => {
+    const before = fixture();
+    const after = structuredClone(before);
+    after.nodes.reverse();
+    Object.assign(after.nodes[0], { x: 500, y: 200, width: 80, height: 40, position: { x: 500, y: 200 } });
+    const diff = computeSpecificationDiff(before, after, {
+      beforeLayout: { order: { x: 0, y: 0 } }, afterLayout: { order: { x: 100, y: -200 } },
+    });
+    expect(diff.nodes).toEqual([]);
+    expect(diff.edges).toEqual([]);
+    expect(diff.requirements).toEqual([]);
+    expect(diff.summary.totalChanges).toBe(0);
+    const graph = GraphSchema.parse({ nodes: [
+      { id: 'fn', kind: 'function', name: 'order' },
+      { id: 'step', kind: 'step', name: 'Validate', stepType: 'operation', parentId: 'fn' },
+      { id: 'entity', kind: 'entity', name: 'Order', fields: [{ name: 'quantity', type: 'Int' }] },
+    ], edges: [] });
+    const changed = structuredClone(graph);
+    changed.nodes[1].stepType = 'return';
+    changed.nodes[2].fields[0].optional = true;
+    expect(computeSpecificationDiff(graph, changed).nodes.map(n => n.changes.map(c => c.property))).toEqual([['stepType'], ['fields']]);
+  });
+
+  it('retains complete added and deleted details and highlights them in the summary', () => {
+    const before = fixture();
+    const after = GraphSchema.parse({ nodes: [{ id: 'new', kind: 'interface', name: 'OrderAPI',
+      contract: 'submit(): void', description: 'New entry point' }], edges: [],
+      requirements: [{ id: 'new-req', text: 'Submit an order', nodeIds: ['new'], scenarios: ['Submit succeeds'] }] });
+    const diff = computeSpecificationDiff(before, after);
+    expect(diff.summary).toMatchObject({ additions: 2, deletions: 4, totalChanges: 6, protectedItemChanges: 3, sensitiveItemChanges: 3 });
+    expect(diff.nodes.find(n => n.nodeId === 'order')?.changes).toContainEqual({ property: 'contract', before: '(id: string): Order', after: null });
+    expect(diff.nodes.find(n => n.nodeId === 'new')?.changes).toContainEqual({ property: 'description', before: null, after: 'New entry point' });
+    expect(diff.edges[0]).toMatchObject({ action: 'deleted', isProtected: true, isSensitive: true });
+    expect(diff.edges[0].changes).toContainEqual({ property: 'source', before: 'order', after: null });
+    expect(diff.requirements.find(r => r.requirementId === 'req-order')?.changes).toContainEqual({ property: 'constraints', before: '["No overselling"]', after: null });
+    expect(diff.requirements.find(r => r.requirementId === 'new-req')?.changes).toContainEqual({ property: 'scenarios', before: null, after: '["Submit succeeds"]' });
+    expect(diff.nodes.find(n => n.nodeId === 'order')?.explanation).toMatch(/Deleted.*PROTECTED/);
+  });
+
+  it('reports new relationships with their endpoints, provenance and protection highlights', () => {
+    const diff = computeSpecificationDiff(emptyGraph(), fixture());
+    expect(SpecificationDiffSchema.safeParse(diff).success).toBe(true);
+    expect(diff.summary).toMatchObject({ additions: 4, modifications: 0, deletions: 0 });
+    expect(diff.edges[0]).toMatchObject({ edgeId: 'call', action: 'added',
+      sourceNodeName: 'placeOrder', targetNodeName: 'checkStock', isProtected: true, isSensitive: true });
+    expect(diff.edges[0].changes).toContainEqual({ property: 'target', before: null, after: 'stock' });
+    expect(diff.edges[0].changes).toContainEqual({ property: 'provenance', before: null, after: 'human' });
+    expect(diff.nodes[0].changes.find(c => c.property === 'source')?.after).toContain('hash-1');
+  });
+
+  it.each(['editable', 'sensitive', 'frozen-implementation', 'frozen-contract'] as const)(
+    'highlights transition from %s even when removing protection', policy => {
+      const before = fixture();
+      before.nodes[0].policy = policy;
+      before.nodes[0].baseline = { contract: '(id: string): Order', text: 'function placeOrder() {}', source: before.nodes[0].source };
+      const after = structuredClone(before);
+      after.nodes[0].policy = policy === 'editable' ? 'sensitive' : 'editable';
+      const diff = computeSpecificationDiff(before, after);
+      expect(diff.summary.policyChanges).toBe(1);
+      expect(diff.nodes[0]).toMatchObject({ policyChanged: true, previousPolicy: policy,
+        isProtected: policy.startsWith('frozen'), isSensitive: policy === 'editable' || policy === 'sensitive' });
+      expect(diff.nodes[0].explanation).toContain('POLICY CHANGED');
+      if (policy.startsWith('frozen')) expect(diff.nodes[0].explanation).toContain('PROTECTED');
+      if (policy === 'sensitive') expect(diff.nodes[0].explanation).toContain('SENSITIVE');
+    },
+  );
+
+  it.each(['instructions', 'requiredChecks', 'baseline'] as const)('highlights policy configuration changes to %s', property => {
+    const before = fixture();
+    const after = structuredClone(before);
+    if (property === 'instructions') after.nodes[0].instructions = 'Require interface review';
+    if (property === 'requiredChecks') after.nodes[0].requiredChecks = ['interface-check'];
+    if (property === 'baseline') after.nodes[0].baseline!.contract = 'new baseline';
+    const diff = computeSpecificationDiff(before, after);
+    expect(diff.summary.policyChanges).toBe(1);
+    expect(diff.nodes[0].policyChanged).toBe(true);
+    expect(diff.nodes[0].explanation).toContain(property);
+  });
+
+  it('reports source evidence and provenance separately from the AI explanation', () => {
+    const before = fixture();
+    const after = structuredClone(before);
+    after.nodes[0].source!.hash = 'hash-2';
+    after.nodes[0].source!.revision = 'rev-2';
+    after.nodes[0].provenance = 'extracted';
+    after.edges[0].provenance = 'ai';
+    after.edges[0].uncertain = true;
+    const diff = computeSpecificationDiff(before, after, { explanation: 'AI interpretation, not source evidence' });
+    expect(diff.nodes[0].provenanceChanged).toBe(true);
+    expect(diff.nodes[0].changes.find(c => c.property === 'source')).toMatchObject({
+      before: expect.stringContaining('hash-1'), after: expect.stringContaining('hash-2'),
+    });
+    expect(diff.edges[0].changes).toContainEqual({ property: 'provenance', before: 'human', after: 'ai' });
+    expect(diff.edges[0].changes).toContainEqual({ property: 'uncertain', before: 'false', after: 'true' });
+    const evidenceOnly = structuredClone(before);
+    evidenceOnly.nodes[0].source!.start = 1;
+    expect(computeSpecificationDiff(before, evidenceOnly).nodes[0].provenanceChanged).toBe(true);
+  });
+
+  it('compares nested evidence by value, ignoring object key order', () => {
+    const before = fixture();
+    const after = structuredClone(before);
+    const source = after.nodes[0].source!;
+    after.nodes[0].source = { revision: source.revision, hash: source.hash, line: source.line,
+      end: source.end, start: source.start, symbol: source.symbol, path: source.path };
+    expect(computeSpecificationDiff(before, after).summary.totalChanges).toBe(0);
+  });
+
+  it('keeps unset and explicitly empty optional details distinct', () => {
+    const before = fixture();
+    const after = structuredClone(before);
+    after.nodes[0].inputs = '';
+    const diff = computeSpecificationDiff(before, after);
+    expect(diff.nodes[0].changes).toEqual([{ property: 'inputs', before: null, after: '' }]);
+  });
+
+  it('reports changed relationships and requirement bindings affecting protected items', () => {
+    const before = fixture();
+    const after = structuredClone(before);
+    Object.assign(after.edges[0], { source: 'stock', target: 'order', label: 'submit available stock' });
+    after.requirements[0].nodeIds = ['stock'];
+    const diff = computeSpecificationDiff(before, after);
+    expect(diff.edges[0]).toMatchObject({ action: 'modified', sourceNodeName: 'checkStock', targetNodeName: 'placeOrder', isProtected: true, isSensitive: true });
+    expect(diff.edges[0].changes).toContainEqual({ property: 'source', before: 'order', after: 'stock' });
+    expect(diff.requirements[0]).toMatchObject({ action: 'modified', isProtected: true, isSensitive: true });
+    expect(diff.requirements[0].changes).toContainEqual({ property: 'nodeIds', before: '["order"]', after: '["stock"]' });
+    expect(diff.summary).toMatchObject({ totalChanges: 2, protectedItemChanges: 2, sensitiveItemChanges: 2 });
   });
 });

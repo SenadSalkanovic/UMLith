@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
   GraphSchema,
   DesignProposalSchema,
@@ -5,9 +6,11 @@ import {
   type Project,
   type ProgramNode,
   type Graph,
+  type Layout,
   type DesignProposal,
   type ProposalDiagnostic,
   type ProposalValidationReport,
+  type SpecificationDiff,
 } from '../shared/model';
 import { inScope } from './review';
 
@@ -306,5 +309,119 @@ export function validateProposal(
     valid: errors.length === 0,
     diagnostics,
     proposal: errors.length === 0 ? proposal : undefined,
+  };
+}
+
+// Layout is stored independently; legacy inline geometry also carries no instructions.
+const LAYOUT_PROPERTIES = new Set(['x', 'y', 'width', 'height', 'position']);
+const POLICY_PROPERTIES = new Set(['policy', 'instructions', 'requiredChecks', 'baseline']);
+
+function displayValue(value: unknown): string | null {
+  if (value === undefined) return null;
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function diffItems<T extends { id: string }, R>(
+  before: T[], after: T[],
+  describe: (item: T, previous: T | undefined, next: T | undefined,
+    action: 'added' | 'modified' | 'deleted', changes: SpecificationDiff['nodes'][number]['changes']) => R,
+  ignored = new Set<string>(),
+): R[] {
+  const oldItems = new Map(before.map(item => [item.id, item]));
+  const newItems = new Map(after.map(item => [item.id, item]));
+  const entries: R[] = [];
+  for (const id of new Set([...oldItems.keys(), ...newItems.keys()])) {
+    const previous = oldItems.get(id), next = newItems.get(id);
+    const oldValues: Record<string, unknown> = previous ?? {};
+    const newValues: Record<string, unknown> = next ?? {};
+    const changes = [...new Set([...Object.keys(oldValues), ...Object.keys(newValues)])]
+      .filter(property => !ignored.has(property) && !isDeepStrictEqual(oldValues[property], newValues[property]))
+      .map(property => ({ property, before: displayValue(oldValues[property]), after: displayValue(newValues[property]) }));
+    if (!changes.length) continue;
+    const action = !previous ? 'added' : !next ? 'deleted' : 'modified';
+    entries.push(describe(next ?? previous!, previous, next, action, changes));
+  }
+  return entries;
+}
+
+function protectionFlags(nodes: (ProgramNode | undefined)[]) {
+  return {
+    isProtected: nodes.some(node => node?.policy === 'frozen-implementation' || node?.policy === 'frozen-contract'),
+    isSensitive: nodes.some(node => node?.policy === 'sensitive'),
+  };
+}
+
+function explainChange(action: 'added' | 'modified' | 'deleted', item: string,
+  changes: SpecificationDiff['nodes'][number]['changes'], flags: ReturnType<typeof protectionFlags>): string {
+  const verb = { added: 'Added', modified: 'Modified', deleted: 'Deleted' }[action];
+  return `${verb} ${item}${flags.isProtected ? ' [PROTECTED]' : ''}${flags.isSensitive ? ' [SENSITIVE]' : ''}`
+    + ` — changed properties: ${changes.map(change => change.property).join(', ')}`;
+}
+
+/** Compare validated graphs by stable ID, preserving semantic details for human review. */
+export function computeSpecificationDiff(
+  before: Graph, after: Graph,
+  options?: { explanation?: string; beforeLayout?: Layout; afterLayout?: Layout },
+): SpecificationDiff {
+  const oldNodes = new Map(before.nodes.map(node => [node.id, node]));
+  const newNodes = new Map(after.nodes.map(node => [node.id, node]));
+  const oldEdges = new Map(before.edges.map(edge => [edge.id, edge]));
+  const newEdges = new Map(after.edges.map(edge => [edge.id, edge]));
+  const affectedNodes = (ids: string[]) => ids.flatMap(id => [oldNodes.get(id), newNodes.get(id)]);
+
+  const nodes = diffItems(before.nodes, after.nodes, (node, previous, next, action, changes) => {
+    const flags = protectionFlags([previous, next]);
+    const policyChanged = action === 'modified' && changes.some(change => POLICY_PROPERTIES.has(change.property));
+    const provenanceChanged = changes.some(change => change.property === 'provenance' || change.property === 'source');
+    const contractChanged = changes.some(change => change.property === 'contract');
+    const policyExplanation = policyChanged ? ` [POLICY CHANGED: ${previous!.policy} → ${node.policy}]` : '';
+    return {
+      nodeId: node.id, name: node.name, kind: node.kind, action, policy: node.policy,
+      previousPolicy: policyChanged ? previous!.policy : undefined,
+      ...flags, policyChanged, provenanceChanged, contractChanged, changes,
+      explanation: explainChange(action, `${node.kind} "${node.name}"`, changes, flags) + policyExplanation
+        + (contractChanged ? ' [CONTRACT CHANGED]' : '') + (provenanceChanged ? ' [PROVENANCE CHANGED]' : ''),
+    };
+  }, LAYOUT_PROPERTIES);
+
+  const edges = diffItems(before.edges, after.edges, (edge, previous, next, action, changes) => {
+    const flags = protectionFlags(affectedNodes([previous?.source, previous?.target, next?.source, next?.target]
+      .filter((id): id is string => id !== undefined)));
+    const nodeMap = action === 'deleted' ? oldNodes : newNodes;
+    const sourceNodeName = nodeMap.get(edge.source)?.name ?? edge.source;
+    const targetNodeName = nodeMap.get(edge.target)?.name ?? edge.target;
+    return {
+      edgeId: edge.id, action, kind: edge.kind, sourceNodeName, targetNodeName, label: edge.label,
+      ...flags, changes,
+      explanation: explainChange(action, `${edge.kind} relationship: ${sourceNodeName} → ${targetNodeName}`, changes, flags),
+    };
+  });
+
+  const requirements = diffItems(before.requirements, after.requirements, (requirement, previous, next, action, changes) => {
+    const ids = [...(previous?.nodeIds ?? []), ...(next?.nodeIds ?? [])];
+    for (const edgeId of [...(previous?.edgeIds ?? []), ...(next?.edgeIds ?? [])]) {
+      for (const edge of [oldEdges.get(edgeId), newEdges.get(edgeId)]) {
+        if (edge) ids.push(edge.source, edge.target);
+      }
+    }
+    const flags = protectionFlags(affectedNodes(ids));
+    return {
+      requirementId: requirement.id, action, text: requirement.text, ...flags, changes,
+      explanation: explainChange(action, `requirement "${requirement.id}": ${requirement.text}`, changes, flags),
+    };
+  });
+
+  const entries = [...nodes, ...edges, ...requirements];
+  return {
+    nodes, edges, requirements, explanation: options?.explanation,
+    summary: {
+      totalChanges: entries.length,
+      additions: entries.filter(entry => entry.action === 'added').length,
+      modifications: entries.filter(entry => entry.action === 'modified').length,
+      deletions: entries.filter(entry => entry.action === 'deleted').length,
+      policyChanges: nodes.filter(node => node.policyChanged).length,
+      protectedItemChanges: entries.filter(entry => entry.isProtected).length,
+      sensitiveItemChanges: entries.filter(entry => entry.isSensitive).length,
+    },
   };
 }
