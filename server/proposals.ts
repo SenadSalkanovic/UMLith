@@ -161,6 +161,7 @@ export function validateProposal(
           originalNode.policy !== proposedNode.policy ||
           originalNode.name !== proposedNode.name ||
           originalNode.kind !== proposedNode.kind ||
+          ['visibility','isStatic','isAbstract','signature','fields'].some(key=>!isDeepStrictEqual(originalNode[key as keyof ProgramNode],proposedNode[key as keyof ProgramNode])) ||
           JSON.stringify(originalNode.baseline) !== JSON.stringify(proposedNode.baseline) ||
           JSON.stringify(originalNode.source) !== JSON.stringify(proposedNode.source)
         ) {
@@ -363,6 +364,7 @@ export function computeSpecificationDiff(
   before: Graph, after: Graph,
   options?: { explanation?: string; beforeLayout?: Layout; afterLayout?: Layout },
 ): SpecificationDiff {
+  before=GraphSchema.parse(before);after=GraphSchema.parse(after);
   const oldNodes = new Map(before.nodes.map(node => [node.id, node]));
   const newNodes = new Map(after.nodes.map(node => [node.id, node]));
   const oldEdges = new Map(before.edges.map(edge => [edge.id, edge]));

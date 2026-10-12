@@ -1014,6 +1014,27 @@ export async function validateCandidate(project:Project,job:AgentJob,options?:Pi
     }
    }
   }
+
+  // The analyzer cannot prove object-lifetime or UML metadata it did not extract.
+  for(const node of project.specification.nodes){
+   const actual=mapped.get(node.id);
+   for(const key of ['visibility','isStatic','isAbstract','signature'] as const){
+    if(node[key]===undefined)continue;
+    if(!actual || actual[key]===undefined)issues.push({code:'unverified-intent',message:'Unknown '+key+' evidence for '+node.name,nodeId:node.id});
+    else if(!isDeepStrictEqual(node[key],actual[key]))issues.push({code:'specification',message:'Declared '+key+' differs: '+node.name,nodeId:node.id});
+   }
+   for(const field of node.fields){
+    const observed=actual?.fields.find(value=>value.name===field.name);
+    for(const key of ['visibility','isStatic'] as const)if(field[key]!==undefined && !isDeepStrictEqual(field[key],observed?.[key]))issues.push({code:observed?.[key]===undefined?'unverified-intent':'specification',message:'Unknown or differing '+key+' evidence for '+node.name+'.'+field.name,nodeId:node.id});
+   }
+  }
+  for(const edge of project.specification.edges){
+   if(!['associates-with','aggregates','composes','relates-to','inherits','implements'].includes(edge.kind))continue;
+   const source=mapped.get(edge.source),target=mapped.get(edge.target);
+   const observed=candidate.graph.edges.find(value=>value.source===source?.id && value.target===target?.id && value.kind===edge.kind && !value.uncertain);
+   if(!observed){issues.push({code:'unverified-intent',message:'Unknown '+edge.kind+' evidence for '+edge.id,nodeId:edge.source});continue;}
+   for(const key of ['sourceEndpoint','targetEndpoint','sourceFields','targetFields'] as const)if(edge[key]!==undefined && !isDeepStrictEqual(edge[key],observed[key]))issues.push({code:observed[key]===undefined?'unverified-intent':'specification',message:'Unknown or differing '+key+' evidence for '+edge.id,nodeId:edge.source});
+  }
   for(const kind of ['depends-on','calls'] as const){
    const declared=project.specification.edges.filter(e=>e.kind===kind);
    const constrained=new Set(declared.map(e=>e.source));

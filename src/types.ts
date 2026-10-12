@@ -3,6 +3,11 @@ import type { Graph, ProgramNode, ProgramEdge, Project, Analysis, Layout } from 
 export type SyncStatus = 'updating' | 'current' | 'partial' | 'stale';
 
 export interface ViewState {
+  workspace?: 'design' | 'build';
+  designView?: 'overview' | 'classes' | 'database';
+  detailTab?: 'description' | 'flowchart' | 'rules';
+  flowchartId?: string | null;
+  selectedField?: string | null;
   selectedId: string | null;
   selectedType: 'node' | 'edge' | 'project' | null;
   activeScope: string | null; // null represents root/global scope, otherwise node.id of container

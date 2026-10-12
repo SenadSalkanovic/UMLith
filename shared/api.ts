@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   GraphSchema,
+  GraphVersionSchema,
   LayoutSchema,
   ScopedLayoutsSchema,
   AnalysisSchema,
@@ -38,6 +39,7 @@ export const UpdateSpecificationRequestSchema = z.object({
   expectedRevision: z.number().int().nonnegative().optional(),
   expected: z.number().int().nonnegative().optional(),
   graph: z.unknown(),
+  projectDescription:z.string().optional(),
 }).superRefine((data, ctx) => {
   if (data.expectedRevision === undefined && data.expected === undefined) {
     ctx.addIssue({
@@ -58,10 +60,12 @@ export const UpdateSpecificationRequestSchema = z.object({
 }).transform(data => ({
   expectedRevision: (data.expectedRevision ?? data.expected)!,
   graph: GraphSchema.parse(data.graph),
+  projectDescription:data.projectDescription,
 }));
 export type UpdateSpecificationRequest = {
   expectedRevision: number;
   graph: Graph;
+  projectDescription?:string;
 };
 
 export const UpdateLayoutRequestSchema = z.union([
@@ -261,7 +265,7 @@ export const SseDeltaEventSchema = z.object({
   event: z.literal('delta').optional(),
   type: z.literal('analysis').optional(),
   projectId: z.string(),
-  schemaVersion: z.literal(1),
+  schemaVersion: GraphVersionSchema,
   revision: z.string(),
   baseRevision: z.string().nullable(),
   sequence: z.number().int().nonnegative(),

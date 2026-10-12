@@ -5,6 +5,13 @@ import { AnalysisStatus } from './AnalysisStatus';
 import { Layers, PanelLeft, Layout, Sliders, FileCode, CheckSquare, Plus, FolderOpen, Database, Terminal, Workflow, History } from 'lucide-react';
 
 interface HeaderProps {
+  onEditNotes?: () => void;
+  onOpenExample?: () => void;
+  workspace?: 'design' | 'build';
+  onWorkspaceChange?: (workspace: 'design' | 'build') => void;
+  saveState?: string;
+  hasDraft?: boolean;
+  onPrepareHandoff?: () => void;
   project: Project | null;
   syncStatus: SyncStatus;
   analysis?: Analysis | null;
@@ -23,6 +30,7 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  onEditNotes, onOpenExample, workspace, onWorkspaceChange, saveState, hasDraft, onPrepareHandoff,
   project,
   syncStatus,
   analysis,
@@ -39,6 +47,32 @@ export const Header: React.FC<HeaderProps> = ({
   onRefreshAnalysis,
   onRescanAnalysis,
 }) => {
+  if (workspace) return <header className="workspace-header redesign-header" data-testid="workspace-header">
+    <strong className="brand-title">UMLITH</strong>
+    <details className="project-menu">
+      <summary>{project?.name || 'Project'}</summary>
+      <div className="project-menu-content">
+        <button disabled={hasDraft} onClick={onOpenProjectPicker} data-testid="header-open-project">Open project</button>
+        <button disabled={hasDraft} onClick={onOpenNewProject} data-testid="header-new-project">Create a design</button>
+        <button disabled={hasDraft} onClick={onOpenExample}>Open sensor example</button>
+        <button disabled={hasDraft} onClick={onEditNotes}>Project notes</button>
+        <button onClick={onOpenRevisionHistory} data-testid="header-open-history">History · r{project?.specRevision}</button>
+        <button disabled={hasDraft} onClick={onOpenImportReview} data-testid="header-open-import">Import &amp; adoption</button>
+        <details><summary>Advanced editors</summary>
+          <button disabled={hasDraft} onClick={onOpenArchitectureEditor} data-testid="header-open-architecture">Architecture &amp; protection</button>
+          <button disabled={hasDraft} onClick={onOpenErEditor} data-testid="header-open-er">Database schema</button>
+          <button disabled={hasDraft} onClick={onOpenFunctionEditor} data-testid="header-open-functions">Function contracts</button>
+          <button disabled={hasDraft} onClick={onOpenWorkflowEditor} data-testid="header-open-workflows">Workflow controls</button>
+        </details>
+      </div>
+    </details>
+    <nav className="workspace-destinations" aria-label="Workspace">
+      <button aria-current={workspace === 'design' ? 'page' : undefined} onClick={() => onWorkspaceChange?.('design')}>Design</button>
+      <button aria-current={workspace === 'build' ? 'page' : undefined} onClick={() => onWorkspaceChange?.('build')}>Build &amp; review</button>
+    </nav>
+    <span className={`save-state ${hasDraft ? 'unsaved' : ''}`} role="status">{saveState}</span>
+    <button className="btn btn-primary handoff-action" onClick={onPrepareHandoff} disabled={hasDraft} title={hasDraft ? 'Save or discard your changes in Details before preparing a handoff.' : 'Prepare the saved design for an AI'}>Prepare AI handoff</button>
+  </header>;
   return (
     <header className="workspace-header" data-testid="workspace-header">
       <div className="header-brand">

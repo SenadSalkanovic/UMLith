@@ -146,7 +146,7 @@ export const createJob = (id: string, task: AgentTaskRequest, baseUrl?: string) 
 export const decideJob = (id: string, jobId: string, action: 'cancel' | 'apply' | 'revalidate', baseUrl?: string) => request<AgentJob>(`/projects/${id}/jobs/${jobId}/${action}`, { method: 'POST', body: '{}' }, baseUrl);
 export const importResult = (id: string, result: unknown, baseUrl?: string) => request<AgentJob>(`/projects/${id}/results`, { method: 'POST', body: JSON.stringify(result) }, baseUrl);
 export const exportPackage = (id: string, task: string, scope: string[], baseUrl?: string) => request<Blob>(`/projects/${id}/export`, { method: 'POST', body: JSON.stringify({ task, scope }) }, baseUrl, true);
-export const getHandoff = (id: string, task: string, scope: string[], baseUrl?: string) => request<{ handoffId: string; specRevision: number; sourceHashes: Record<string, string> }>(`/projects/${id}/handoff?${new URLSearchParams({ task, scope: JSON.stringify(scope) })}`, {}, baseUrl);
+export const getHandoff = (id: string, task: string, scope: string[], baseUrl?: string) => request<import('../shared/export').PreparedHandoff>(`/projects/${id}/handoff?${new URLSearchParams({ task, scope: JSON.stringify(scope) })}`, {}, baseUrl);
 export const getRecovery = (id: string, retry = false, baseUrl?: string) => request<{ conflicts: string[] }>(`/projects/${id}/recovery`, retry ? { method: 'POST', body: '{}' } : {}, baseUrl);
 
 export async function checkHealth(baseUrl?: string): Promise<{ status: string }> {
@@ -208,11 +208,12 @@ export async function updateSpecification(
   id: string,
   expectedRevision: number,
   graph: Graph,
-  baseUrl?: string
+  baseUrl?: string,
+  projectDescription?:string
 ): Promise<Project> {
   return request<Project>(`/projects/${id}/specification`, {
     method: 'PUT',
-    body: JSON.stringify({ expectedRevision, graph }),
+    body: JSON.stringify({ expectedRevision, graph, projectDescription }),
   }, baseUrl);
 }
 
@@ -381,4 +382,12 @@ export async function getDivergenceReport(
   baseUrl?: string
 ): Promise<DivergenceReportResponse> {
   return request<DivergenceReportResponse>(`/projects/${id}/divergence`, { method: 'GET' }, baseUrl);
+}
+
+export const downloadHandoff = (id:string,handoffId:string,baseUrl?:string)=>request<Blob>(`/projects/${id}/handoffs/${handoffId}/download`,{},baseUrl,true);
+
+export const checkHandoffConnection=(id:string,handoffId:string,baseUrl?:string)=>request<{connected:boolean;client:string;transport:string;digest:string}>(`/projects/${id}/handoffs/${handoffId}/check`,{method:'POST',body:'{}'},baseUrl);
+
+export function renderDiagram(input: import('../shared/plantuml').DiagramRequest, baseUrl?: string, signal?: AbortSignal): Promise<{source:string;svg:string;renderer:string}> {
+  return request('/diagrams/plantuml', {method:'POST',body:JSON.stringify(input),signal}, baseUrl);
 }

@@ -51,6 +51,9 @@ export class JobService extends EventEmitter {
   const active=this.active.get(id);if(active?.job.projectId===projectId)return structuredClone(active.job);
   try{const job=JSON.parse(await readFile(join(this.store.projectDir(projectId),'jobs',id+'.json'),'utf8')) as AgentJob;
    if(job.id!==id||job.projectId!==projectId||!['implementation','design','import'].includes(job.kind)||!['preparing','running','review','failed','cancelled','applied'].includes(job.status)||resolve(job.workspace)!==resolve(this.store.projectDir(projectId),'runs',id,'source')||job.baseline&&resolve(job.baseline)!==resolve(this.store.projectDir(projectId),'runs',id,'baseline'))throw new AppError('Invalid persisted job record.',500);
+   if(job.preview)job.preview={...job.preview,graph:GraphSchema.parse(job.preview.graph)};
+   if(job.report?.candidate)job.report.candidate={...job.report.candidate,graph:GraphSchema.parse(job.report.candidate.graph)};
+   if(job.proposal)job.proposal={...job.proposal,graph:GraphSchema.parse(job.proposal.graph)};
    return job;
   }
   catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')throw new AppError('Job not found',404);throw error;}
@@ -111,7 +114,7 @@ export class JobService extends EventEmitter {
   if(latest.incomplete||fresh.specRevision!==job.specRevision||!isDeepStrictEqual({...latest.hashes},job.sourceHashes)||!isDeepStrictEqual({...fileModes(latest.files)},modes))throw new AppError('Source, permissions, or specification changed during snapshot preparation. Try again.',409);
   try{await access(join(p.root,'node_modules'));await symlink(join(p.root,'node_modules'),join(job.workspace,'node_modules'),'dir');}catch{}
   const bundle=join(job.workspace,'_architect');await mkdir(bundle,{recursive:true});
-  for(const [path,text]of Object.entries(bundleFiles(p,job.task,job.scope)))await writeFile(join(bundle,path),text,{mode:0o600});
+  for(const [path,text]of Object.entries(bundleFiles(p,job.task,job.scope))){const target=join(bundle,path);await mkdir(dirname(target),{recursive:true});await writeFile(target,text,{mode:0o600});}
   this.event(job,'Captured original source and separate writable candidate.','prepared');await this.persist(job);
   return bundle;
  }

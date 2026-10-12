@@ -1,6 +1,14 @@
 import { z } from 'zod';
 export const nodeKinds = ['system','module','class','interface','function','entity','enum','step'] as const;
-export const GRAPH_SCHEMA_VERSION = 1;
+export const GRAPH_SCHEMA_VERSION:number = 2;
+export const GraphVersionSchema=z.number().refine(value=>value===1 || value===GRAPH_SCHEMA_VERSION,{message:'Unsupported graph schema version; supported versions are 1 and 2'}).transform(()=>GRAPH_SCHEMA_VERSION);
+export const VisibilitySchema=z.enum(['public','private','protected','package']);
+export const SignatureSchema=z.object({parameters:z.array(z.object({name:z.string().refine(value=>!!value.trim()),type:z.string().optional(),optional:z.boolean().optional()}).strict()),returnType:z.string().optional()}).strict();
+export const EndpointSchema=z.object({role:z.string().optional(),multiplicity:z.string().refine(value=>{
+  if(value==='*')return true;
+  const match=/^(0|[1-9]\d*)(?:\.\.(0|[1-9]\d*|\*))?$/.exec(value);
+  return !!match && Number.isSafeInteger(Number(match[1])) && (match[2]===undefined || match[2]==='*' || (Number.isSafeInteger(Number(match[2])) && Number(match[1])<=Number(match[2])));
+},{message:'Multiplicity requires a nonnegative integer, *, or ascending range'}).optional(),navigable:z.boolean().optional()}).strict();
 export const policies = ['editable','sensitive','frozen-implementation','frozen-contract'] as const;
 export const ProvenanceSchema = z.enum(['human','extracted','ai']);
 export const SourceSchema = z.object({
@@ -10,6 +18,7 @@ export const SourceSchema = z.object({
   revision: z.string().refine(value=>!!value.trim()),
 }).refine(source=>source.end>=source.start,{path:['end'],message:'Source range ends before it starts'});
 export const NodeFieldSchema = z.object({
+  visibility:VisibilitySchema.optional(),isStatic:z.boolean().optional(),
   name: z.string(),
   type: z.string(),
   key: z.string().default(''),
@@ -27,6 +36,8 @@ export const KeyDefinitionSchema = z.object({
 });
 export type KeyDefinition = z.infer<typeof KeyDefinitionSchema>;
 export const NodeSchema = z.object({
+  visibility:VisibilitySchema.optional(),isStatic:z.boolean().optional(),isAbstract:z.boolean().optional(),
+  signature:SignatureSchema.optional(),moduleRole:z.enum(['ui','service','database','external']).optional(),
   id: z.string().min(1), kind: z.enum(nodeKinds), name: z.string().min(1),
   parentId: z.string().min(1).optional(), description: z.string().default(''),
   provenance: ProvenanceSchema.default('human'),
@@ -43,6 +54,9 @@ export const NodeSchema = z.object({
   compositeKeys: z.array(KeyDefinitionSchema).optional(),
   indexes: z.array(KeyDefinitionSchema).optional(),
 }).superRefine((node,ctx)=>{
+  if(node.signature && node.kind!=='function')ctx.addIssue({code:'custom',path:['signature'],message:'Only functions have structured signatures'});
+  if(node.moduleRole && node.kind!=='module')ctx.addIssue({code:'custom',path:['moduleRole'],message:'Only modules have module roles'});
+  if((node.visibility!==undefined || node.isStatic!==undefined || node.isAbstract!==undefined) && !['class','interface','function'].includes(node.kind))ctx.addIssue({code:'custom',path:['visibility'],message:'UML member metadata requires a class, interface or function'});
   if(node.policy==='frozen-implementation') {
     if(!node.source)ctx.addIssue({code:'custom',path:['source'],message:'Frozen implementation requires a source binding'});
     if(!node.baseline?.source)ctx.addIssue({code:'custom',path:['baseline','source'],message:'Frozen implementation requires captured source evidence'});
@@ -55,9 +69,11 @@ export const NodeSchema = z.object({
 });
 export const EdgeSchema = z.object({
   id:z.string().min(1), source:z.string().min(1), target:z.string().min(1),
-  kind:z.enum(['depends-on','calls','contains','inherits','implements','relates-to','next','true','false','exception','reads','writes']),
+  kind:z.enum(['depends-on','calls','contains','inherits','implements','relates-to','next','true','false','exception','reads','writes','associates-with','aggregates','composes']),
   label:z.string().default(''), provenance:ProvenanceSchema.default('human'),
   uncertain:z.boolean().optional(),
+  sourceEndpoint:EndpointSchema.optional(),targetEndpoint:EndpointSchema.optional(),
+  sourceFields:z.array(z.string().min(1)).min(1).optional(),targetFields:z.array(z.string().min(1)).min(1).optional(),
 }).transform(edge=>({...edge,uncertain:edge.uncertain??edge.provenance==='ai'}))
   .refine(edge=>edge.provenance!=='ai'||edge.uncertain,{path:['uncertain'],message:'AI-inferred relationships must remain uncertain'});
 export const RequirementSchema = z.object({
@@ -81,6 +97,8 @@ export function validRelationship(kind:ProgramEdge['kind'],source:ProgramNode['k
     case 'calls': return ['system','module','class','function','step'].includes(source) && ['function','class'].includes(target);
     case 'inherits': return (source==='class' && target==='class') || (source==='interface' && ['interface','class'].includes(target));
     case 'implements': return source==='class' && ['interface','class'].includes(target);
+    case 'associates-with': return ['class','interface','enum'].includes(source) && ['class','interface','enum'].includes(target);
+    case 'aggregates': case 'composes': return source==='class' && target==='class';
     case 'relates-to': return source==='entity' && target==='entity';
     case 'next': case 'true': case 'false': case 'exception': return source==='step' && target==='step';
     case 'reads': case 'writes': return ['function','step'].includes(source) && target==='entity';
@@ -88,7 +106,7 @@ export function validRelationship(kind:ProgramEdge['kind'],source:ProgramNode['k
 }
 export const GraphSchema = z.object({
   // Existing unversioned graphs are v1; an explicit version must match exactly.
-  schemaVersion:z.literal(GRAPH_SCHEMA_VERSION).default(GRAPH_SCHEMA_VERSION),
+  schemaVersion:GraphVersionSchema.prefault(1),
   nodes:z.array(NodeSchema), edges:z.array(EdgeSchema), requirements:z.array(RequirementSchema).default([]),
 }).superRefine((graph,ctx)=>{
   const nodes=new Map<string,ProgramNode>();
@@ -126,6 +144,22 @@ export const GraphSchema = z.object({
     if(source && target) {
       if(!validRelationship(e.kind,source.kind,target.kind)) ctx.addIssue({code:'custom',path:['edges',i,'kind'],message:'Invalid '+e.kind+' relationship: '+source.kind+' → '+target.kind});
       if(e.kind==='contains') contain(e.source,e.target);
+      if((e.sourceEndpoint || e.targetEndpoint) && !['associates-with','aggregates','composes','relates-to'].includes(e.kind))ctx.addIssue({code:'custom',path:['edges',i],message:'Endpoint semantics require a UML association or ER relationship'});
+      if((e.sourceEndpoint?.navigable!==undefined || e.targetEndpoint?.navigable!==undefined) && e.kind!=='associates-with')ctx.addIssue({code:'custom',path:['edges',i],message:'Navigability belongs to associations'});
+      if(e.sourceFields || e.targetFields) {
+        if(e.kind!=='relates-to')ctx.addIssue({code:'custom',path:['edges',i],message:'Field mappings require an ER relationship'});
+        if(!e.sourceFields || !e.targetFields || e.sourceFields.length!==e.targetFields.length)ctx.addIssue({code:'custom',path:['edges',i,'targetFields'],message:'Composite field mappings require matching source and target lengths'});
+        if(e.sourceFields && new Set(e.sourceFields).size!==e.sourceFields.length || e.targetFields && new Set(e.targetFields).size!==e.targetFields.length)ctx.addIssue({code:'custom',path:['edges',i],message:'Composite field mappings cannot repeat fields'});
+        e.sourceFields?.forEach((name,j)=>{
+          const from=source.fields.find(f=>f.name===name),to=target.fields.find(f=>f.name===e.targetFields?.[j]);
+          if(!from)ctx.addIssue({code:'custom',path:['edges',i,'sourceFields',j],message:'Missing source field: '+name});
+          if(!to)ctx.addIssue({code:'custom',path:['edges',i,'targetFields',j],message:'Missing target field: '+e.targetFields?.[j]});
+          if(from?.type.trim() && to?.type.trim() && from.type!==to.type)ctx.addIssue({code:'custom',path:['edges',i,'targetFields',j],message:'Incompatible ER field types: '+from.type+' → '+to.type});
+          if(from && ['1','1..1'].includes(e.targetEndpoint?.multiplicity??'') && from.optional)ctx.addIssue({code:'custom',path:['edges',i,'targetEndpoint'],message:'Optional foreign key contradicts required target multiplicity'});
+          if(from && e.targetEndpoint?.multiplicity==='0..1' && !from.optional)ctx.addIssue({code:'custom',path:['edges',i,'targetEndpoint'],message:'Required foreign key contradicts optional target multiplicity'});
+        });
+      }
+
     }
   });
   const requirementIds=new Set<string>();
@@ -308,7 +342,7 @@ export const GraphDeltaSchema=z.object({
   }
 });
 export const GraphUpdateSchema=AnalysisMetadataSchema.extend({
-  type:z.literal('analysis'),schemaVersion:z.literal(GRAPH_SCHEMA_VERSION),
+  type:z.literal('analysis'),schemaVersion:GraphVersionSchema,
   projectId:z.string().optional(),
   baseRevision:NonblankSchema.nullable(),baseSequence:CountSchema,delta:GraphDeltaSchema,
 }).strict().superRefine((update,ctx)=>{
@@ -338,7 +372,7 @@ export type ValidationIssue={code:string;message:string;nodeId?:string;path?:str
 export type FileChange={path:string;kind:'added'|'modified'|'deleted';before:string|null;after:string|null;diff:string;encoding?:'utf8'|'base64';beforeMode?:number|null;afterMode?:number|null};
 export type ValidationReport={passed:boolean;issues:ValidationIssue[];warnings:string[];checks:Record<string,{passed:boolean;output:string;command?:string;args?:string[];candidateRevision?:string}>;changes:FileChange[];candidate?:Analysis;candidateHashes?:Record<string,string>;candidateModes?:Record<string,number>;architectureDiff?:{implemented:SpecificationDiff;intended:SpecificationDiff}};
 export const DesignProposalSchema = z.object({
-  schemaVersion: z.literal(GRAPH_SCHEMA_VERSION).default(GRAPH_SCHEMA_VERSION).optional(),
+  schemaVersion: GraphVersionSchema.default(GRAPH_SCHEMA_VERSION).optional(),
   graph: GraphSchema,
   explanation: z.string().refine(val => !!val.trim(), { message: 'Proposal requires an explanation' }),
   questions: z.array(z.string()).default([]),

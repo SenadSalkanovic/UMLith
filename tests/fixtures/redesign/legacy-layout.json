@@ -1,0 +1,20 @@
+{
+  "layout": {
+    "legacy-class": {
+      "x": 17,
+      "y": 42
+    },
+    "legacy-read": {
+      "x": 100,
+      "y": 200
+    }
+  },
+  "scopedLayouts": {
+    "function:legacy-read": {
+      "legacy-return": {
+        "x": 11,
+        "y": 12
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-12T00:00:00Z",
+  "title": "Design System: UMLith",
+  "extensions": {
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "1280px"
+      },
+      {
+        "name": "single-side-panel",
+        "value": "1100px"
+      },
+      {
+        "name": "mobile",
+        "value": "767px"
+      }
+    ],
+    "motion": [
+      {
+        "name": "reduced-motion",
+        "value": "0s",
+        "purpose": "Disable animation and transitions when reduced motion is requested."
+      }
+    ],
+    "rules": [
+      "Diagram notation comes from PlantUML; identity remains in the shared graph.",
+      "Visual acceptance is tracked separately in the redesign release evidence."
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "types": [
+    "Manufacturer",
+    "Hub",
+    "Sensor",
+    "Thermometer",
+    "InfraredThermometer",
+    "TemperatureUnit",
+    "Measurement",
+    "DateTime"
+  ],
+  "inheritance": [
+    [
+      "Thermometer",
+      "Sensor"
+    ],
+    [
+      "InfraredThermometer",
+      "Thermometer"
+    ]
+  ],
+  "composition": {
+    "whole": "Hub",
+    "part": "Sensor",
+    "diamondAt": "Hub"
+  },
+  "overloads": [
+    "Sensor.getMeasurement",
+    "Sensor.getMeasurement.unit"
+  ],
+  "foreignKey": {
+    "source": "MeasurementRecord",
+    "sourceFields": [
+      "sensorId"
+    ],
+    "target": "SensorRecord",
+    "targetFields": [
+      "id"
+    ]
+  }
+}

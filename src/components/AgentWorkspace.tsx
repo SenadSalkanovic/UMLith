@@ -3,7 +3,10 @@ import type { AgentJob, Graph, Project, SpecificationDiff } from '../../shared/m
 import * as api from '../api';
 
 interface Props {
+  open?: boolean;
   project: Project;
+  semanticDrafts?: boolean;
+  selectedNodeId?: string;
   analysisRevision?: string;
   apiBaseUrl?: string;
   onClose: () => void;
@@ -43,11 +46,13 @@ function ArchitectureDiff({ title, diff }: { title: string; diff: SpecificationD
   </details>;
 }
 
-export function AgentWorkspace({ project, analysisRevision, apiBaseUrl, onClose, onChanged, onChecksChanged }: Props) {
+export function AgentWorkspace({ project, analysisRevision, apiBaseUrl, onClose, onChanged, onChecksChanged, semanticDrafts = false, selectedNodeId, open = true }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [capabilities, setCapabilities] = useState<api.AgentCapabilities | null>(null);
   const [jobs, setJobs] = useState<AgentJob[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [handoff, setHandoff] = useState<Awaited<ReturnType<typeof api.getHandoff>> | null>(null);
+  const [focusedNode, setFocusedNode] = useState(selectedNodeId || '');
   const [task, setTask] = useState('');
   const [scopeText, setScopeText] = useState('.');
   const [kind, setKind] = useState<'implementation' | 'design'>('implementation');
@@ -63,7 +68,7 @@ export function AgentWorkspace({ project, analysisRevision, apiBaseUrl, onClose,
   const [invalidatedChecks, setInvalidatedChecks] = useState<string[]>([]);
   const selected = jobs.find(job => job.id === selectedId);
   const scope = scopeText.split('\n').map(path => path.trim()).filter(Boolean);
-  const validTask = !!task.trim() && scope.length > 0;
+  const validTask = !!task.trim() && scope.length > 0 && !semanticDrafts;
   const active = jobs.some(job => job.status === 'preparing' || job.status === 'running');
   const stale = !!selected && (selected.specRevision !== project.specRevision || (!!selected.sourceRevision && !!analysisRevision && selected.sourceRevision !== analysisRevision));
   const candidate = selected?.report?.candidate || selected?.preview;
@@ -73,7 +78,12 @@ export function AgentWorkspace({ project, analysisRevision, apiBaseUrl, onClose,
   const reportSignature = JSON.stringify([selected?.report?.passed, selected?.report?.candidateHashes, selected?.report?.candidateModes, selected?.report?.issues, selected?.report?.checks]);
 
   useEffect(() => {
-    dialog.current?.showModal();
+    if (open) dialog.current?.showModal();
+    else dialog.current?.close();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
@@ -93,7 +103,7 @@ export function AgentWorkspace({ project, analysisRevision, apiBaseUrl, onClose,
     void api.getAgentCapabilities(apiBaseUrl).then(value => { if (!stopped) setCapabilities(value); }).catch(err => { if (!stopped) setError(err.message); });
     void api.getRecovery(project.id, false, apiBaseUrl).then(value => { if (!stopped) setRecovery(value.conflicts); }).catch(err => { if (!stopped) setError(err.message); });
     return () => { stopped = true; clearTimeout(timer); };
-  }, [project.id, apiBaseUrl]);
+  }, [project.id, apiBaseUrl, open]);
 
   useEffect(() => { setConfirmed(false); }, [selectedId, reportSignature, stale]);
 
@@ -155,14 +165,28 @@ export function AgentWorkspace({ project, analysisRevision, apiBaseUrl, onClose,
         <p role="status">{!capabilities ? 'Checking integrated execution availability…' : capabilities.available ? 'Isolated execution available. Hosted runs use your configured account.' : `Integrated execution unavailable: ${capabilities.reason || 'The isolation boundary is unavailable'}. Download a package and import external results below.`}</p>
         <div className="agent-actions">
           <button className="btn btn-primary" type="submit" disabled={!!busy || active || !validTask || !capabilities?.available || !capabilities.providers.includes(provider) || (provider !== 'hosted' && !model.trim())}>Start isolated task</button>
-          <button className="btn btn-secondary" type="button" disabled={!!busy || !validTask} onClick={() => void run('Downloading package', async () => { download(await api.exportPackage(project.id, task.trim(), scope, apiBaseUrl), `${project.id}-handoff.zip`); })}>Download handoff package</button>
+          <button className="btn btn-secondary" type="button" disabled={!!busy || !validTask} onClick={() => void run('Preparing saved handoff', async () => { setHandoff(await api.getHandoff(project.id, task.trim(), scope, apiBaseUrl)); })}>Prepare handoff</button>
           <button className="btn btn-secondary" type="button" disabled={!!busy || !validTask} onClick={() => void run('Preparing result template', async () => {
-            const handoff = await api.getHandoff(project.id, task.trim(), scope, apiBaseUrl);
-            const result: api.ResultEnvelope = { schemaVersion: 1, handoffId: handoff.handoffId, projectId: project.id, specRevision: handoff.specRevision, sourceHashes: handoff.sourceHashes, task: task.trim(), scope, files: {} };
+            const snapshot = handoff ?? await api.getHandoff(project.id, task.trim(), scope, apiBaseUrl);
+            setHandoff(snapshot);
+            const result: api.ResultEnvelope = { schemaVersion: 1, handoffId: snapshot.handoffId, projectId: project.id, specRevision: snapshot.specRevision, sourceHashes: snapshot.sourceHashes, task: snapshot.specification.task, scope: snapshot.specification.scope, files: {} };
             download(new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' }), `${project.id}-result-template.json`);
           })}>Download result JSON template</button>
         </div>
       </form>
+      {semanticDrafts && <p role="alert">Save semantic drafts before preparing approved intent or starting implementation.</p>}
+      <label htmlFor="handoff-focus">Relevant design item (navigation focus; full graph and all constraints remain included)</label>
+      <select id="handoff-focus" className="form-input" value={focusedNode} onChange={event=>setFocusedNode(event.target.value)}><option value="">Whole design</option>{project.specification.nodes.map(node=><option key={node.id} value={node.id}>{node.name} [{node.id}]</option>)}</select>
+      <p>Includes the saved full graph, stable IDs, requirements, checks, policies, source evidence and frozen baselines. Review source excerpts before sharing.</p>
+      <p>Missing required checks: {requiredChecks.filter(id=>!project.checks[id]).join(', ') || 'none'}. Methods without structured signatures: {project.specification.nodes.filter(n=>n.kind==='function'&&!n.signature).length}; description-only methods are valid. Source evidence: {project.analysis?.status || 'not analyzed'}.</p>
+      {handoff && <section aria-label="Prepared handoff">
+        <h4>Prepared revision {handoff.specRevision}</h4><p>Snapshot {handoff.handoffId} · digest {handoff.digest}</p>
+        {(handoff.specRevision!==project.specRevision || handoff.specification.task!==task.trim() || JSON.stringify(handoff.specification.scope)!==JSON.stringify(scope)) && <p role="status">This prepared handoff has older intent or task settings. Prepare again to capture the current saved state.</p>}
+        <div className="agent-actions"><button type="button" className="btn btn-secondary" disabled={!!busy} onClick={()=>void run('Copying architecture',async()=>{await navigator.clipboard.writeText(handoff.files['ARCHITECTURE.md']);setNotice('Copied captured architecture including full design, constraints, policies and source evidence.');})}>Copy architecture text</button>
+        <button type="button" className="btn btn-secondary" disabled={!!busy} onClick={()=>void run('Downloading captured handoff',async()=>download(await api.downloadHandoff(project.id,handoff.handoffId,apiBaseUrl),`${project.id}-handoff.zip`))}>Download handoff</button></div>
+        <details><summary>Connect through MCP</summary><button type="button" className="btn btn-secondary" disabled={!!busy} onClick={()=>void run('Checking MCP connection',async()=>{const result=await api.checkHandoffConnection(project.id,handoff.handoffId,apiBaseUrl);setNotice(`Connected ${result.client} over ${result.transport}; captured digest verified.`);})}>Test MCP connection</button><p>Configure a stdio client with this launch configuration. It reads only this snapshot and never starts an implementation agent.</p><pre>{JSON.stringify({mcpServers:{umlith:handoff.launch}},null,2)}</pre>{focusedNode && <p>Selected method/item ID: {focusedNode}; resource umlith://handoffs/{handoff.handoffId}/nodes/{encodeURIComponent(focusedNode)}</p>}</details>
+        <details><summary>Preview exactly what will be shared</summary><pre>{handoff.files['ARCHITECTURE.md']}</pre></details>
+      </section>}
       <p className="text-muted">External result JSON: keep the template handoff ID, baseline hashes and revision, put changed UTF-8 file contents in files, and use null for deletions. Import creates a review candidate.</p>
       <div className="form-group"><label htmlFor="agent-result">Import external result JSON</label><input className="form-input" id="agent-result" type="file" accept=".json,application/json" disabled={!!busy || active} onChange={event => {
         const file = event.target.files?.[0];

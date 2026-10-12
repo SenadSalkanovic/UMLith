@@ -21,6 +21,7 @@ import {
 import { ModelContextBar } from './ModelContext';
 
 export interface ProjectTreeProps {
+  hideContext?: boolean;
   graph: Graph | null;
   viewState: ViewState;
   onSelectNode: (id: string | null) => void;
@@ -33,6 +34,7 @@ export interface ProjectTreeProps {
 }
 
 export const ProjectTree: React.FC<ProjectTreeProps> = ({
+  hideContext = false,
   graph,
   viewState,
   onSelectNode,
@@ -143,9 +145,7 @@ export const ProjectTree: React.FC<ProjectTreeProps> = ({
 
   const handleNodeClick = (node: ProgramNode) => {
     onSelectNode(node.id);
-    const parentId = getNodeParentId(node);
-    // Tree selection opens the correct graph scope containing the node
-    onScopeChange(parentId ?? null);
+    if (!viewState.designView) onScopeChange(getNodeParentId(node) ?? null);
   };
 
   const activeScopeNode = useMemo(() => {
@@ -184,6 +184,10 @@ export const ProjectTree: React.FC<ProjectTreeProps> = ({
         <div
           className={`tree-node-row ${isSelected ? 'selected' : ''} ${isScoped ? 'scoped' : ''}`}
           style={{ paddingLeft: `${depth * 14 + 6}px` }}
+          role="button"
+          tabIndex={0}
+          aria-label={`Select ${node.name}`}
+          onKeyDown={event => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); handleNodeClick(node); } }}
           onClick={() => handleNodeClick(node)}
           data-testid={`tree-node-${node.id}`}
         >
@@ -271,7 +275,7 @@ export const ProjectTree: React.FC<ProjectTreeProps> = ({
       <div className="panel-header">
         <div className="panel-title">
           <Folder size={16} />
-          <span>Project Tree</span>
+          <span>Model</span>
           <span className="node-count-badge">({nodes.length})</span>
         </div>
         {viewState.activeScope && (
@@ -287,13 +291,13 @@ export const ProjectTree: React.FC<ProjectTreeProps> = ({
       </div>
 
       {/* Model Context Header - Always visible */}
-      <ModelContextBar
+      {!hideContext && <ModelContextBar
         graphContext={currentContext}
         onGraphContextChange={onGraphContextChange}
         project={project}
         specification={graph}
         analysis={analysis}
-      />
+      />}
 
       {/* Scope Breadcrumbs when scoped */}
       {viewState.activeScope && (
@@ -328,7 +332,8 @@ export const ProjectTree: React.FC<ProjectTreeProps> = ({
         <input
           type="text"
           className="search-input"
-          placeholder="Filter tree items..."
+          aria-label="Search model"
+          placeholder="Search model…"
           value={viewState.searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
           data-testid="tree-search-input"

@@ -1,4 +1,4 @@
-import {mkdir,readFile,readdir,realpath,stat} from 'node:fs/promises';
+import {mkdir,readFile,readdir,realpath,stat,copyFile,open,rename,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
@@ -90,13 +90,21 @@ export class ProjectStore {
   }
   return result.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
  }
- private async save(project:Project){
+ private async save(project:Project,semantic=false){
   const {analysis,layout,layoutRevision,scopedLayouts,...specification}=project;
+  const path=join(this.projectDir(project.id),'project.json');
+  if(!semantic){
+   try{const original=JSON.parse(await readFile(path,'utf8'));if((original.specification.schemaVersion??1)===1)specification.specification=original.specification;}
+   catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+  }
   // Commit legacy geometry before removing it from project.json.
   try{await stat(join(this.projectDir(project.id),'layout.json'));}
   catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;await this.saveLayout(project);}
   // Persist legacy inline evidence before removing it from the intended storage.
-  if(analysis)await atomicJson(join(this.projectDir(project.id),'analysis.json'),analysis);
+  if(analysis){
+   const analysisPath=join(this.projectDir(project.id),'analysis.json');
+   try{await stat(analysisPath);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;await atomicJson(analysisPath,analysis);}
+  }
   await atomicJson(join(this.projectDir(project.id),'project.json'),specification);
  }
  private async saveLayout(project:Project){
@@ -104,15 +112,26 @@ export class ProjectStore {
    schemaVersion:1,revision:project.layoutRevision??0,layout:project.layout,scopedLayouts:project.scopedLayouts??{},
   }));
  }
- async updateSpec(id:string,expected:number,graph:GraphInput):Promise<Project>{
+ async updateSpec(id:string,expected:number,graph:GraphInput,projectDescription?:string):Promise<Project>{
   if(!RevisionSchema.safeParse(expected).success)throw new AppError('Expected specification revision must be a nonnegative safe integer.');
   return this.transaction(id,async()=>{
    const project=await this.get(id);
    if(project.specRevision!==expected)throw new SpecificationConflictError(id,expected,project.specRevision);
    const parsed=GraphSchema.parse(graph);
+   if(projectDescription!==undefined)project.description=z.string().parse(projectDescription);
+   const originalPath=join(this.projectDir(id),'project.json');
+   const original=JSON.parse(await readFile(originalPath,'utf8'));
+   if((original.specification.schemaVersion??1)===1){
+    const backup=join(this.projectDir(id),'migration-v1-project.json');
+    try{await stat(backup);}catch(error){
+     if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;
+     const temp=backup+'.'+randomUUID()+'.tmp';
+     try{await copyFile(originalPath,temp);const file=await open(temp,'r+');try{await file.sync();}finally{await file.close();}await rename(temp,backup);const directory=await open(this.projectDir(id),'r');try{await directory.sync();}finally{await directory.close();}}finally{await rm(temp,{force:true});}
+    }
+   }
    project.specification=parsed;project.specRevision=RevisionSchema.parse(project.specRevision+1);
    await atomicJson(join(this.projectDir(id),'revisions',project.specRevision+'.json'),{schemaVersion:1,revision:project.specRevision,createdAt:new Date().toISOString(),graph:parsed});
-   await this.save(project);return retainLayout(project);
+   await this.save(project,true);return retainLayout(project);
   });
  }
  async updateLayout(id:string,layout:Layout,view?:string):Promise<Project>{
@@ -154,6 +173,12 @@ export class ProjectStore {
  async saveJob(job:AgentJob){await atomicJson(join(this.projectDir(job.projectId),'jobs',job.id+'.json'),job);}
  async jobs(projectId:string):Promise<AgentJob[]>{
   const dir=join(this.projectDir(projectId),'jobs');await mkdir(dir,{recursive:true});
-  return Promise.all((await readdir(dir)).filter(n=>n.endsWith('.json')).map(async file=>JSON.parse(await readFile(join(dir,file),'utf8'))));
+  return Promise.all((await readdir(dir)).filter(n=>n.endsWith('.json')).map(async file=>{
+   const job:AgentJob=JSON.parse(await readFile(join(dir,file),'utf8'));
+   if(job.preview)job.preview={...job.preview,graph:GraphSchema.parse(job.preview.graph)};
+   if(job.report?.candidate)job.report.candidate={...job.report.candidate,graph:GraphSchema.parse(job.report.candidate.graph)};
+   if(job.proposal)job.proposal={...job.proposal,graph:GraphSchema.parse(job.proposal.graph)};
+   return job;
+  }));
  }
 }

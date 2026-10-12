@@ -164,7 +164,7 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({
             data-testid="picker-tab-blank"
           >
             <Plus size={16} />
-            <span>Blank Project</span>
+            <span>Create a design</span>
           </button>
           <button
             type="button"
@@ -173,7 +173,7 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({
             data-testid="picker-tab-register"
           >
             <FolderGit2 size={16} />
-            <span>Register Existing Folder</span>
+            <span>Import existing code</span>
           </button>
         </div>
         {isModal && onClose && (
@@ -278,7 +278,7 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({
                 data-testid="picker-quick-register-btn"
               >
                 <FolderGit2 size={14} />
-                <span>Register Existing Folder</span>
+                <span>Import existing code</span>
               </button>
             </div>
           </div>
@@ -291,11 +291,11 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({
               <div>
                 {tab === 'blank' ? (
                   <span>
-                    <strong>Blank Project:</strong> Starts an empty architecture specification. Requires no existing code or filesystem directory (R40).
+                    <strong>Create a design.</strong> Start with a name. Add classes, data, and behavior as you go.
                   </span>
                 ) : (
                   <span>
-                    <strong>Register Existing Folder:</strong> Scans the directory to populate the implemented graph. The intended architecture will <em>not</em> be auto-adopted and remains under your control (R03, R40).
+                    <strong>Import existing code.</strong> Review extracted structure before adopting it into your intended design.
                   </span>
                 )}
               </div>
@@ -316,8 +316,9 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({
               />
             </div>
 
+            <details className="project-start-options"><summary>Notes and target (optional)</summary>
             <div className="form-group">
-              <label htmlFor="picker-desc">Description</label>
+              <label htmlFor="picker-desc">Project notes</label>
               <textarea
                 id="picker-desc"
                 className="form-input form-textarea"
@@ -367,11 +368,12 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({
               <div className="target-policy-notice" data-testid="picker-no-scaffold-notice">
                 <Info size={13} />
                 <span>
-                  Target choice is descriptive metadata only; it does not impose or generate any code template, scaffold, or boilerplate (R40).
+                  This describes what you intend to build. It does not generate a template.
                 </span>
               </div>
             </div>
 
+            </details>
             {tab === 'register' && (
               <div className="form-group" data-testid="picker-root-group">
                 <label htmlFor="picker-root">Existing Folder Root Directory *</label>
@@ -389,7 +391,7 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({
                   />
                 </div>
                 <span className="field-hint" data-testid="picker-import-notice">
-                  The folder will be analyzed for TypeScript structures. The extracted model is stored as implemented structure and requires human review before adoption (R03).
+                  Extracted structure stays separate from your design until you review and adopt it.
                 </span>
               </div>
             )}
@@ -414,7 +416,7 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({
               >
                 {isSubmitting
                   ? (tab === 'blank' ? 'Creating Project…' : 'Registering & Importing…')
-                  : (tab === 'blank' ? 'Create Blank Project' : 'Register & Import Folder')}
+                  : (tab === 'blank' ? 'Create & open' : 'Import & open')}
               </button>
             </div>
           </form>

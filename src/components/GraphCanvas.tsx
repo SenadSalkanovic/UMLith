@@ -31,6 +31,11 @@ import {
   Terminal,
 } from 'lucide-react';
 import * as api from '../api';
+import { visibleDesignNodes, ownerId } from '../navigation-state';
+import { PlantUmlCanvas } from './PlantUmlCanvas';
+import { DiagramEdge, DiagramMarkers, relationshipMarkers } from './DiagramEdge';
+import { useRef } from 'react';
+import type { Viewport } from '@xyflow/react';
 
 export interface GraphCanvasProps {
   graph: Graph | null;
@@ -46,6 +51,8 @@ export interface GraphCanvasProps {
   projectId?: string;
   apiBaseUrl?: string;
   readOnly?: boolean;
+  onSelectField?: (ownerId: string, fieldName: string) => void;
+  onConnectNodes?: (sourceId: string, targetId: string) => void;
   onOpenArchitectureEditor?: () => void;
   onOpenErEditor?: () => void;
   onOpenFunctionEditor?: () => void;
@@ -62,6 +69,9 @@ export function getValidRelationshipKinds(
     'contains',
     'inherits',
     'implements',
+    'associates-with',
+    'aggregates',
+    'composes',
     'relates-to',
     'next',
     'true',
@@ -73,112 +83,44 @@ export function getValidRelationshipKinds(
   return allKinds.filter(k => validRelationship(k, sourceKind, targetKind));
 }
 
-// Custom Architecture Node Component for React Flow
+export function methodSignature(node: ProgramNode): string {
+  if (!node.signature) return node.contract ? `${node.name} ${node.contract}` : `${node.name}()`;
+  return `${node.name}(${node.signature.parameters.map(p => `${p.name}${p.optional ? '?' : ''}${p.type ? ': ' + p.type : ''}`).join(', ')})${node.signature.returnType ? ': ' + node.signature.returnType : ''}`;
+}
+const visibilitySymbol = (visibility?: ProgramNode['visibility']) => visibility === 'public' ? '+' : visibility === 'private' ? '−' : visibility === 'protected' ? '#' : visibility === 'package' ? '~' : '';
 export const ArchitectureNode: React.FC<{
-  data: {
-    node: ProgramNode;
-    isSelected: boolean;
-    isAmbiguous?: boolean;
-    onScopeIn?: (id: string) => void;
-  };
+  data: { node: ProgramNode; members?: ProgramNode[]; isSelected?: boolean; selectedMemberId?: string | null; isAmbiguous?: boolean; isEntry?: boolean; onSelectMember?: (id: string) => void; onSelectField?: (ownerId: string, fieldName: string) => void; onScopeIn?: (id: string) => void; };
   selected?: boolean;
 }> = ({ data, selected }) => {
-  const { node, onScopeIn, isAmbiguous } = data;
-  const isSelected = selected || data.isSelected;
-  const isContainer = ['system', 'module', 'class', 'function'].includes(node.kind);
-
-  return (
-    <div
-      className={`custom-flow-node ${isSelected ? 'selected' : ''} kind-${node.kind} ${isAmbiguous ? 'binding-ambiguous' : ''}`}
-      data-testid={`canvas-flow-node-${node.id}`}
-    >
-      <Handle
-        type="target"
-        position={Position.Top}
-        id="target-top"
-        style={{ background: '#64748b', width: 8, height: 8 }}
-      />
-      <Handle
-        type="target"
-        position={Position.Left}
-        id="target-left"
-        style={{ background: '#64748b', width: 8, height: 8 }}
-      />
-
-      <div className="flow-node-header">
-        <span className="flow-node-kind">{node.kind}</span>
-        <div className="flow-node-badges">
-          {isAmbiguous && (
-            <span
-              className="flow-node-badge badge-ambiguous"
-              data-testid={`binding-ambiguous-${node.id}`}
-              title="Ambiguous source binding: manual review required"
-            >
-              Ambiguous
-            </span>
-          )}
-          {node.policy && node.policy !== 'editable' && (
-            <span className={`flow-node-policy policy-${node.policy}`}>{node.policy}</span>
-          )}
-          {node.stepType && (
-            <span className="flow-node-badge flow-node-step">{node.stepType}</span>
-          )}
-          {node.provenance && node.provenance !== 'human' && (
-            <span className={`flow-node-badge prov-${node.provenance}`}>{node.provenance}</span>
-          )}
-        </div>
+  const { node, members = [], onScopeIn, isAmbiguous } = data;
+  const isSelected = selected || data.isSelected || members.some(member => member.id === data.selectedMemberId);
+  const uml = ['class', 'interface', 'enum', 'entity'].includes(node.kind);
+  return <div className={`custom-flow-node ${uml ? 'uml-node' : ''} ${isSelected ? 'selected' : ''} kind-${node.kind} ${node.isAbstract ? 'is-abstract' : ''} ${isAmbiguous ? 'binding-ambiguous' : ''}`} data-testid={`canvas-flow-node-${node.id}`}>
+    <Handle type="target" position={Position.Top} id="target-top"/>
+    <Handle type="target" position={Position.Left} id="target-left"/>
+    <div className="flow-node-header">
+      {node.kind !== 'class' && <span className="flow-node-kind">{node.kind === 'interface' || node.kind === 'enum' ? `«${node.kind}»` : node.moduleRole || node.kind}</span>}
+      <div className="flow-node-badges">
+        {isAmbiguous && <span className="flow-node-badge badge-ambiguous" data-testid={`binding-ambiguous-${node.id}`}>Ambiguous binding</span>}
+        {node.policy !== 'editable' && <span className={`flow-node-policy policy-${node.policy}`}>{node.policy}</span>}
+        {node.stepType && <span className="flow-node-badge flow-node-step">{data.isEntry ? 'Entry · ' : ''}{node.stepType === 'return' || node.stepType === 'throw' ? 'Exit · ' : ''}{node.stepType}</span>}
+        {node.provenance !== 'human' && <span className={`flow-node-badge prov-${node.provenance}`}>{node.provenance}</span>}
       </div>
-
-      <div className="flow-node-title" title={node.name}>
-        {node.name}
-      </div>
-
-      {node.description && (
-        <div className="flow-node-desc" title={node.description}>
-          {node.description}
-        </div>
-      )}
-
-      {node.fields && node.fields.length > 0 && (
-        <div className="flow-node-meta">
-          {node.fields.length} {node.fields.length === 1 ? 'field' : 'fields'}
-        </div>
-      )}
-
-      {isContainer && onScopeIn && (
-        <div className="flow-node-footer">
-          <button
-            type="button"
-            className="btn btn-xs btn-scope-in"
-            onClick={(e) => {
-              e.stopPropagation();
-              onScopeIn(node.id);
-            }}
-            title={`Scope into ${node.name}`}
-            data-testid={`canvas-scope-in-${node.id}`}
-          >
-            <Layers size={10} />
-            <span>Scope in</span>
-          </button>
-        </div>
-      )}
-
-      <Handle
-        type="source"
-        position={Position.Right}
-        id="source-right"
-        style={{ background: '#38bdf8', width: 8, height: 8 }}
-      />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id="source-bottom"
-        style={{ background: '#38bdf8', width: 8, height: 8 }}
-      />
     </div>
-  );
+    <div className="flow-node-title">{node.name}{node.mappedName && <small> ↦ {node.mappedName}</small>}</div>
+    {uml && <div className="uml-compartment uml-attributes">{node.fields.length ? node.fields.map(field => <button type="button" key={field.name} className={`uml-member nodrag nopan ${field.isStatic ? 'is-static' : ''}`} onClick={event => { event.stopPropagation(); data.onSelectField?.(node.id, field.name); }} aria-label={`Edit ${node.name}.${field.name}`}>
+      <span>{visibilitySymbol(field.visibility)} {field.name}{field.type ? ': ' + field.type : ''}{field.optional ? ' ?' : ''}{field.key ? ' [' + field.key + ']' : ''}{field.defaultValue ? ' = ' + field.defaultValue : ''}</span>
+    </button>) : <span className="uml-empty">{node.kind === 'entity' ? 'No fields yet' : 'No attributes'}</span>}
+    {node.kind === 'entity' && [...(node.compositeKeys || []), ...(node.indexes || [])].map((key, index) => <div className="uml-key" key={index}>{key.type} ({key.fields.join(', ')}){key.name ? ' · ' + key.name : ''}</div>)}</div>}
+    {['class','interface'].includes(node.kind) && <div className="uml-compartment uml-methods">{members.length ? members.map(member => <button key={member.id} type="button" className={`uml-member nodrag nopan ${data.selectedMemberId === member.id ? 'selected' : ''} ${member.isStatic ? 'is-static' : ''} ${member.isAbstract ? 'is-abstract' : ''}`} aria-label={`Open method ${node.name}.${methodSignature(member)}`} onClick={event => { event.stopPropagation(); data.onSelectMember?.(member.id); }}><span>{visibilitySymbol(member.visibility)} {methodSignature(member)}</span></button>) : <span className="uml-empty">No methods yet</span>}</div>}
+    {!uml && node.description && <div className="flow-node-desc">{node.description}</div>}
+    {['system','module','class','interface','function'].includes(node.kind) && onScopeIn && <div className="flow-node-footer"><button type="button" className="btn btn-xs btn-scope-in nodrag nopan" onClick={event => { event.stopPropagation(); onScopeIn(node.id); }} data-testid={`canvas-scope-in-${node.id}`}><Layers size={12}/><span>Open {node.kind}</span></button></div>}
+    <Handle type="source" position={Position.Right} id="source-right"/>
+    <Handle type="source" position={Position.Bottom} id="source-bottom"/>
+  </div>;
 };
 
+const edgeTypes = { diagram: DiagramEdge };
 const nodeTypes = {
   architectureNode: ArchitectureNode,
 };
@@ -201,6 +143,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
   onOpenErEditor,
   onOpenFunctionEditor,
   onOpenWorkflowEditor,
+  onSelectField,
 }) => {
   const allNodes = useMemo(() => graph?.nodes || [], [graph]);
   const allEdges = useMemo(() => graph?.edges || [], [graph]);
@@ -210,8 +153,14 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
   const [isEdgeEditorOpen, setIsEdgeEditorOpen] = useState<boolean>(false);
   const [newEdgeSource, setNewEdgeSource] = useState<string>('');
   const [newEdgeTarget, setNewEdgeTarget] = useState<string>('');
-  const [newEdgeKind, setNewEdgeKind] = useState<ProgramEdge['kind']>('depends-on');
+  const [newEdgeKind, setNewEdgeKind] = useState<ProgramEdge['kind'] | ''>('');
   const [newEdgeLabel, setNewEdgeLabel] = useState<string>('');
+  const [sourceRole, setSourceRole] = useState('');
+  const [targetRole, setTargetRole] = useState('');
+  const [sourceMultiplicity, setSourceMultiplicity] = useState('');
+  const [targetMultiplicity, setTargetMultiplicity] = useState('');
+  const viewports = useRef<Record<string, Viewport>>({});
+  const canvasKey = `${viewState.graphContext || 'intended'}:${viewState.designView || 'legacy'}:${viewState.activeScope || 'root'}:${viewState.flowchartId || ''}`;
 
   // Map containment hierarchy
   const nodeParentMap = useMemo(() => {
@@ -234,6 +183,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
 
   // Scoped nodes
   const scopedNodes = useMemo(() => {
+    if (graph && viewState.designView) return visibleDesignNodes(graph, viewState.designView, viewState.activeScope, viewState.flowchartId);
     if (viewState.activeScope === null) {
       // Root scope: nodes with no parent
       const top = allNodes.filter(n => !nodeParentMap.get(n.id));
@@ -241,7 +191,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
     }
     // Child nodes of activeScope
     return allNodes.filter(n => nodeParentMap.get(n.id) === viewState.activeScope);
-  }, [allNodes, viewState.activeScope, nodeParentMap]);
+  }, [graph, allNodes, viewState.activeScope, viewState.designView, viewState.flowchartId, nodeParentMap]);
 
   const scopedNodeIds = useMemo(() => new Set(scopedNodes.map(n => n.id)), [scopedNodes]);
 
@@ -259,7 +209,8 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
       const savedPos = activeScopedLayout?.[node.id] || layout[node.id];
       const col = index % 3;
       const row = Math.floor(index / 3);
-      const position = savedPos ? { x: savedPos.x, y: savedPos.y } : { x: col * 240 + 40, y: row * 160 + 40 };
+      const rowHeight = (rowIndex: number) => Math.max(...scopedNodes.slice(rowIndex * 3, rowIndex * 3 + 3).map(n => 150 + 32 * (n.fields.length + allNodes.filter(m => m.kind === 'function' && nodeParentMap.get(m.id) === n.id).length)), 220);
+      const position = savedPos ? { x: savedPos.x, y: savedPos.y } : { x: col * 360 + 40, y: Array.from({ length: row }, (_, i) => rowHeight(i) + 60).reduce((a,b) => a + b, 40) };
       const isSelected = viewState.selectedId === node.id && viewState.selectedType === 'node';
       const isAmbiguous = bindingReviews?.some(
         r => r.nodeId === node.id && (r.status === 'ambiguous' || r.status === 'unresolved')
@@ -274,6 +225,11 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
           node,
           isSelected,
           isAmbiguous,
+          members: allNodes.filter(member => member.kind === 'function' && nodeParentMap.get(member.id) === node.id),
+          selectedMemberId: viewState.selectedId,
+          isEntry: node.kind === 'step' && !allEdges.some(edge => ['next','true','false','exception'].includes(edge.kind) && edge.target === node.id),
+          onSelectMember: onSelectNode,
+          onSelectField,
           onScopeIn: (id: string) => onScopeChange(id),
           // Fallback label for default React Flow renderer if custom type not picked up in SSR
           label: (
@@ -296,7 +252,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
         },
       };
     });
-  }, [scopedNodes, layout, scopedLayouts, bindingReviews, viewState.selectedId, viewState.selectedType, viewState.activeScope, readOnly, onScopeChange]);
+  }, [scopedNodes, layout, scopedLayouts, bindingReviews, viewState.selectedId, viewState.selectedType, viewState.activeScope, readOnly, onScopeChange, onSelectNode, onSelectField, allNodes, allEdges, nodeParentMap]);
 
   // Scoped edges with stable IDs and visual styles
   const flowEdges: FlowEdge[] = useMemo(() => {
@@ -304,40 +260,14 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
       .filter(edge => scopedNodeIds.has(edge.source) && scopedNodeIds.has(edge.target))
       .map(edge => {
         const isSelected = viewState.selectedId === edge.id && viewState.selectedType === 'edge';
-        const strokeColor = edge.uncertain
-          ? '#fbbf24'
-          : edge.kind === 'contains'
-          ? '#818cf8'
-          : edge.kind === 'relates-to'
-          ? '#34d399'
-          : edge.kind === 'calls'
-          ? '#38bdf8'
-          : edge.kind === 'true'
-          ? '#10b981'
-          : edge.kind === 'false'
-          ? '#f43f5e'
-          : edge.kind === 'exception'
-          ? '#ef4444'
-          : edge.kind === 'next'
-          ? '#8b5cf6'
-          : '#64748b';
-
+        const strokeColor = isSelected ? '#ff3d00' : edge.uncertain ? '#facc15' : '#a3a3a3';
+        const markers = relationshipMarkers(edge);
         return {
-          id: edge.id,
-          source: edge.source,
-          target: edge.target,
-          label: edge.label || edge.kind,
-          animated: edge.kind === 'calls' || edge.kind === 'depends-on',
+          id: edge.id, source: edge.source, target: edge.target, type: 'diagram',
+          label: edge.label || (['next','true','false','exception','reads','writes'].includes(edge.kind) ? edge.kind : ''),
           selected: isSelected,
-          markerEnd: {
-            type: MarkerType.ArrowClosed,
-            color: strokeColor,
-          },
-          style: {
-            stroke: strokeColor,
-            strokeWidth: isSelected ? 2.5 : 1.5,
-            strokeDasharray: edge.uncertain ? '5,5' : undefined,
-          },
+          markerStart: markers.start, markerEnd: markers.end,
+          style: { stroke: strokeColor, strokeWidth: isSelected ? 2.5 : 1.5, strokeDasharray: markers.dashed ? '6 4' : undefined },
           data: { programEdge: edge },
         };
       });
@@ -425,53 +355,11 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
       return;
     }
 
-    // Default suitable kind
-    let defaultKind: ProgramEdge['kind'] = validKinds[0];
-    if (sourceNode.kind === 'entity' && targetNode.kind === 'entity' && validKinds.includes('relates-to')) {
-      defaultKind = 'relates-to';
-    } else if (sourceNode.kind === 'function' && targetNode.kind === 'function' && validKinds.includes('calls')) {
-      defaultKind = 'calls';
-    } else if (validKinds.includes('contains')) {
-      defaultKind = 'contains';
-    } else if (validKinds.includes('depends-on')) {
-      defaultKind = 'depends-on';
-    }
-
-    const newEdgeId = typeof crypto !== 'undefined' && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `edge-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-
-    const newEdge: ProgramEdge = {
-      id: newEdgeId,
-      source: connection.source,
-      target: connection.target,
-      kind: defaultKind,
-      label: '',
-      provenance: 'human',
-      uncertain: false,
-    };
-
-    const nextGraph: Graph = {
-      ...graph,
-      edges: [...graph.edges, newEdge],
-    };
-
-    // Client-side validation check
-    const validation = GraphSchema.safeParse(nextGraph);
-    if (!validation.success) {
-      setErrorMessage(validation.error.issues[0]?.message || 'Invalid relationship');
-      return;
-    }
-
-    try {
-      setErrorMessage(null);
-      await onUpdateSpecification(nextGraph);
-      if (onSelectEdge) {
-        onSelectEdge(newEdgeId);
-      }
-    } catch (err: any) {
-      setErrorMessage(err?.message || 'Server rejected relationship creation');
-    }
+    setNewEdgeSource(connection.source);
+    setNewEdgeTarget(connection.target);
+    setNewEdgeKind('');
+    setIsEdgeEditorOpen(true);
+    setErrorMessage(null);
   };
 
   // Add relationship from inline toolbar form
@@ -491,7 +379,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
       return;
     }
 
-    if (!validRelationship(newEdgeKind, sourceNode.kind, targetNode.kind)) {
+    if (!newEdgeKind || !validRelationship(newEdgeKind, sourceNode.kind, targetNode.kind)) {
       setErrorMessage(`Invalid relationship ${newEdgeKind}: ${sourceNode.kind} → ${targetNode.kind}`);
       return;
     }
@@ -504,7 +392,8 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
       id: newEdgeId,
       source: newEdgeSource,
       target: newEdgeTarget,
-      kind: newEdgeKind,
+      kind: newEdgeKind as ProgramEdge['kind'],
+      ...(['associates-with','aggregates','composes','relates-to'].includes(newEdgeKind) ? { sourceEndpoint: { role: sourceRole || undefined, multiplicity: sourceMultiplicity || undefined }, targetEndpoint: { role: targetRole || undefined, multiplicity: targetMultiplicity || undefined } } : {}),
       label: newEdgeLabel.trim(),
       provenance: 'human',
       uncertain: false,
@@ -763,6 +652,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
                 data-testid="edge-kind-select"
                 disabled={availableKindsForForm.length === 0}
               >
+                <option value="">Choose relationship…</option>
                 {availableKindsForForm.length === 0 ? (
                   <option value="">No valid relationship</option>
                 ) : (
@@ -786,11 +676,12 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
               />
             </div>
 
+            {['associates-with','aggregates','composes','relates-to'].includes(newEdgeKind) && <div className="edge-endpoint-fields">{[['Source role',sourceRole,setSourceRole],['Source multiplicity',sourceMultiplicity,setSourceMultiplicity],['Target role',targetRole,setTargetRole],['Target multiplicity',targetMultiplicity,setTargetMultiplicity]].map(([label,value,set]) => <label key={String(label)}>{String(label)}<input value={String(value)} onChange={event => (set as (value:string)=>void)(event.target.value)}/></label>)}</div>}
             <div className="editor-form-actions">
               <button
                 type="submit"
                 className="btn btn-sm btn-primary"
-                disabled={availableKindsForForm.length === 0}
+                disabled={!newEdgeKind || availableKindsForForm.length === 0}
                 data-testid="edge-connect-submit"
               >
                 Connect
@@ -807,11 +698,14 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
         </form>
       )}
 
+      <DiagramMarkers/>
       <div className="canvas-wrapper" data-testid="canvas-wrapper">
         {scopedNodes.length === 0 ? (
           <div className="canvas-empty-state" data-testid="canvas-empty-state">
             <Layers size={32} className="empty-icon" />
-            <p>No elements in current scope.</p>
+            <h2>{viewState.designView === 'database' ? 'Plan your data.' : viewState.designView === 'overview' ? 'Start with the system.' : 'Start with a class.'}</h2>
+            <p>No elements in this view yet.</p>
+            {onOpenArchitectureEditor && <button className="btn btn-primary" onClick={onOpenArchitectureEditor}>{viewState.designView === 'database' ? 'Add your first table' : viewState.designView === 'overview' ? 'Add a system or module' : 'Add your first class'}</button>}
             {viewState.activeScope ? (
               <button
                 className="btn btn-sm btn-secondary"
@@ -826,37 +720,27 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
           </div>
         ) : (
           <ReactFlow
+            key={canvasKey}
+            defaultViewport={viewports.current[canvasKey]}
+            onMoveEnd={(_, viewport) => { viewports.current[canvasKey] = viewport; }}
             nodes={flowNodes}
             edges={flowEdges}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
+            panActivationKeyCode="Space"
+            deleteKeyCode={null}
             onNodeClick={handleNodeClick}
             onNodeDoubleClick={handleNodeDoubleClick}
             onEdgeClick={handleEdgeClick}
             onPaneClick={handlePaneClick}
             onNodeDragStop={handleNodeDragStop}
             onConnect={handleConnect}
-            fitView
+            fitView={!viewports.current[canvasKey]}
             attributionPosition="bottom-right"
           >
-            <Background gap={16} size={1} color="#334155" />
+            <Background gap={24} size={1} color="#262626" />
             <Controls />
-            <MiniMap
-              nodeColor={(node) => {
-                const pn = allNodes.find(n => n.id === node.id);
-                switch (pn?.kind) {
-                  case 'system': return '#38bdf8';
-                  case 'module': return '#818cf8';
-                  case 'entity': return '#34d399';
-                  case 'function': return '#4ade80';
-                  case 'class': return '#60a5fa';
-                  case 'interface': return '#a78bfa';
-                  case 'enum': return '#f472b6';
-                  case 'step': return '#fb923c';
-                  default: return '#64748b';
-                }
-              }}
-              style={{ background: '#0f172a' }}
-            />
+            <MiniMap nodeColor="#a3a3a3" style={{ background: '#171717' }}/>
           </ReactFlow>
         )}
       </div>
@@ -865,6 +749,7 @@ const FlowCanvasInternal: React.FC<GraphCanvasProps> = ({
 };
 
 export const GraphCanvas: React.FC<GraphCanvasProps> = (props) => {
+  if (props.viewState.designView) return <PlantUmlCanvas {...props}/>;
   return (
     <ReactFlowProvider>
       <FlowCanvasInternal {...props} />

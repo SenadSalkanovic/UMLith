@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { AnalysisStatusSchema, GRAPH_SCHEMA_VERSION, GraphSchema, QualitySchema, StaleEvidenceSchema } from './model';
 import { ChecksSchema, ProjectSchema } from './api';
 
-export const HANDOFF_SCHEMA_VERSION = 1;
+export const HANDOFF_SCHEMA_VERSION = 2;
 export const HANDOFF_FILES = {
   manifest: 'manifest.json', specification: 'specification.json',
   architecture: 'ARCHITECTURE.md', task: 'AGENT_TASK.md', importReport: 'IMPORT_REPORT.json',
@@ -48,9 +48,11 @@ const HandoffGraphSchema = GraphSchema.safeExtend({schemaVersion: z.literal(GRAP
 });
 
 export const HandoffManifestSchema = z.object({
+  diagrams: z.record(z.string(), z.string().regex(/^diagrams\/(overview|classes|database|method-[0-9]+)\.puml$/)).optional(),
   schemaVersion: z.literal(HANDOFF_SCHEMA_VERSION),
   projectId: ProjectSchema.shape.id, revision: ProjectSchema.shape.specRevision,
   sourceRevision: SourceRevisionSchema,
+  handoffId: z.uuid().optional(),digest: z.string().regex(/^[a-f0-9]{64}$/).optional(),digestAlgorithm: z.literal('sha256-package-files-before-digest').optional(),sourceHashes:z.record(z.string(),z.string()).optional(),scope:z.array(ScopeEntrySchema).optional(),
   files: z.object({
     manifest: z.literal(HANDOFF_FILES.manifest), specification: z.literal(HANDOFF_FILES.specification),
     architecture: z.literal(HANDOFF_FILES.architecture), task: z.literal(HANDOFF_FILES.task),
@@ -93,3 +95,13 @@ export const HandoffPackageSchema = z.object({
 export type HandoffManifest = z.infer<typeof HandoffManifestSchema>;
 export type HandoffSpecification = z.infer<typeof HandoffSpecificationSchema>;
 export type HandoffPackage = z.infer<typeof HandoffPackageSchema>;
+
+export type PreparedHandoff=HandoffPackage & {handoffId:string;specRevision:number;sourceHashes:Record<string,string>;digest:string;createdAt:string;files:Record<string,string>;launch:{command:string;args:string[]}};
+
+// Historical packages preserve IDs and baselines; unknown versions fail explicitly.
+export function normalizeHandoffPackage(value:unknown):HandoffPackage {
+ const bundle=z.object({manifest:z.object({schemaVersion:z.number()}).passthrough(),specification:z.object({schemaVersion:z.number(),graph:z.unknown()}).passthrough()}).passthrough().parse(value);
+ if(bundle.manifest.schemaVersion!==bundle.specification.schemaVersion)throw new Error('Inconsistent handoff format versions');
+ if(bundle.manifest.schemaVersion===1)return HandoffPackageSchema.parse({...bundle,manifest:{...bundle.manifest,schemaVersion:HANDOFF_SCHEMA_VERSION},specification:{...bundle.specification,schemaVersion:HANDOFF_SCHEMA_VERSION,graph:GraphSchema.parse(bundle.specification.graph)}});
+ return HandoffPackageSchema.parse(value);
+}

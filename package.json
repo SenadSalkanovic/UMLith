@@ -8,10 +8,13 @@
     "start": "node --import @mrleebo/prisma-ast --import tsx server/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "benchmark": "tsx scripts/benchmark.ts"
+    "benchmark": "tsx scripts/benchmark.ts",
+    "mcp": "node --import tsx server/mcp.ts",
+    "setup:plantuml": "node scripts/setup-plantuml.mjs"
   },
   "dependencies": {
     "@fastify/static": "^10.1.5",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@mrleebo/prisma-ast": "0.16.0",
     "@xyflow/react": "^12.9.3",
     "chokidar": "^5.0.0",

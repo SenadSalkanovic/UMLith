@@ -6,9 +6,12 @@ import { join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z, ZodError } from 'zod';
 import { ProjectStore, SpecificationConflictError } from './store';
-import { AppError, atomicJson, safePath, hash, isPathExcluded, captureFiles, hashes, isRevisionIncomplete } from './files';
-import { bundleFiles, exportBundle } from './export';
-import { HandoffPackageSchema, HandoffSpecificationSchema } from '../shared/export';
+import { AppError, safePath, hash, isPathExcluded, captureFiles, hashes, isRevisionIncomplete } from './files';
+import {renderPlantUml} from './plantuml';
+import {GraphSchema} from '../shared/model';
+import { exportBundle } from './export';
+import {prepareHandoff,readHandoff,handoffArchive,HandoffId,checkHandoffConnection} from './handoff';
+import { HandoffSpecificationSchema } from '../shared/export';
 import { recoverPending, recoveryStatus } from './application';
 import { AnalysisWorker } from './worker';
 import { generateImportQualityReport, type ImportQualityReport } from './analyzer';
@@ -352,6 +355,10 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
 
   // Health check
   app.get('/api/health', async () => ({ status: 'ok' }));
+  app.post('/api/diagrams/plantuml', async request => {
+    const input=z.object({graph:GraphSchema,view:z.enum(['overview','classes','database']),scopeId:z.string().nullable().optional(),functionId:z.string().nullable().optional(),selectedId:z.string().nullable().optional()}).strict().parse(request.body);
+    return renderPlantUml(input);
+  });
 
   const handoffRequest = z.object({task: HandoffSpecificationSchema.shape.task, scope: HandoffSpecificationSchema.shape.scope}).strict();
   const jobParams = z.object({id: ProjectIdParamSchema.shape.id, jobId: z.string().regex(/^[a-zA-Z0-9-]+$/)}).strict();
@@ -371,13 +378,24 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     const project = await store.get(id);
     const files = await captureFiles(project.root);
     if (isRevisionIncomplete(files)) throw new AppError('Source changed while preparing the handoff. Retry.',409);
-    const output = bundleFiles(project,input.task,input.scope);
-    const handoff = HandoffPackageSchema.parse({manifest: JSON.parse(output['manifest.json']), specification: JSON.parse(output['specification.json']), architecture: output['ARCHITECTURE.md'], task: output['AGENT_TASK.md'], importReport: JSON.parse(output['IMPORT_REPORT.json'])});
-    const handoffId=randomUUID();
-    const record={handoffId,projectId:id,specRevision:project.specRevision,sourceHashes:hashes(files),task:input.task,scope:input.scope};
     if((await store.get(id)).specRevision!==project.specRevision)throw new AppError('Specification changed while preparing the handoff. Retry.',409);
-    await atomicJson(join(store.projectDir(id),'handoffs',handoffId+'.json'),record);
-    return {...handoff,handoffId,specRevision:record.specRevision,sourceHashes:record.sourceHashes};
+    const snapshot=await prepareHandoff(project,input.task,input.scope,hashes(files),store.projectDir(id));
+    if((await store.get(id)).specRevision!==project.specRevision)throw new AppError('Specification changed while preparing the handoff. Retry.',409);
+    return snapshot;
+  });
+  const snapshotParams=z.object({id:ProjectIdParamSchema.shape.id,handoffId:HandoffId}).strict();
+  app.get('/api/projects/:id/handoffs/:handoffId',async request=>{
+    const {id,handoffId}=snapshotParams.parse(request.params);await store.get(id);
+    return readHandoff(store.projectDir(id),handoffId);
+  });
+  app.post('/api/projects/:id/handoffs/:handoffId/check',async request=>{
+    const {id,handoffId}=snapshotParams.parse(request.params);await store.get(id);
+    return checkHandoffConnection(await readHandoff(store.projectDir(id),handoffId),store.projectDir(id));
+  });
+  app.get('/api/projects/:id/handoffs/:handoffId/download',async(request,reply)=>{
+    const {id,handoffId}=snapshotParams.parse(request.params);await store.get(id);
+    const snapshot=await readHandoff(store.projectDir(id),handoffId);
+    return reply.type('application/zip').header('Content-Disposition','attachment; filename="umlith-handoff.zip"').send(Buffer.from(handoffArchive(snapshot)));
   });
   app.get('/api/projects/:id/jobs', async request => {
     const {id} = ProjectIdParamSchema.parse(request.params);return jobs.list(id);
@@ -467,8 +485,8 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   // Specification endpoints
   const updateSpecHandler = async (request: any, reply: any) => {
     const { id } = ProjectIdParamSchema.parse(request.params);
-    const { expectedRevision, graph } = UpdateSpecificationRequestSchema.parse(request.body);
-    const updated = await store.updateSpec(id, expectedRevision, graph);
+    const { expectedRevision, graph, projectDescription } = UpdateSpecificationRequestSchema.parse(request.body);
+    const updated = await store.updateSpec(id, expectedRevision, graph, projectDescription);
     return reply.send(updated);
   };
 

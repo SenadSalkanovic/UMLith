@@ -1,8 +1,13 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { Project, Graph, Layout, BindingReviewRecord, DivergenceReport } from '../shared/model';
 import type { CreateProjectRequest, RevisionRecord } from '../shared/api';
 import type { ViewState, SpecificationState, AnalysisState, WorkspaceError, SyncStatus } from './types';
 import * as api from './api';
+import { GraphSchema } from '../shared/model';
+import sensorExample from './examples/sensor-platform.json';
+import { defaultDestination, readDestination, destinationUrl, selectionDestination, type Destination } from './navigation-state';
+import { newEditHistory, recordEdit, undoEdit, redoEdit, type EditHistory } from './editor-history';
+import { DesignDetails } from './components/DesignDetails';
 import { reconcileSelectionAndScope } from './workspace-state';
 import { Header } from './components/Header';
 import { ProjectTree } from './components/ProjectTree';
@@ -22,7 +27,7 @@ import { ProtectionEditor } from './components/ProtectionEditor';
 import { ImportReview } from './components/ImportReview';
 import { AnalysisStatus } from './components/AnalysisStatus';
 import { AgentWorkspace } from './components/AgentWorkspace';
-import { Loader2, Clock, AlertTriangle } from 'lucide-react';
+import { Loader2, Clock, AlertTriangle, Undo2, Redo2, PanelLeft, SlidersHorizontal, ArrowLeft } from 'lucide-react';
 
 export interface AppProps {
   initialProject?: Project;
@@ -123,6 +128,7 @@ export const App: React.FC<AppProps> = ({
   const decideProposal = async (review: PendingReviewItem, decision: 'accept' | 'reject') => {
     const projectId = specificationState.project?.id;
     if (!projectId || review.kind !== 'architecture' || isDecidingProposal) return;
+    if (draftBaseRevision.current !== null || saving.current) throw new Error('Save or discard the draft before deciding on design changes.');
     setIsDecidingProposal(true);
     setProposalError(null);
     try {
@@ -146,19 +152,91 @@ export const App: React.FC<AppProps> = ({
 
   // 5. View State (UI-only, strictly decoupled from Spec and Analysis)
   const [viewState, setViewState] = useState<ViewState>({
-    selectedId: null,
-    selectedType: null,
-    activeScope: null,
+    ...defaultDestination,
+    ...(initialProject && typeof window !== 'undefined' ? readDestination(window.location.search, initialProject.id, initialProject.specification) : {}),
     searchQuery: '',
     graphContext: 'intended',
     panels: {
       tree: true,
       canvas: true,
       inspector: true,
-      source: true,
-      review: true,
+      source: false,
+      review: false,
     },
   });
+
+  const [notesDraft, setNotesDraft] = useState<string | null>(null);
+  const [notesError, setNotesError] = useState('');
+  const [semanticDrafts, setSemanticDrafts] = useState(false);
+  const [pendingDetailBuffers, setPendingDetailBuffers] = useState(false);
+  const [draftGraph, setDraftGraph] = useState<Graph | null>(null);
+  const [editHistory, setEditHistory] = useState(() => newEditHistory(initialProject?.specRevision ?? 0));
+  const [editMessage, setEditMessage] = useState('');
+  const [draftResetToken, setDraftResetToken] = useState(0);
+  const [connectionDraft, setConnectionDraft] = useState<{source:string;target:string;nonce:number}>();
+  const destinationCache = useRef<Record<string, ViewState>>({});
+  const lastBuildContext = useRef<'intended' | 'implemented'>('intended');
+  const currentProjectId = useRef(initialProject?.id || null);
+  currentProjectId.current = specificationState.project?.id || null;
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'failed'>('saved');
+  const saving = useRef(false);
+  const draftBaseRevision = useRef<number | null>(null);
+  const pendingDraftSelection = useRef<string | null>(null);
+  const workspace = viewState.workspace || 'design';
+  const designView = viewState.designView || 'classes';
+  const projectId = specificationState.project?.id;
+  const changeDestination = (updates: Partial<ViewState>, replace = false) => {
+    setViewState(previous => ({ ...previous, ...updates }));
+    if (typeof window !== 'undefined' && projectId) {
+      const destination = { ...defaultDestination, ...viewState, ...updates } as Destination;
+      const url = destinationUrl(new URL(window.location.href), projectId, destination);
+      if (url.href !== window.location.href) window.history[replace ? 'replaceState' : 'pushState']({}, '', url);
+    }
+  };
+  const changeWorkspace = (next: 'design' | 'build') => {
+    if (next === workspace) return;
+    destinationCache.current[`${workspace}:${viewState.graphContext || 'intended'}`] = viewState;
+    const context = next === 'design' ? 'intended' : lastBuildContext.current;
+    const cached = destinationCache.current[`${next}:${context}`];
+    changeDestination({ ...(cached || defaultDestination), workspace: next, graphContext: context });
+  };
+  useEffect(() => {
+    if (typeof window === 'undefined' || !projectId || !specificationState.specification) return;
+    const restore = () => {
+      const params = new URLSearchParams(window.location.search);
+      const nextProject = params.get('project');
+      if (nextProject && nextProject !== projectId) {
+        if (draftBaseRevision.current !== null || saving.current) {
+          window.history.pushState({}, '', destinationUrl(new URL(window.location.href), projectId, { ...defaultDestination, ...viewState } as Destination));
+          setEditMessage('Save or discard changes before switching projects.');
+        } else void loadProjectById(nextProject);
+        return;
+      }
+      const graph = params.get('context') === 'implemented' ? analysisState.analysis?.graph || specificationState.specification! : draftGraph || specificationState.specification!;
+      setViewState(previous => ({ ...previous, ...readDestination(window.location.search, projectId, graph) }));
+    };
+    window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, [projectId, specificationState.specification, analysisState.analysis, draftGraph, viewState]);
+  useEffect(() => {
+    setEditHistory(previous => {
+      if (previous.revision === specificationState.specRevision) return previous;
+      return newEditHistory(specificationState.specRevision);
+    });
+  }, [specificationState.specRevision]);
+  const draftGraphChanged = useCallback((graph: Graph | null) => {
+    setDraftGraph(graph);
+    const id = pendingDraftSelection.current;
+    if (graph && id && graph.nodes.some(node => node.id === id)) {
+      pendingDraftSelection.current = null;
+      setViewState(previous => ({ ...previous, selectedId: id, selectedType: 'node' }));
+    }
+  }, []);
+  const draftChanged = useCallback((dirty: boolean) => {
+    setSemanticDrafts(dirty);
+    if (dirty && draftBaseRevision.current === null) draftBaseRevision.current = specificationState.specRevision;
+    if (!dirty) draftBaseRevision.current = null;
+  }, [specificationState.specRevision]);
 
   // Fetch specification history
   const fetchRevisionsList = useCallback(async (projectId: string) => {
@@ -173,6 +251,9 @@ export const App: React.FC<AppProps> = ({
 
   // Load project by ID
   const loadProjectById = useCallback(async (id: string) => {
+    if (draftBaseRevision.current !== null || saving.current) { setEditMessage('Save or discard changes before switching projects.'); return; }
+    const switching = currentProjectId.current !== id;
+    if (switching) { destinationCache.current = {}; lastBuildContext.current = 'intended'; setConnectionDraft(undefined); }
     setIsLoading(true);
     setError(null);
     try {
@@ -209,11 +290,13 @@ export const App: React.FC<AppProps> = ({
       setConflictState(null);
       setViewState(prev => ({
         ...prev,
-        selectedId: null,
-        selectedType: null,
-        activeScope: null,
+        ...readDestination(typeof window !== 'undefined' ? window.location.search : '', proj.id, typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('context') === 'implemented' && proj.analysis ? proj.analysis.graph : proj.specification),
         searchQuery: '',
       }));
+      setDraftGraph(null);
+      setSemanticDrafts(false);
+      draftBaseRevision.current = null;
+      setEditHistory(newEditHistory(proj.specRevision));
 
       // Fetch saved revisions
       await fetchRevisionsList(proj.id);
@@ -302,13 +385,15 @@ export const App: React.FC<AppProps> = ({
 
   // View state handlers (Pure view operations - do not mutate specification!)
   const handleTogglePanel = (panel: keyof ViewState['panels']) => {
-    setViewState(prev => ({
-      ...prev,
-      panels: {
-        ...prev.panels,
-        [panel]: !prev.panels[panel],
-      },
-    }));
+    if (workspace === 'design' && panel === 'canvas') return;
+    setViewState(previous => {
+      const panels = { ...previous.panels, [panel]: !previous.panels[panel] };
+      if (typeof window !== 'undefined' && window.innerWidth < 1100 && panels[panel]) {
+        if (panel === 'tree') panels.inspector = false;
+        if (panel === 'inspector') panels.tree = false;
+      }
+      return { ...previous, panels };
+    });
   };
 
   const historicalRecord = activeHistoricalRevision !== null
@@ -319,49 +404,19 @@ export const App: React.FC<AppProps> = ({
 
   const activeGraph = viewState.graphContext === 'implemented'
     ? (analysisState.analysis?.graph || null)
-    : (historicalRecord ? historicalRecord.graph : specificationState.specification);
+    : (historicalRecord ? historicalRecord.graph : (draftGraph || specificationState.specification));
 
   const handleSelectNode = (id: string | null) => {
-    if (!id) {
-      setViewState(prev => ({
-        ...prev,
-        selectedId: null,
-        selectedType: null,
-      }));
-      return;
-    }
-
-    const currentGraph = viewState.graphContext === 'implemented'
-      ? (analysisState.analysis?.graph || null)
-      : specificationState.specification;
-
-    const node = currentGraph?.nodes.find(n => n.id === id);
-    let parentId: string | null = null;
-    if (node) {
-      if (node.parentId && currentGraph?.nodes.some(n => n.id === node.parentId)) {
-        parentId = node.parentId;
-      } else {
-        const containsEdge = currentGraph?.edges.find(e => e.kind === 'contains' && e.target === id);
-        if (containsEdge && currentGraph?.nodes.some(n => n.id === containsEdge.source)) {
-          parentId = containsEdge.source;
-        }
-      }
-    }
-
-    setViewState(prev => ({
-      ...prev,
-      selectedId: id,
-      selectedType: 'node',
-      // Tree selection opens the correct graph scope containing the node
-      activeScope: parentId,
-    }));
+    if (!id) { changeDestination({ selectedId: null, selectedType: null }); return; }
+    pendingDraftSelection.current = null;
+    const graph = activeGraph;
+    if (!graph) return;
+    const selection = selectionDestination(graph, id);
+    changeDestination({ ...selection, panels: { ...viewState.panels, inspector: true } });
   };
-
   const handleScopeChange = (scopeId: string | null) => {
-    setViewState(prev => ({
-      ...prev,
-      activeScope: scopeId,
-    }));
+    const scope = activeGraph?.nodes.find(node => node.id === scopeId);
+    changeDestination({ activeScope: scopeId, flowchartId: scope?.kind === 'function' ? scope.id : null, ...(scope?.kind === 'function' ? { detailTab: 'flowchart' as const } : {}) });
   };
 
   const handleSearchChange = (query: string) => {
@@ -369,33 +424,22 @@ export const App: React.FC<AppProps> = ({
   };
 
   const handleClearSelection = () => {
-    setViewState(prev => ({ ...prev, selectedId: null, selectedType: null }));
+    changeDestination({ selectedId: null, selectedType: null });
   };
 
   const handleGraphContextChange = (context: 'intended' | 'implemented') => {
-    setViewState(prev => {
-      const nextGraph = context === 'implemented'
-        ? (analysisState.analysis?.graph || null)
-        : specificationState.specification;
-
-      const nextNodes = nextGraph?.nodes || [];
-      const selectedStillExists = prev.selectedId ? nextNodes.some(n => n.id === prev.selectedId) : false;
-      const scopeStillExists = prev.activeScope ? nextNodes.some(n => n.id === prev.activeScope) : false;
-
-      return {
-        ...prev,
-        graphContext: context,
-        selectedId: selectedStillExists ? prev.selectedId : null,
-        selectedType: selectedStillExists ? prev.selectedType : null,
-        activeScope: scopeStillExists ? prev.activeScope : null,
-      };
-    });
+    if (context === viewState.graphContext) return;
+    destinationCache.current[`${workspace}:${viewState.graphContext || 'intended'}`] = viewState;
+    lastBuildContext.current = context;
+    const cached = destinationCache.current[`${workspace}:${context}`];
+    changeDestination({ ...(cached || defaultDestination), workspace, graphContext: context });
   };
 
   const handleOpenArchitectureEditor = (
     tab: 'add' | 'edit' | 'connect' | 'preview-delete' = 'add',
     nodeId: string | null = null
   ) => {
+    if (semanticDrafts || saving.current) { setEditMessage('Save or discard the current draft before opening another editor.'); return; }
     setArchEditorTab(tab);
     setArchEditorNodeId(nodeId || viewState.selectedId);
     setIsArchEditorOpen(true);
@@ -405,6 +449,7 @@ export const App: React.FC<AppProps> = ({
     tab: 'entities' | 'fields' | 'enums' | 'relationships' = 'entities',
     nodeId: string | null = null
   ) => {
+    if (semanticDrafts || saving.current) { setEditMessage('Save or discard the current draft before opening another editor.'); return; }
     setErEditorTab(tab);
     setErEditorNodeId(nodeId || viewState.selectedId);
     setIsErEditorOpen(true);
@@ -414,6 +459,7 @@ export const App: React.FC<AppProps> = ({
     tab: 'details' | 'contract' | 'scenarios' | 'add' = 'details',
     nodeId: string | null = null
   ) => {
+    if (semanticDrafts || saving.current) { setEditMessage('Save or discard the current draft before opening another editor.'); return; }
     setFunctionEditorTab(tab);
     setFunctionEditorNodeId(nodeId || viewState.selectedId);
     setIsFunctionEditorOpen(true);
@@ -423,6 +469,7 @@ export const App: React.FC<AppProps> = ({
     tab: 'steps' | 'connect' | 'opaque' | 'overview' | 'remove' = 'steps',
     functionId: string | null = null
   ) => {
+    if (semanticDrafts || saving.current) { setEditMessage('Save or discard the current draft before opening another editor.'); return; }
     setWorkflowEditorTab(tab);
     if (functionId) {
       setWorkflowEditorFunctionId(functionId);
@@ -441,6 +488,7 @@ export const App: React.FC<AppProps> = ({
   };
 
   const handleOpenProtectionEditor = (nodeId: string | null = null) => {
+    if (semanticDrafts || saving.current) { setEditMessage('Save or discard the current draft before opening another editor.'); return; }
     setProtectionEditorNodeId(nodeId || viewState.selectedId);
     setIsProtectionEditorOpen(true);
   };
@@ -478,85 +526,12 @@ export const App: React.FC<AppProps> = ({
     }
   };
 
-  const handleDeleteNode = async (id: string) => {
-    if (isHistoricalActive) {
-      setError({
-        title: 'Action Blocked in Historical View',
-        message: 'Historical specification snapshots are read-only. Edits cannot overwrite newer data implicitly.',
-        actionableSteps: ['Exit the historical view or restore this revision as a new forward revision.'],
-      });
-      return;
-    }
-
-    const currentSpec = specificationState.specification;
-    if (!currentSpec) return;
-
-    const targetNode = currentSpec.nodes.find(n => n.id === id);
-    if (!targetNode) return;
-
-    const remainingNodes = currentSpec.nodes
-      .filter(n => n.id !== id)
-      .map(n => {
-        if (n.parentId === id) {
-          return { ...n, parentId: targetNode.parentId };
-        }
-        return n;
-      });
-
-    const remainingEdges = currentSpec.edges.filter(e => e.source !== id && e.target !== id);
-
-    const remainingReqs = currentSpec.requirements.map(req => ({
-      ...req,
-      nodeIds: req.nodeIds.filter(nid => nid !== id),
-    }));
-
-    const nextGraph: Graph = {
-      ...currentSpec,
-      nodes: remainingNodes,
-      edges: remainingEdges,
-      requirements: remainingReqs,
-    };
-
-    const nextRevision = specificationState.specRevision + 1;
-
-    setSpecificationState(prev => ({
-      ...prev,
-      specRevision: nextRevision,
-      specification: nextGraph,
-    }));
-
-    // Predictably resolve selection and scope
-    setViewState(prev => {
-      const isDeletedSelected = prev.selectedId === id;
-      const isDeletedScope = prev.activeScope === id;
-      return {
-        ...prev,
-        selectedId: isDeletedSelected ? null : prev.selectedId,
-        selectedType: isDeletedSelected ? null : prev.selectedType,
-        activeScope: isDeletedScope ? (targetNode.parentId ?? null) : prev.activeScope,
-      };
-    });
-
-    if (specificationState.project && !specificationState.project.root?.startsWith('/test')) {
-      try {
-        await api.updateSpecification(
-          specificationState.project.id,
-          specificationState.specRevision,
-          nextGraph,
-          apiBaseUrl
-        );
-      } catch {
-        // Fallback for isolated tests or unmanaged projects
-      }
-    }
+  const handleDeleteNode = (id: string) => {
+    handleOpenArchitectureEditor('preview-delete', id);
   };
 
   const handleSelectEdge = (id: string | null) => {
-    setViewState(prev => ({
-      ...prev,
-      selectedId: id,
-      selectedType: id ? 'edge' : null,
-    }));
+    changeDestination({ selectedId: id, selectedType: id ? 'edge' : null, panels: { ...viewState.panels, inspector: true } });
   };
 
   const handleLayoutChange = async (updatedLayout: Layout, scopeId?: string | null) => {
@@ -601,65 +576,56 @@ export const App: React.FC<AppProps> = ({
     }
   };
 
-  const handleUpdateSpecification = async (nextGraph: Graph) => {
-    if (isHistoricalActive) {
-      throw new Error('Historical view is read-only. Cannot overwrite newer data implicitly.');
+  const handleUpdateSpecification = async (nextGraph: Graph, historyOverride?: EditHistory, fromDraft = false, description?: string) => {
+    if (semanticDrafts && !fromDraft) throw new Error('Save or discard the current detail draft before making a separate design change.');
+    if (isHistoricalActive || viewState.graphContext === 'implemented') throw new Error('This evidence view is read-only. Return to the current intended design to edit.');
+    if (saving.current) throw new Error('A save is already in progress.');
+    const graph = GraphSchema.parse(nextGraph);
+    const project = specificationState.project;
+    const before = specificationState.specification;
+    if (!project || !before) throw new Error('Open a project before saving.');
+    if (draftBaseRevision.current !== null && draftBaseRevision.current !== specificationState.specRevision) {
+      const message = 'The design changed while this draft was open. Reconcile it with the latest revision.';
+      setSaveStatus('failed');
+      setConflictState({projectId:project.id,expectedRevision:draftBaseRevision.current,currentRevision:specificationState.specRevision,draftGraph:graph,errorMessage:message,timestamp:Date.now()});
+      throw new Error(message);
     }
-
-    const nextRevision = specificationState.specRevision + 1;
-
-    // Persist to server
-    if (specificationState.project && !specificationState.project.root?.startsWith('/test')) {
-      try {
-        const updatedProject = await api.updateSpecification(
-          specificationState.project.id,
-          specificationState.specRevision,
-          nextGraph,
-          apiBaseUrl
-        );
-        setSpecificationState(prev => ({
-          ...prev,
-          specRevision: updatedProject.specRevision,
-          specification: updatedProject.specification,
-          project: updatedProject,
-        }));
-        setConflictState(null);
-        await fetchRevisionsList(updatedProject.id);
-      } catch (err: any) {
-        if (err?.statusCode === 409 || err?.message?.includes('conflict') || err?.message?.includes('Specification changed')) {
-          // Strictly preserve draft and surface actionable conflict recovery!
-          const currentRev = err?.currentRevision ?? (specificationState.project.specRevision + 1);
-          setConflictState({
-            projectId: specificationState.project.id,
-            expectedRevision: specificationState.specRevision,
-            currentRevision: currentRev,
-            draftGraph: nextGraph,
-            errorMessage: err?.message || 'Specification conflict: draft based on stale revision',
-            timestamp: Date.now(),
-          });
-          return;
-        }
-        throw err;
+    saving.current = true;
+    setSaveStatus('saving');
+    try {
+      const updated = project.root.startsWith('/test')
+        ? { ...project, ...(description !== undefined ? { description } : {}), specification: graph, specRevision: specificationState.specRevision + 1 }
+        : await api.updateSpecification(project.id, specificationState.specRevision, graph, apiBaseUrl, description);
+      if (currentProjectId.current !== project.id) return;
+      setSpecificationState(previous => ({ ...previous, project: updated, specRevision: updated.specRevision, specification: updated.specification }));
+      setEditHistory(historyOverride ? { ...historyOverride, revision: updated.specRevision } : recordEdit(editHistory.revision === specificationState.specRevision ? editHistory : newEditHistory(specificationState.specRevision), before, updated.specification, updated.specRevision));
+      setConflictState(null);
+      setSaveStatus('saved');
+      setDraftGraph(null);
+      setSemanticDrafts(false);
+      draftBaseRevision.current = null;
+      pendingDraftSelection.current = null;
+      await fetchRevisionsList(updated.id);
+    } catch (err: any) {
+      setSaveStatus('failed');
+      if (err?.statusCode === 409 && description === undefined) {
+        setConflictState({ projectId: project.id, expectedRevision: specificationState.specRevision, currentRevision: err.currentRevision ?? specificationState.specRevision + 1, draftGraph: graph, errorMessage: err.message || 'Specification conflict', timestamp: Date.now() });
       }
-    } else {
-      // Local fallback for in-memory or isolated test projects
-      setSpecificationState(prev => ({
-        ...prev,
-        specRevision: nextRevision,
-        specification: nextGraph,
-        project: prev.project
-          ? {
-              ...prev.project,
-              specRevision: nextRevision,
-              specification: nextGraph,
-            }
-          : null,
-      }));
-    }
+      throw err;
+    } finally { saving.current = false; }
+  };
+  const replayEdit = async (direction: 'undo' | 'redo') => {
+    try {
+      if (semanticDrafts) throw new Error('Save or discard your draft before undoing.');
+      const transition = (direction === 'undo' ? undoEdit : redoEdit)(editHistory, specificationState.specRevision, specificationState.specification!);
+      await handleUpdateSpecification(transition.graph, transition.history);
+      setEditMessage('');
+    } catch (err) { setEditMessage(err instanceof Error ? err.message : String(err)); }
   };
 
   // Restore a historical revision as an explicit forward mutation
   const handleRestoreRevision = async (targetRevision: RevisionRecord) => {
+    if (semanticDrafts || saving.current) { setEditMessage('Save or discard changes before restoring a revision.'); return; }
     if (!specificationState.project) return;
     const currentRev = specificationState.project.specRevision;
     const nextRevision = currentRev + 1;
@@ -706,43 +672,53 @@ export const App: React.FC<AppProps> = ({
   };
 
   const handleResolveConflictReload = async () => {
-    if (!specificationState.project) return;
-    await loadProjectById(specificationState.project.id);
-    setConflictState(null);
-  };
-
-  const handleResolveConflictApply = async () => {
-    if (!conflictState || !specificationState.project) return;
+    if (!specificationState.project || saving.current) return;
     try {
-      const freshProject = await api.getProject(specificationState.project.id, apiBaseUrl);
-      const updated = await api.updateSpecification(
-        freshProject.id,
-        freshProject.specRevision,
-        conflictState.draftGraph,
-        apiBaseUrl
-      );
-      setSpecificationState(prev => ({
-        ...prev,
-        specRevision: updated.specRevision,
-        specification: updated.specification,
-        project: updated,
-      }));
-      setConflictState(null);
-      await fetchRevisionsList(updated.id);
-    } catch (err: any) {
-      setError({
-        title: 'Failed to Apply Conflict Draft',
-        message: err?.message || 'Could not apply draft on top of latest revision.',
-        actionableSteps: ['Inspect conflict diff and review changes before retrying.'],
-      });
-    }
+      const fresh = await api.getProject(specificationState.project.id, apiBaseUrl);
+      setSpecificationState(previous => ({ ...previous, project: fresh, specification: fresh.specification, specRevision: fresh.specRevision }));
+      setConflictState(previous => previous ? { ...previous, currentRevision: fresh.specRevision } : previous);
+      setEditHistory(newEditHistory(fresh.specRevision));
+      setEditMessage('Latest design loaded. Your original draft is retained; review it before applying or discarding.');
+    } catch (err) { setEditMessage(err instanceof Error ? err.message : String(err)); }
   };
-
+  const handleResolveConflictApply = async () => {
+    if (!conflictState || !specificationState.project || saving.current) return;
+    if (pendingDetailBuffers) { setEditMessage('Apply or cancel the pending field or relationship edit before resolving this conflict.'); return; }
+    saving.current = true;
+    setSaveStatus('saving');
+    try {
+      const fresh = await api.getProject(specificationState.project.id, apiBaseUrl);
+      if (fresh.specRevision !== conflictState.currentRevision) {
+        setConflictState(previous => previous ? { ...previous, currentRevision:fresh.specRevision } : previous);
+        throw new Error('The saved design changed again. Reload and review the latest revision before applying your draft.');
+      }
+      const updated = await api.updateSpecification(fresh.id, conflictState.currentRevision, draftGraph || conflictState.draftGraph, apiBaseUrl);
+      setSpecificationState(previous => ({ ...previous, specRevision: updated.specRevision, specification: updated.specification, project: updated }));
+      setConflictState(null);
+      setDraftGraph(null);
+      setSemanticDrafts(false);
+      draftBaseRevision.current = null;
+      pendingDraftSelection.current = null;
+      setDraftResetToken(value => value + 1);
+      setEditHistory(recordEdit(newEditHistory(fresh.specRevision), fresh.specification, updated.specification, updated.specRevision));
+      setSaveStatus('saved');
+      setEditMessage('Draft accepted as a new revision.');
+      await fetchRevisionsList(updated.id);
+    } catch (err) { setSaveStatus('failed'); setEditMessage(err instanceof Error ? err.message : String(err)); }
+    finally { saving.current = false; }
+  };
   const handleResolveConflictDiscard = () => {
     setConflictState(null);
+    setDraftGraph(null);
+    setSemanticDrafts(false);
+    draftBaseRevision.current = null;
+    pendingDraftSelection.current = null;
+    setDraftResetToken(value => value + 1);
+    setSaveStatus('saved');
   };
 
   const handleAcceptBinding = async (nodeId: string, candidateId: string) => {
+    if (semanticDrafts || saving.current) { setEditMessage('Save or discard changes before accepting a source binding.'); return; }
     if (!specificationState.project) return;
     try {
       const res = await api.acceptBinding(
@@ -773,9 +749,9 @@ export const App: React.FC<AppProps> = ({
   useEffect(() => {
     const currentGraph = viewState.graphContext === 'implemented'
       ? (analysisState.analysis?.graph || null)
-      : specificationState.specification;
+      : (draftGraph || specificationState.specification);
 
-    if (!currentGraph) return;
+    if (!currentGraph || (workspace === 'design' && (semanticDrafts || pendingDraftSelection.current))) return;
 
     const resolution = reconcileSelectionAndScope(viewState, currentGraph, {
       specification: specificationState.specification,
@@ -796,6 +772,9 @@ export const App: React.FC<AppProps> = ({
     }
   }, [
     specificationState.specification,
+    draftGraph,
+    semanticDrafts,
+    workspace,
     analysisState.analysis,
     viewState.graphContext,
     viewState.selectedId,
@@ -806,6 +785,8 @@ export const App: React.FC<AppProps> = ({
 
   // Project management handlers
   const handleCreateProject = async (data: CreateProjectRequest) => {
+    if (semanticDrafts || saving.current) throw new Error('Save or discard changes before creating another project.');
+    destinationCache.current = {};
     setIsLoading(true);
     setError(null);
     try {
@@ -822,12 +803,12 @@ export const App: React.FC<AppProps> = ({
         status: 'current',
         lastChecked: Date.now(),
       });
-      setViewState(prev => ({
-        ...prev,
-        selectedId: null,
-        selectedType: null,
-        activeScope: null,
-      }));
+      setViewState(prev => ({ ...prev, ...defaultDestination, graphContext: 'intended' }));
+      setDraftGraph(null);
+      setSemanticDrafts(false);
+      draftBaseRevision.current = null;
+      setEditHistory(newEditHistory(created.specRevision));
+      if (typeof window !== 'undefined') window.history.replaceState({}, '', destinationUrl(new URL(window.location.href), created.id, defaultDestination));
     } catch (err: any) {
       setError({
         title: 'Failed to Create Project',
@@ -842,6 +823,19 @@ export const App: React.FC<AppProps> = ({
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const openSensorExample = async () => {
+    if (semanticDrafts || saving.current) { setEditMessage('Save or discard changes before opening the example.'); return; }
+    setIsLoading(true);
+    try {
+      const created = await api.createProject({ name: 'Sensor platform · example', description: 'Synthetic reference design: eight UML types, method behavior, and a linked logical database.', target: 'Sensor application' }, apiBaseUrl);
+      const updated = await api.updateSpecification(created.id, created.specRevision, GraphSchema.parse(sensorExample), apiBaseUrl);
+      setAvailableProjects(previous => [...previous, updated]);
+      await loadProjectById(updated.id);
+      if (typeof window !== 'undefined') window.history.replaceState({}, '', destinationUrl(new URL(window.location.href), updated.id, defaultDestination));
+    } catch (err) { setEditMessage(err instanceof Error ? err.message : String(err)); }
+    finally { setIsLoading(false); }
   };
 
   // Render Loading State
@@ -876,6 +870,7 @@ export const App: React.FC<AppProps> = ({
         availableProjects={availableProjects}
         onSelectProject={loadProjectById}
         onCreateProject={handleCreateProject}
+        onOpenExample={openSensorExample}
       />
     );
   }
@@ -884,6 +879,13 @@ export const App: React.FC<AppProps> = ({
   return (
     <div className="workspace-shell" data-testid="workspace-shell">
       <Header
+        workspace={workspace}
+        onWorkspaceChange={changeWorkspace}
+        saveState={semanticDrafts ? 'Unsaved' : saveStatus === 'saving' ? 'Saving…' : saveStatus === 'failed' ? 'Save failed' : 'Saved'}
+        onPrepareHandoff={() => setIsAgentWorkspaceOpen(true)}
+        onOpenExample={openSensorExample}
+        onEditNotes={() => { if (!semanticDrafts && !saving.current) { setNotesDraft(specificationState.project!.description); setNotesError(''); } }}
+        hasDraft={semanticDrafts || saveStatus === 'saving'}
         project={specificationState.project}
         syncStatus={analysisState.status}
         analysis={analysisState.analysis}
@@ -902,7 +904,7 @@ export const App: React.FC<AppProps> = ({
         onOpenFunctionEditor={() => handleOpenFunctionEditor('details')}
         onOpenWorkflowEditor={() => handleOpenWorkflowEditor('steps')}
         onOpenRevisionHistory={() => setIsRevisionHistoryOpen(true)}
-        onOpenImportReview={() => setIsImportReviewOpen(true)}
+        onOpenImportReview={() => { if (!semanticDrafts && !saving.current) setIsImportReviewOpen(true); else setEditMessage('Save or discard changes before adopting imported code.'); }}
         onRefreshAnalysis={() => {
           if (specificationState.project) {
             void api.startAnalysis(specificationState.project.id, { async: true }, apiBaseUrl);
@@ -916,9 +918,19 @@ export const App: React.FC<AppProps> = ({
       />
 
       {/* Analysis Status Alert Banner for Stale or Partial states */}
-      <div className="workspace-agent-action">
-        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setIsAgentWorkspaceOpen(true)}>Agent workspace</button>
+      <div className="workspace-toolbar">
+        <button className="btn btn-outline" onClick={() => handleTogglePanel('tree')} aria-pressed={viewState.panels.tree}><PanelLeft size={16}/>Model</button>
+        {workspace === 'design' && <div className="design-view-tabs" aria-label="Design views">
+          {(['overview', 'classes', 'database'] as const).map(value => <button key={value} aria-pressed={designView === value} onClick={() => changeDestination({ designView: value, workspace: 'design', graphContext: 'intended', flowchartId: null })}>{value === 'overview' ? 'Overview' : value === 'classes' ? 'Classes' : 'Database'}</button>)}
+        </div>}
+        {viewState.flowchartId && <button className="btn btn-outline" onClick={() => { const id = viewState.flowchartId!; changeDestination({ ...selectionDestination(activeGraph!, id), detailTab: 'flowchart' }); }}><ArrowLeft size={14}/>Return to class</button>}
+        <span className="toolbar-spacer"/>
+        <button className="btn btn-outline" disabled={semanticDrafts || !editHistory.undo.length || isHistoricalActive || viewState.graphContext === 'implemented'} onClick={() => replayEdit('undo')} aria-label="Undo"><Undo2 size={16}/></button>
+        <button className="btn btn-outline" disabled={semanticDrafts || !editHistory.redo.length || isHistoricalActive || viewState.graphContext === 'implemented'} onClick={() => replayEdit('redo')} aria-label="Redo"><Redo2 size={16}/></button>
+        <button className="btn btn-outline" onClick={() => handleTogglePanel('inspector')} aria-pressed={viewState.panels.inspector}><SlidersHorizontal size={16}/>Details</button>
       </div>
+      {editMessage && <p className="workspace-edit-message" role="alert">{editMessage}</p>}
+      {workspace === 'build' && <div className="build-workspace-actions"><strong>Build &amp; review</strong><span>Intended design → candidate changes → checks → human decision</span><button className="btn btn-primary" disabled={semanticDrafts} onClick={() => setIsAgentWorkspaceOpen(true)}>Tasks &amp; candidate review</button><button className="btn btn-outline" disabled={semanticDrafts || saveStatus === 'saving'} onClick={() => setIsImportReviewOpen(true)}>Import &amp; adoption</button><button className="btn btn-outline" onClick={() => handleTogglePanel('source')}>Source evidence</button><button className="btn btn-outline" onClick={() => handleTogglePanel('review')}>Design proposals &amp; bindings</button></div>}
       {(analysisState.status === 'stale' || analysisState.status === 'partial') && (
         <div className="workspace-analysis-banner-wrapper" data-testid="workspace-analysis-banner">
           <AnalysisStatus
@@ -1011,7 +1023,7 @@ export const App: React.FC<AppProps> = ({
         </div>
       )}
 
-      <main className="workspace-main" data-testid="workspace-main">
+      <main className={`workspace-main workspace-${workspace} ${viewState.panels.tree ? 'with-tree' : ''} ${viewState.panels.inspector ? 'with-details' : ''}`} data-testid="workspace-main">
         {/* Panel 1: Project Tree */}
         {viewState.panels.tree && (
           <div className="layout-col-tree">
@@ -1024,7 +1036,8 @@ export const App: React.FC<AppProps> = ({
               project={specificationState.project}
               analysis={analysisState.analysis}
               onGraphContextChange={handleGraphContextChange}
-              onDeleteNode={handleDeleteNode}
+              onDeleteNode={isHistoricalActive || viewState.graphContext === 'implemented' ? undefined : handleDeleteNode}
+              hideContext={workspace === 'design'}
             />
           </div>
         )}
@@ -1032,7 +1045,7 @@ export const App: React.FC<AppProps> = ({
         {/* Center Work Area: Scoped Canvas + Source Viewer */}
         <div className="layout-col-center">
           {/* Panel 2: Scoped Canvas */}
-          {viewState.panels.canvas && (
+          {(workspace === 'design' || viewState.panels.canvas) && (
             <div className="center-top-canvas">
               <Canvas
                 graph={activeGraph}
@@ -1041,21 +1054,21 @@ export const App: React.FC<AppProps> = ({
                 viewState={viewState}
                 onSelectNode={handleSelectNode}
                 onSelectEdge={handleSelectEdge}
+                onConnectNodes={(source, target) => { handleSelectNode(source); setConnectionDraft(previous => ({source, target, nonce:(previous?.nonce||0)+1})); changeDestination({ ...selectionDestination(activeGraph!, source), panels: { ...viewState.panels, inspector:true } }); }}
+                onSelectField={(owner, field) => changeDestination({ ...selectionDestination(activeGraph!, owner), selectedField: field, panels: { ...viewState.panels, inspector: true } })}
                 onScopeChange={handleScopeChange}
                 onLayoutChange={handleLayoutChange}
-                onUpdateSpecification={handleUpdateSpecification}
+                onUpdateSpecification={semanticDrafts ? undefined : handleUpdateSpecification}
+                readOnly={isHistoricalActive || viewState.graphContext === 'implemented'}
                 projectId={specificationState.project?.id}
                 apiBaseUrl={apiBaseUrl}
-                onOpenArchitectureEditor={() => handleOpenArchitectureEditor('add')}
-                onOpenErEditor={() => handleOpenErEditor('entities')}
-                onOpenFunctionEditor={() => handleOpenFunctionEditor('details')}
-                onOpenWorkflowEditor={() => handleOpenWorkflowEditor('steps')}
+                onOpenArchitectureEditor={() => changeDestination({ selectedId: null, selectedType: null, panels: { ...viewState.panels, inspector: true } })}
               />
             </div>
           )}
 
           {/* Panel 4: Source Viewer */}
-          {viewState.panels.source && (
+          {workspace === 'build' && viewState.panels.source && (
             <div className="center-bottom-source">
               <SourceViewer
                 project={specificationState.project}
@@ -1071,7 +1084,10 @@ export const App: React.FC<AppProps> = ({
         {/* Right Work Area: Property Inspector + Review Area */}
         <div className="layout-col-right">
           {/* Panel 3: Property Inspector */}
-          {viewState.panels.inspector && (
+          {specificationState.specification && <div className="design-details-host" hidden={workspace !== 'design' || !viewState.panels.inspector || isHistoricalActive || viewState.graphContext === 'implemented'}>
+            <DesignDetails key={specificationState.project.id} connectionDraft={connectionDraft} graph={specificationState.specification} selectionId={viewState.selectedId} scopeId={viewState.activeScope} onSelect={id => { if (id && !activeGraph?.nodes.some(node => node.id === id) && !activeGraph?.edges.some(edge => edge.id === id)) pendingDraftSelection.current = id; changeDestination({ selectedId: id, selectedType: id ? (draftGraph || specificationState.specification)?.edges.some(edge => edge.id === id) ? 'edge' : 'node' : null, selectedField: null, ...(id && activeGraph?.nodes.some(node => node.id === id && node.kind === 'step') ? selectionDestination(activeGraph, id) : {}) }); }} onScope={handleScopeChange} onSave={graph => handleUpdateSpecification(graph, undefined, true)} resetToken={draftResetToken} onDraftChange={draftChanged} onPendingChange={setPendingDetailBuffers} onDraftGraphChange={draftGraphChanged} detailTab={viewState.detailTab} selectedField={viewState.selectedField} onDetailTabChange={detailTab => changeDestination({ detailTab })} onFlowchart={id => changeDestination({ flowchartId: id, activeScope: id, detailTab: 'flowchart' })}/>
+          </div>}
+          {(workspace === 'build' || isHistoricalActive || viewState.graphContext === 'implemented') && viewState.panels.inspector && (
             <div className="right-top-inspector">
               <PropertyInspector
                 project={specificationState.project}
@@ -1105,13 +1121,13 @@ export const App: React.FC<AppProps> = ({
           )}
 
           {/* Panel 5: Review Area */}
-          {viewState.panels.review && (
+          {workspace === 'build' && viewState.panels.review && (
             <div className="right-bottom-review">
               <ReviewPanel
                 project={specificationState.project}
                 graph={specificationState.specification}
                 analysisState={analysisState}
-                onOpenImportReview={() => setIsImportReviewOpen(true)}
+                onOpenImportReview={() => { if (!semanticDrafts && !saving.current) setIsImportReviewOpen(true); else setEditMessage('Save or discard changes before adopting imported code.'); }}
                 bindingReviews={bindingReviews}
                 onAcceptBinding={handleAcceptBinding}
                 divergenceReport={divergenceReport}
@@ -1128,6 +1144,8 @@ export const App: React.FC<AppProps> = ({
         </div>
       </main>
 
+      <footer className="workspace-statusbar"><span>Design r{specificationState.specRevision} · {semanticDrafts ? 'Unsaved changes' : saveStatus === 'failed' ? 'Save failed — draft retained' : 'Saved locally'}</span><span>{workspace === 'design' ? 'Human-owned intended design' : `Implemented evidence: ${analysisState.status}`} · layout saved independently</span></footer>
+      {notesDraft !== null && <div className="modal-backdrop"><section className="project-notes-dialog" role="dialog" aria-modal="true" aria-labelledby="project-notes-title"><h2 id="project-notes-title">Project notes</h2><p>Purpose, responsibilities, and design decisions for this project. Notes save as a new revision; diagram Undo applies to graph edits.</p><label>Notes<textarea autoFocus value={notesDraft} onChange={event => { setNotesDraft(event.target.value); setSemanticDrafts(true); if (draftBaseRevision.current === null) draftBaseRevision.current = specificationState.specRevision; }}/></label>{notesError && <p role="alert">{notesError}</p>}<div className="detail-actions"><button className="btn btn-primary" disabled={saveStatus === 'saving'} onClick={async () => { try { await handleUpdateSpecification(specificationState.specification!, undefined, true, notesDraft); setNotesDraft(null); } catch (err) { setNotesError(err instanceof Error ? err.message : String(err)); } }}>Save notes</button><button className="btn btn-secondary" disabled={saveStatus === 'saving'} onClick={() => { setNotesDraft(null); setSemanticDrafts(false); draftBaseRevision.current = null; setNotesError(''); }}>Cancel</button></div></section></div>}
       <ProjectModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
@@ -1226,12 +1244,16 @@ export const App: React.FC<AppProps> = ({
         specification={specificationState.specification}
         analysis={analysisState.analysis}
         analysisStatus={analysisState.status}
-        onAdopt={handleUpdateSpecification}
+        onAdopt={graph => handleUpdateSpecification(graph)}
         apiBaseUrl={apiBaseUrl}
         mode="modal"
       />
-      {isAgentWorkspaceOpen && specificationState.project && <AgentWorkspace
+      {specificationState.project && <AgentWorkspace
+        key={specificationState.project.id}
+        open={isAgentWorkspaceOpen}
         project={specificationState.project}
+        semanticDrafts={semanticDrafts}
+        selectedNodeId={viewState.selectedType === 'node' ? viewState.selectedId || undefined : undefined}
         analysisRevision={analysisState.analysis?.revision}
         apiBaseUrl={apiBaseUrl}
         onClose={() => setIsAgentWorkspaceOpen(false)}

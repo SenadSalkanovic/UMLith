@@ -4,6 +4,7 @@ import type { CreateProjectRequest } from '../../shared/api';
 import { Layers, Plus, FolderOpen, ArrowRight } from 'lucide-react';
 
 interface EmptyWorkspaceProps {
+  onOpenExample?: () => void;
   availableProjects: Project[];
   onSelectProject: (id: string) => void;
   onCreateProject: (data: CreateProjectRequest) => Promise<void>;
@@ -11,10 +12,12 @@ interface EmptyWorkspaceProps {
 
 export const EmptyWorkspace: React.FC<EmptyWorkspaceProps> = ({
   availableProjects,
+  onOpenExample,
   onSelectProject,
   onCreateProject,
 }) => {
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [target, setTarget] = useState('TypeScript application');
@@ -28,6 +31,7 @@ export const EmptyWorkspace: React.FC<EmptyWorkspaceProps> = ({
       setFormError('Project name is required.');
       return;
     }
+    if (importing && !root.trim()) { setFormError('Choose an existing source folder to import.'); return; }
     setFormError(null);
     setIsSubmitting(true);
     try {
@@ -35,7 +39,7 @@ export const EmptyWorkspace: React.FC<EmptyWorkspaceProps> = ({
         name: name.trim(),
         description: description.trim(),
         target: target.trim() || 'TypeScript application',
-        root: root.trim() || undefined,
+        root: importing ? root.trim() || undefined : undefined,
       });
     } catch (err: any) {
       setFormError(err?.message || 'Failed to create project.');
@@ -48,24 +52,27 @@ export const EmptyWorkspace: React.FC<EmptyWorkspaceProps> = ({
     <div className="empty-workspace-view" data-testid="empty-workspace">
       <div className="empty-workspace-card">
         <div className="empty-hero">
-          <Layers size={48} className="hero-icon" />
-          <h1 className="hero-title">Architecture Workspace</h1>
+          <strong className="start-brand">UMLITH</strong>
+          <h1 className="hero-title">Draw the software you want.</h1>
           <p className="hero-subtitle">
-            Local browser workspace for software architecture, ER models, and interface specifications with live code synchronization.
+            Design the system. Define its data and behavior. Keep ownership when AI builds it.
           </p>
         </div>
 
+        <div className="start-actions"><button className="btn btn-primary" onClick={() => { setShowCreateForm(true); setImporting(false); }}>Create a design</button><button className="btn btn-secondary" onClick={() => { setShowCreateForm(true); setImporting(true); }}>Import existing code</button><button className="btn btn-outline" onClick={onOpenExample}>Open sensor example</button></div>
         {availableProjects.length > 0 && !showCreateForm && (
           <div className="existing-projects-section" data-testid="existing-projects-section">
             <h2 className="section-title">
               <FolderOpen size={18} />
-              <span>Available Local Projects</span>
+              <span>Recent projects</span>
             </h2>
             <div className="projects-grid">
               {availableProjects.map(proj => (
                 <div
                   key={proj.id}
                   className="project-card"
+                  role="button" tabIndex={0}
+                  onKeyDown={event => { if (event.target === event.currentTarget && event.key === 'Enter') onSelectProject(proj.id); }}
                   onClick={() => onSelectProject(proj.id)}
                   data-testid={`project-card-${proj.id}`}
                 >
@@ -105,7 +112,7 @@ export const EmptyWorkspace: React.FC<EmptyWorkspaceProps> = ({
         {(availableProjects.length === 0 || showCreateForm) && (
           <div className="create-project-form-container" data-testid="create-project-form">
             <div className="form-header">
-              <h2>Create New Architecture Project</h2>
+              <h2>{importing ? 'Import existing code' : 'Create a design'}</h2>
               {availableProjects.length > 0 && (
                 <button
                   type="button"
@@ -166,8 +173,8 @@ export const EmptyWorkspace: React.FC<EmptyWorkspaceProps> = ({
                   <span className="field-hint">Descriptive target; does not impose a generation template.</span>
                 </div>
 
-                <div className="form-group flex-1">
-                  <label htmlFor="proj-root">Root Directory Path (Optional)</label>
+                {importing && <div className="form-group flex-1">
+                  <label htmlFor="proj-root">Existing source folder *</label>
                   <input
                     id="proj-root"
                     type="text"
@@ -177,8 +184,8 @@ export const EmptyWorkspace: React.FC<EmptyWorkspaceProps> = ({
                     onChange={(e) => setRoot(e.target.value)}
                     data-testid="input-project-root"
                   />
-                  <span className="field-hint">Leave blank for blank in-memory project.</span>
-                </div>
+                  <span className="field-hint">Extracted code stays separate until you review and adopt it.</span>
+                </div>}
               </div>
 
               <div className="form-actions">
@@ -189,7 +196,7 @@ export const EmptyWorkspace: React.FC<EmptyWorkspaceProps> = ({
                   data-testid="submit-create-project-btn"
                 >
                   <Plus size={16} />
-                  <span>{isSubmitting ? 'Creating Project…' : 'Create & Open Project'}</span>
+                  <span>{isSubmitting ? 'Creating…' : importing ? 'Import & open' : 'Create & open'}</span>
                 </button>
               </div>
             </form>

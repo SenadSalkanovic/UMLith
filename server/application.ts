@@ -2,7 +2,7 @@ import {readFile,readdir,lstat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {z} from 'zod';
 import {isDeepStrictEqual} from 'node:util';
-import type {AgentJob,FileChange} from '../shared/model';
+import {GraphSchema,type AgentJob,type FileChange} from '../shared/model';
 import {ProjectStore} from './store';
 import {AppError,atomicJson,captureFiles,fileModes,hashes,replaceProjectFile,safePath} from './files';
 import {validateCandidate} from './review';
@@ -47,7 +47,8 @@ export async function applyReviewed(store:ProjectStore,job:AgentJob){
  return store.transaction(job.projectId,async()=>{
   const project=await store.get(job.projectId);
   const persisted=JSON.parse(await readFile(join(store.projectDir(project.id),'jobs',job.id+'.json'),'utf8')) as AgentJob;
-  if(persisted.status!=='review'||!isDeepStrictEqual(persisted.report,job.report))throw new AppError('Candidate review state changed; refresh the review',409);
+  if(persisted.report?.candidate)persisted.report.candidate={...persisted.report.candidate,graph:GraphSchema.parse(persisted.report.candidate.graph)};
+  if(persisted.status!=='review'||!isDeepStrictEqual(persisted.report,job.report===undefined?undefined:JSON.parse(JSON.stringify(job.report))))throw new AppError('Candidate review state changed; refresh the review',409);
   if((await recoveryStatus(store,project.id)).length)throw new AppError('Resolve pending application recovery before applying another candidate',409);
   if(job.status!=='review'||!job.report?.passed)throw new AppError('This candidate has not passed review validation');
   if(!isDeepStrictEqual(project.checks,job.checkDefinitions))throw new AppError('Configured checks changed. Revalidate this candidate.',409);
