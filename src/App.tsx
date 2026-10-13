@@ -5,7 +5,7 @@ import type { ViewState, SpecificationState, AnalysisState, WorkspaceError, Sync
 import * as api from './api';
 import { GraphSchema } from '../shared/model';
 import sensorExample from './examples/sensor-platform.json';
-import { defaultDestination, readDestination, destinationUrl, selectionDestination, type Destination } from './navigation-state';
+import { defaultDestination, readDestination, destinationUrl, selectionDestination, visibleDesignNodes, ownerId, type Destination } from './navigation-state';
 import { newEditHistory, recordEdit, undoEdit, redoEdit, type EditHistory } from './editor-history';
 import { DesignDetails } from './components/DesignDetails';
 import { reconcileSelectionAndScope } from './workspace-state';
@@ -157,7 +157,7 @@ export const App: React.FC<AppProps> = ({
     searchQuery: '',
     graphContext: 'intended',
     panels: {
-      tree: true,
+      tree: false,
       canvas: true,
       inspector: true,
       source: false,
@@ -173,6 +173,7 @@ export const App: React.FC<AppProps> = ({
   const [editHistory, setEditHistory] = useState(() => newEditHistory(initialProject?.specRevision ?? 0));
   const [editMessage, setEditMessage] = useState('');
   const [draftResetToken, setDraftResetToken] = useState(0);
+  const [canvasEdit, setCanvasEdit] = useState<{graph:Graph;nonce:number;projectId:string}>();
   const [connectionDraft, setConnectionDraft] = useState<{source:string;target:string;nonce:number}>();
   const destinationCache = useRef<Record<string, ViewState>>({});
   const lastBuildContext = useRef<'intended' | 'implemented'>('intended');
@@ -235,7 +236,7 @@ export const App: React.FC<AppProps> = ({
   const draftChanged = useCallback((dirty: boolean) => {
     setSemanticDrafts(dirty);
     if (dirty && draftBaseRevision.current === null) draftBaseRevision.current = specificationState.specRevision;
-    if (!dirty) draftBaseRevision.current = null;
+    if (!dirty) { draftBaseRevision.current = null; setCanvasEdit(undefined); }
   }, [specificationState.specRevision]);
 
   // Fetch specification history
@@ -252,8 +253,9 @@ export const App: React.FC<AppProps> = ({
   // Load project by ID
   const loadProjectById = useCallback(async (id: string) => {
     if (draftBaseRevision.current !== null || saving.current) { setEditMessage('Save or discard changes before switching projects.'); return; }
+    setCanvasEdit(undefined);
     const switching = currentProjectId.current !== id;
-    if (switching) { destinationCache.current = {}; lastBuildContext.current = 'intended'; setConnectionDraft(undefined); }
+    if (switching) { destinationCache.current = {}; lastBuildContext.current = 'intended'; setConnectionDraft(undefined); setCanvasEdit(undefined); }
     setIsLoading(true);
     setError(null);
     try {
@@ -294,6 +296,7 @@ export const App: React.FC<AppProps> = ({
         searchQuery: '',
       }));
       setDraftGraph(null);
+      setCanvasEdit(undefined);
       setSemanticDrafts(false);
       draftBaseRevision.current = null;
       setEditHistory(newEditHistory(proj.specRevision));
@@ -412,6 +415,11 @@ export const App: React.FC<AppProps> = ({
     const graph = activeGraph;
     if (!graph) return;
     const selection = selectionDestination(graph, id);
+    if (!viewState.flowchartId && !selection.flowchartId && selection.designView === designView) {
+      const visible = visibleDesignNodes(graph, designView, viewState.activeScope);
+      const node = graph.nodes.find(node => node.id === id);
+      if (visible.some(item => item.id === id || node && item.id === ownerId(graph, node))) selection.activeScope = viewState.activeScope;
+    }
     changeDestination({ ...selection, panels: { ...viewState.panels, inspector: true } });
   };
   const handleScopeChange = (scopeId: string | null) => {
@@ -602,6 +610,7 @@ export const App: React.FC<AppProps> = ({
       setConflictState(null);
       setSaveStatus('saved');
       setDraftGraph(null);
+      setCanvasEdit(undefined);
       setSemanticDrafts(false);
       draftBaseRevision.current = null;
       pendingDraftSelection.current = null;
@@ -696,6 +705,7 @@ export const App: React.FC<AppProps> = ({
       setSpecificationState(previous => ({ ...previous, specRevision: updated.specRevision, specification: updated.specification, project: updated }));
       setConflictState(null);
       setDraftGraph(null);
+      setCanvasEdit(undefined);
       setSemanticDrafts(false);
       draftBaseRevision.current = null;
       pendingDraftSelection.current = null;
@@ -710,6 +720,7 @@ export const App: React.FC<AppProps> = ({
   const handleResolveConflictDiscard = () => {
     setConflictState(null);
     setDraftGraph(null);
+    setCanvasEdit(undefined);
     setSemanticDrafts(false);
     draftBaseRevision.current = null;
     pendingDraftSelection.current = null;
@@ -805,6 +816,8 @@ export const App: React.FC<AppProps> = ({
       });
       setViewState(prev => ({ ...prev, ...defaultDestination, graphContext: 'intended' }));
       setDraftGraph(null);
+      setCanvasEdit(undefined);
+      setConnectionDraft(undefined);
       setSemanticDrafts(false);
       draftBaseRevision.current = null;
       setEditHistory(newEditHistory(created.specRevision));
@@ -925,6 +938,8 @@ export const App: React.FC<AppProps> = ({
         </div>}
         {viewState.flowchartId && <button className="btn btn-outline" onClick={() => { const id = viewState.flowchartId!; changeDestination({ ...selectionDestination(activeGraph!, id), detailTab: 'flowchart' }); }}><ArrowLeft size={14}/>Return to class</button>}
         <span className="toolbar-spacer"/>
+        {workspace==='design'&&semanticDrafts&&<button className="btn btn-primary" disabled={pendingDetailBuffers||saveStatus==='saving'} onClick={async()=>{try{if(draftGraph){await handleUpdateSpecification(draftGraph,undefined,true);setDraftResetToken(value=>value+1);}}catch(error){setEditMessage(error instanceof Error?error.message:String(error));}}}>{saveStatus==='saving'?'Saving…':'Save changes'}</button>}
+        {workspace==='design'&&semanticDrafts&&<button className="btn btn-outline" disabled={saveStatus==='saving'} onClick={()=>{setCanvasEdit(undefined);setDraftResetToken(value=>value+1);}}>Discard changes</button>}
         <button className="btn btn-outline" disabled={semanticDrafts || !editHistory.undo.length || isHistoricalActive || viewState.graphContext === 'implemented'} onClick={() => replayEdit('undo')} aria-label="Undo"><Undo2 size={16}/></button>
         <button className="btn btn-outline" disabled={semanticDrafts || !editHistory.redo.length || isHistoricalActive || viewState.graphContext === 'implemented'} onClick={() => replayEdit('redo')} aria-label="Redo"><Redo2 size={16}/></button>
         <button className="btn btn-outline" onClick={() => handleTogglePanel('inspector')} aria-pressed={viewState.panels.inspector}><SlidersHorizontal size={16}/>Details</button>
@@ -1023,7 +1038,7 @@ export const App: React.FC<AppProps> = ({
         </div>
       )}
 
-      <main className={`workspace-main workspace-${workspace} ${viewState.panels.tree ? 'with-tree' : ''} ${viewState.panels.inspector ? 'with-details' : ''}`} data-testid="workspace-main">
+      <main className={`workspace-main workspace-${workspace} ${viewState.panels.tree ? 'with-tree' : ''} ${viewState.panels.inspector && (workspace !== 'design' || viewState.selectedId) ? 'with-details' : ''}`} data-testid="workspace-main">
         {/* Panel 1: Project Tree */}
         {viewState.panels.tree && (
           <div className="layout-col-tree">
@@ -1054,6 +1069,15 @@ export const App: React.FC<AppProps> = ({
                 viewState={viewState}
                 onSelectNode={handleSelectNode}
                 onSelectEdge={handleSelectEdge}
+                creationDisabled={pendingDetailBuffers || saveStatus === 'saving'}
+                onCanvasEdit={workspace==='design' ? (graph, selectedId) => {
+                  if(pendingDetailBuffers || saving.current) throw new Error('Apply or cancel the pending detail edit first.');
+                  const next=GraphSchema.parse(graph);
+                  setCanvasEdit(previous=>({graph:next,nonce:(previous?.nonce||0)+1,projectId:specificationState.project!.id}));
+                  setDraftGraph(next);setSemanticDrafts(true);
+                  if(draftBaseRevision.current===null)draftBaseRevision.current=specificationState.specRevision;
+                  changeDestination({...selectionDestination(next,selectedId),panels:{...viewState.panels,inspector:false}});
+                } : undefined}
                 onConnectNodes={(source, target) => { handleSelectNode(source); setConnectionDraft(previous => ({source, target, nonce:(previous?.nonce||0)+1})); changeDestination({ ...selectionDestination(activeGraph!, source), panels: { ...viewState.panels, inspector:true } }); }}
                 onSelectField={(owner, field) => changeDestination({ ...selectionDestination(activeGraph!, owner), selectedField: field, panels: { ...viewState.panels, inspector: true } })}
                 onScopeChange={handleScopeChange}
@@ -1084,8 +1108,8 @@ export const App: React.FC<AppProps> = ({
         {/* Right Work Area: Property Inspector + Review Area */}
         <div className="layout-col-right">
           {/* Panel 3: Property Inspector */}
-          {specificationState.specification && <div className="design-details-host" hidden={workspace !== 'design' || !viewState.panels.inspector || isHistoricalActive || viewState.graphContext === 'implemented'}>
-            <DesignDetails key={specificationState.project.id} connectionDraft={connectionDraft} graph={specificationState.specification} selectionId={viewState.selectedId} scopeId={viewState.activeScope} onSelect={id => { if (id && !activeGraph?.nodes.some(node => node.id === id) && !activeGraph?.edges.some(edge => edge.id === id)) pendingDraftSelection.current = id; changeDestination({ selectedId: id, selectedType: id ? (draftGraph || specificationState.specification)?.edges.some(edge => edge.id === id) ? 'edge' : 'node' : null, selectedField: null, ...(id && activeGraph?.nodes.some(node => node.id === id && node.kind === 'step') ? selectionDestination(activeGraph, id) : {}) }); }} onScope={handleScopeChange} onSave={graph => handleUpdateSpecification(graph, undefined, true)} resetToken={draftResetToken} onDraftChange={draftChanged} onPendingChange={setPendingDetailBuffers} onDraftGraphChange={draftGraphChanged} detailTab={viewState.detailTab} selectedField={viewState.selectedField} onDetailTabChange={detailTab => changeDestination({ detailTab })} onFlowchart={id => changeDestination({ flowchartId: id, activeScope: id, detailTab: 'flowchart' })}/>
+          {specificationState.specification && <div className="design-details-host" hidden={workspace !== 'design' || !viewState.selectedId || !viewState.panels.inspector || isHistoricalActive || viewState.graphContext === 'implemented'}>
+            <DesignDetails key={specificationState.project.id} connectionDraft={connectionDraft} canvasEdit={canvasEdit?.projectId===specificationState.project.id?canvasEdit:undefined} graph={specificationState.specification} selectionId={viewState.selectedId} scopeId={viewState.activeScope} onSelect={id => { if (id && !activeGraph?.nodes.some(node => node.id === id) && !activeGraph?.edges.some(edge => edge.id === id)) pendingDraftSelection.current = id; changeDestination({ selectedId: id, selectedType: id ? (draftGraph || specificationState.specification)?.edges.some(edge => edge.id === id) ? 'edge' : 'node' : null, selectedField: null, ...(id && activeGraph?.nodes.some(node => node.id === id && node.kind === 'step') ? selectionDestination(activeGraph, id) : {}) }); }} onScope={handleScopeChange} onSave={graph => handleUpdateSpecification(graph, undefined, true)} resetToken={draftResetToken} onDraftChange={draftChanged} onPendingChange={setPendingDetailBuffers} onDraftGraphChange={draftGraphChanged} detailTab={viewState.detailTab} selectedField={viewState.selectedField} onDetailTabChange={detailTab => changeDestination({ detailTab })} onFlowchart={id => changeDestination({ flowchartId: id, activeScope: id, detailTab: 'flowchart' })}/>
           </div>}
           {(workspace === 'build' || isHistoricalActive || viewState.graphContext === 'implemented') && viewState.panels.inspector && (
             <div className="right-top-inspector">

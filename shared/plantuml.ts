@@ -41,7 +41,7 @@ const quoted = (value: string) => '"' + text(value) + '"';
 const url = (kind: 'node' | 'edge' | 'field', id: string, field?: string) => `umlith://${kind}/${encodeURIComponent(id)}${field === undefined ? '' : '/' + encodeURIComponent(field)}`;
 const visibility = (value?: ProgramNode['visibility']) => value === 'public' ? '+' : value === 'private' ? '-' : value === 'protected' ? '#' : value === 'package' ? '~' : '';
 export function displayMethod(node: ProgramNode) {
-  return node.signature ? `${node.name}(${node.signature.parameters.map(p => `${p.name}${p.optional ? '?' : ''}${p.type ? ': ' + p.type : ''}`).join(', ')})${node.signature.returnType ? ': ' + node.signature.returnType : ''}` : node.contract ? `${node.name} ${node.contract}` : `${node.name}()`;
+  return node.signature ? `${node.name}(${node.signature.parameters.map(p => `${p.name}${p.optional ? '?' : ''}${p.type ? ': ' + p.type : ''}`).join(', ')})${node.signature.returnType ? ': ' + node.signature.returnType : ''}` : node.contract ? `${node.name} · ${node.contract}` : `${node.name}(…)`;
 }
 function erEnd(value: string | undefined, source: boolean) {
   if (!value) return source ? '|' : '|';
@@ -49,11 +49,11 @@ function erEnd(value: string | undefined, source: boolean) {
   const optional = value === '*' || value.startsWith('0');
   return source ? `${many ? '}' : '|'}${optional ? 'o' : '|'}` : `${optional ? 'o' : '|'}${many ? '{' : '|'}`;
 }
-export interface DiagramRequest { graph: Graph; view: DesignView; scopeId?: string | null; functionId?: string | null; selectedId?: string | null }
-export function graphToPlantUml({graph,view,scopeId = null,functionId,selectedId}: DiagramRequest): string {
+export interface DiagramRequest { graph: Graph; view: DesignView; scopeId?: string | null; functionId?: string | null; selectedId?: string | null; showMembers?: boolean }
+export function graphToPlantUml({graph,view,scopeId = null,functionId,selectedId,showMembers = true}: DiagramRequest): string {
   const nodes = visibleDesignNodes(graph, view, scopeId, functionId);
   const aliases = new Map(nodes.map((node,index) => [node.id, `n${index}`]));
-  const lines = ['@startuml', '!pragma layout smetana', 'skinparam backgroundColor #0A0A0A', 'skinparam defaultFontColor #FAFAFA', 'skinparam defaultFontName SansSerif', 'skinparam defaultFontSize 14', 'skinparam shadowing false', 'skinparam roundcorner 2', 'skinparam classAttributeIconSize 0', 'skinparam hyperlinkColor #FAFAFA', 'skinparam hyperlinkUnderline 1', 'skinparam ArrowColor #A3A3A3', 'skinparam classBackgroundColor #171717', 'skinparam classBorderColor #A3A3A3', 'skinparam classFontColor #FAFAFA', 'skinparam classAttributeFontColor #FAFAFA', 'skinparam stateBackgroundColor #171717', 'skinparam stateBorderColor #A3A3A3', 'skinparam componentBackgroundColor #171717', 'skinparam componentBorderColor #A3A3A3', 'skinparam packageBackgroundColor #111111', 'skinparam packageBorderColor #A3A3A3'];
+  const lines = ['@startuml', 'hide circle', 'skinparam noteBackgroundColor #171717', 'skinparam noteBorderColor #A3A3A3', 'skinparam noteFontColor #FAFAFA', '<style>\nstart {\nBackgroundColor #FAFAFA\nLineColor #FAFAFA\n}\nend {\nBackgroundColor #FAFAFA\nLineColor #FAFAFA\n}\n</style>', '!pragma layout smetana', 'skinparam backgroundColor #0A0A0A', 'skinparam defaultFontColor #FAFAFA', 'skinparam defaultFontName SansSerif', 'skinparam defaultFontSize 14', 'skinparam shadowing false', 'skinparam roundcorner 2', 'skinparam classAttributeIconSize 0', 'skinparam hyperlinkColor #FAFAFA', 'skinparam hyperlinkUnderline 1', 'skinparam ArrowColor #A3A3A3', 'skinparam classBackgroundColor #171717', 'skinparam classBorderColor #A3A3A3', 'skinparam classFontColor #FAFAFA', 'skinparam classAttributeFontColor #FAFAFA', 'skinparam stateBackgroundColor #171717', 'skinparam stateBorderColor #A3A3A3', 'skinparam componentBackgroundColor #171717', 'skinparam componentBorderColor #A3A3A3', 'skinparam packageBackgroundColor #111111', 'skinparam packageBorderColor #A3A3A3'];
   if (!nodes.length) return [...lines, 'title No elements in this view yet', '@enduml'].join('\n');
   for (const node of nodes) {
     const alias = aliases.get(node.id)!;
@@ -74,6 +74,7 @@ export function graphToPlantUml({graph,view,scopeId = null,functionId,selectedId
     }
     const kind = node.kind === 'entity' ? 'entity' : node.kind === 'interface' ? 'interface' : node.kind === 'enum' ? 'enum' : node.isAbstract ? 'abstract class' : 'class';
     lines.push(`${kind} ${quoted(name)} as ${alias} [[${url('node',node.id)}]]${color} {`);
+    if (!showMembers) { lines.push('}'); continue; }
     if (node.kind === 'function') lines.push(`  {method} ${text(displayMethod(node))} [[[${url('node',node.id)}]]]`);
     for (const field of node.fields) lines.push(`  {field} ${field.isStatic ? '{static} ' : ''}${visibility(field.visibility)} ${text(field.name)}${field.type ? ': ' + text(field.type) : ''}${field.optional ? ' ?' : ''}${field.key ? ' <<'+text(field.key)+'>>' : ''}${field.defaultValue ? ' = '+text(field.defaultValue) : ''} [[[${url('field',node.id,field.name)}]]]`);
     if (node.kind === 'entity') for (const key of [...(node.compositeKeys || []), ...(node.indexes || [])]) lines.push(`  {field} ${key.type} (${key.fields.map(text).join(', ')})`);

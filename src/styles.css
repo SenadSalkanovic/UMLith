@@ -7956,3 +7956,24 @@ button:disabled { opacity: .48; cursor: default; }
 .plantuml-source summary { cursor: pointer; font-size: 12px; padding-bottom: 8px; }
 .plantuml-source textarea { display: block; width: 100%; height: 220px; resize: vertical; background: #171717; color: #fafafa; border: 1px solid #525252; padding: 12px; font: 12px/18px var(--font-mono); }
 @media (max-width: 767px) { .plantuml-tools { padding: 6px; } .plantuml-tools button { min-height: 44px; } .plantuml-viewport { padding: 12px; } }
+
+.diagram-plus:hover rect, .diagram-plus:focus rect { stroke: #ff3d00; fill: #262626; }
+.diagram-plus text { pointer-events: none; font-family: var(--font-sans); }
+.diagram-add-menu { position: fixed; z-index: 100; width: min(280px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto; background: #171717; color: #fafafa; border: 1px solid #525252; border-radius: 3px; box-shadow: 0 12px 36px #0009; padding: 12px; }
+.diagram-add-menu header, .diagram-add-menu footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.diagram-add-menu header { margin-bottom: 8px; }
+.diagram-add-menu strong { overflow-wrap: anywhere; }
+.diagram-add-menu button { min-height: 36px; border: 1px solid #525252; border-radius: 3px; padding: 6px 10px; background: #222; color: #fafafa; text-align: left; cursor: pointer; }
+.diagram-add-menu button:hover { background: #303030; }
+.diagram-add-menu button:focus-visible, .diagram-add-menu input:focus-visible, .diagram-add-menu select:focus-visible { outline: 2px solid #ff3d00; outline-offset: 2px; }
+.diagram-add-menu .btn-primary { background: #ff3d00; border-color: #ff3d00; color: #0a0a0a; }
+.diagram-add-menu header button { flex-shrink: 0; }
+.diagram-add-choices { display: grid; gap: 4px; }
+.diagram-add-choices button { display: flex; align-items: center; gap: 10px; }
+.diagram-add-choices small { margin-left: auto; color: #a3a3a3; font-size: 11px; }
+.diagram-add-menu label { display: grid; gap: 6px; margin: 12px 0; font-size: 13px; }
+.diagram-add-menu label span { color: #a3a3a3; }
+.diagram-add-menu input, .diagram-add-menu select { width: 100%; min-height: 36px; background: #222; color: #fafafa; border: 1px solid #525252; border-radius: 3px; padding: 8px; font: inherit; }
+.diagram-add-menu [role=alert] { margin: 12px 0; color: #ffb199; }
+.diagram-add-menu footer { margin-top: 16px; }
+@media (max-width: 767px) { .diagram-add-menu button, .diagram-add-menu input, .diagram-add-menu select { min-height: 44px; } }

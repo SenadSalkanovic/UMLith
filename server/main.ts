@@ -356,7 +356,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   // Health check
   app.get('/api/health', async () => ({ status: 'ok' }));
   app.post('/api/diagrams/plantuml', async request => {
-    const input=z.object({graph:GraphSchema,view:z.enum(['overview','classes','database']),scopeId:z.string().nullable().optional(),functionId:z.string().nullable().optional(),selectedId:z.string().nullable().optional()}).strict().parse(request.body);
+    const input=z.object({graph:GraphSchema,view:z.enum(['overview','classes','database']),scopeId:z.string().nullable().optional(),functionId:z.string().nullable().optional(),selectedId:z.string().nullable().optional(),showMembers:z.boolean().optional()}).strict().parse(request.body);
     return renderPlantUml(input);
   });
 

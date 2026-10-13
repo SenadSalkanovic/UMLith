@@ -53,6 +53,8 @@ export interface GraphCanvasProps {
   readOnly?: boolean;
   onSelectField?: (ownerId: string, fieldName: string) => void;
   onConnectNodes?: (sourceId: string, targetId: string) => void;
+  onCanvasEdit?: (graph: Graph, selectedId: string) => void;
+  creationDisabled?: boolean;
   onOpenArchitectureEditor?: () => void;
   onOpenErEditor?: () => void;
   onOpenFunctionEditor?: () => void;

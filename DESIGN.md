@@ -43,7 +43,7 @@ Use the system sans-serif stack for navigation, prose, and labels. Signatures an
 
 ## Layout
 
-Desktop uses a 232px model tree, flexible canvas, and 360px details panel. At 1280px, side panels narrow to 208px and 332px. At 1100px, show at most one side panel. Below 768px, side panels become dismissible overlays, the header wraps, and toolbars scroll horizontally. Keep canvas scrolling separate from details scrolling.
+The canvas starts without side panels. A node or member selection opens Details; Model is optional. When opened, desktop uses a 232px model tree, flexible canvas, and 360px details panel. At 1280px, side panels narrow to 208px and 332px. At 1100px, show at most one side panel. Below 768px, side panels become dismissible overlays, the header wraps, and toolbars scroll horizontally. Keep canvas scrolling separate from details scrolling.
 
 ## Elevation & Depth
 
@@ -55,7 +55,7 @@ Controls use small corners. Navigation uses text and an active underline. Diagra
 
 ## Components
 
-The header exposes Design, Build & review, saved state, and handoff. Design views share one graph: Overview, Classes, Database, with optional method flows. Contextual details contain explicit Save and Discard actions. The PlantUML toolbar provides zoom, fit, source inspection, and source/SVG downloads. Methods, fields, and relationships carry stable selection links in rendered SVG.
+The header exposes Design, Build & review, saved state, and handoff. Design views share one graph: Overview, Classes, Database, with optional method flows. Creation lives in compact menus opened by plus controls beside diagram nodes and members, or the empty-canvas Add action. The sidebar edits only the selected item. Save and Discard are available above the canvas and in contextual details. The PlantUML toolbar provides zoom, fit, source inspection, and source/SVG downloads. Methods, fields, and relationships carry stable selection links in rendered SVG.
 
 ## Do's and Don'ts
 
