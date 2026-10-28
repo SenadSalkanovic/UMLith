@@ -1,68 +1,68 @@
 # UMLith
 
-Next.js urejevalnik za vizualno načrtovanje aplikacij. Arhitektura, ER model in aktivnosti imajo svoja platna v enem projektu.
+A Next.js editor for visual application design. Architecture, ER models and activities have separate canvases within one project.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Odpri [localhost:3000](http://localhost:3000).
+Open [localhost:3000](http://localhost:3000).
 
-- **SL / EN** preklopi jezik vmesnika, preverjanja in novih zahtev AI. Izbira se shrani v brskalniku. Imena in opisi v obstoječih modelih ostanejo nespremenjeni. Prevodi so v `app/lib/messages.ts`.
-- **Temni način / Svetli način** ob izbiri jezika preklopi videz celotnega urejevalnika. Izbira se shrani v brskalniku, prvi obisk pa sledi sistemskemu videzu.
-- **Nov** odpre prazen projekt. Prejšnje delo lahko povrneš z **Razveljavi**.
-- Klikni element v knjižnici, ga premakni in povleci med priključkoma za povezavo.
-- Klikni element ali povezavo za lastnosti, atribute, metode, stereotipe, pakete in kardinalnosti.
-- **Komentar** na vseh treh platnih doda okvir z naslovom in opisom sklopa. Premikaš ga za naslov, velikost pa spreminjaš z robovi ali poljema Širina in Višina. Okvir je za elementi in jih ne premika skupaj s sabo. Položaj in velikost se shranita v JSON, besedilo pa tudi v PlantUML komentarje in prompt za AI.
-- **PlantUML** pokaže sproten izvoz trenutnega diagrama. Kopiraj kodo ali prenesi `.puml`.
-- **Arhitektura z AI** pošlje prompt in trenutni projekt v Codex CLI, Claude Code CLI, lokalni LLM ali povezani odjemalec MCP. **Izdelaj arhitekturo** vrne predlog, **Pridobi mnenje** pa pregled napak, manjkajočih pravil in odprtih vprašanj.
-- Predlog preglej in klikni **Uporabi predlog**. Nato ga urejaš na vseh treh platnih. **Razveljavi** povrne prejšnji projekt. Če med čakanjem model spremeniš, je uporaba starega predloga onemogočena.
-- Ročni izvoz besedila in `.md` ostaja pod **Ročno kopiranje prompta** v oknu AI.
-- Delo se samodejno shranjuje v lokalni pomnilnik brskalnika. **Shrani JSON** naredi prenosljivo kopijo vseh diagramov in položajev. **Odpri** uvozi takšno kopijo.
+- **SL / EN** switches the language of the interface, checks and new AI requests. The choice is saved in the browser. Names and descriptions in existing models stay unchanged. Translations are in `app/lib/messages.ts`.
+- **Dark mode / Light mode**, next to the language selector, changes the appearance of the entire editor. The choice is saved in the browser. The first visit follows your system preference.
+- **New** opens an empty project. Use **Undo** to restore your previous work.
+- Click an element in the library, move it, and drag between handles to create a connection.
+- Click an element or connection to edit properties, attributes, methods, stereotypes, packages and cardinalities.
+- **Comment** adds a frame with a section title and description on any of the three canvases. Drag its title to move it, or resize it using the edges or the Width and Height fields. The frame sits behind elements and does not move them with it. Its position and size are saved in JSON. Its text is also included in PlantUML comments and the AI prompt.
+- **PlantUML** shows a live export of the current diagram. Copy the code or download a `.puml` file.
+- **AI architecture** sends your prompt and current project to Codex CLI, Claude Code CLI, a local LLM or a connected MCP client. **Generate architecture** returns a proposal. **Review model** checks for errors, missing rules and open questions.
+- Review the proposal and click **Apply proposal**. You can then edit it on all three canvases. **Undo** restores the previous project. If you change the model while waiting, applying the outdated proposal is disabled.
+- Manual text and `.md` exports are available under **Copy prompt manually** in the AI window.
+- Your work is saved automatically in the browser's local storage. **Save JSON** creates a portable copy of all diagrams and positions. **Open** imports such a copy.
 
-Projekt ostane v brskalniku, dokler ne pošlješ zahteve AI. Ta pošlje celoten trenutni model in navodilo izbranemu ponudniku. Zahteve MCP in odgovori se hranijo tudi lokalno v `.umlith/ai/` (izključeno iz Git). Brisanje podatkov brskalnika odstrani lokalno kopijo, zato pomembne modele izvozi v JSON.
+The project stays in your browser until you send an AI request. That request sends the entire current model and your instructions to the selected provider. MCP requests and responses are also stored locally in `.umlith/ai/` (excluded from Git). Clearing browser data removes the local copy, so export important models as JSON.
 
-## Povezava z AI
+## Connecting to AI
 
-**Codex / Claude Code:** CLI mora biti nameščen, v `PATH` in prijavljen (`codex login` oziroma `claude auth login`). Model lahko pustiš prazen. Aplikacija uporablja ločen začasni imenik, Codex v načinu samo za branje, Claude brez orodij. Ne spreminja izvornih datotek. Zahtevo lahko prekličeš, omejitev čakanja je tri minute. CLI uporablja prijavo ponudnika in njegove omejitve oziroma obračunavanje. Za uporabo obstoječe seje izberi MCP.
+**Codex / Claude Code:** The CLI must be installed, available in `PATH` and signed in (`codex login` or `claude auth login`). You can leave the model field empty. The app uses a separate temporary directory, with Codex in read-only mode and Claude without tools. It does not modify source files. You can cancel a request. The timeout is three minutes. The CLI uses your provider login and its usage limits or billing. To use an existing session, select MCP.
 
-**Lokalni LLM:** izberi to povezavo in vpiši točno ime naloženega modela. Privzeti naslov je Ollama `http://127.0.0.1:11434/v1/chat/completions`. Za LM Studio nastavi v `.env.local` in ponovno zaženi aplikacijo:
+**Local LLM:** Select this provider and enter the exact name of the loaded model. The default endpoint is Ollama at `http://127.0.0.1:11434/v1/chat/completions`. For LM Studio, add this to `.env.local` and restart the app:
 
 ```dotenv
 UMLITH_LOCAL_URL=http://127.0.0.1:1234/v1/chat/completions
 ```
 
-Uporabljen je OpenAI združljiv `chat/completions` z JSON odgovorom. Strežnik mora teči na istem računalniku in podpirati ta format. Aplikacija teče na `127.0.0.1`, AI API zavrača oddaljene in tuje spletne izvore.
+The app uses an OpenAI-compatible `chat/completions` endpoint with JSON responses. The server must run on the same computer and support this format. The app runs on `127.0.0.1`. The AI API rejects remote requests and requests from other web origins.
 
-**MCP:** v odjemalcu enkrat dodaj most (Node.js 22.13+). Ukaza za ta imenik:
+**MCP:** Add the bridge to your client once (Node.js 22.13+). Commands for this checkout:
 
 ```bash
 codex mcp add umlith -- node --experimental-strip-types /home/senad/CodeGenerator/scripts/umlith-mcp.mjs
 claude mcp add umlith -- node --experimental-strip-types /home/senad/CodeGenerator/scripts/umlith-mcp.mjs
 ```
 
-Ob drugem imeniku zamenjaj pot, pravilna konfiguracija JSON je tudi v oknu AI pod **Povezava prek MCP**. Če strežnik še ni viden, ponovno odpri sejo odjemalca. Most uporablja stdio in sam poišče `.umlith/ai/` ob projektu, zato aplikacija in odjemalec ne potrebujeta istega delovnega imenika. Za drugo lokacijo podatkov obema nastavi isti absolutni `UMLITH_AI_DIR`.
+For a different checkout, replace the path. The JSON configuration is also available under **Connect via MCP** in the AI window. If the server is not visible yet, reopen the client session. The bridge uses stdio and finds `.umlith/ai/` relative to the project, so the app and client do not need the same working directory. To use a different data location, set the same absolute `UMLITH_AI_DIR` for both.
 
-V aplikaciji izberi **MCP**, napiši navodilo in oddaj zahtevo. Prikazano navodilo z ID kopiraj v povezani Codex, Claude Code ali drug MCP odjemalec. MCP sam ne zbudi AI seje: odjemalec mora začeti branje. Orodja so `umlith_list_requests`, `umlith_get_request` in `umlith_submit_result`. Aplikacija samodejno prikaže vrnjen odgovor. Zahteva in odgovor ostaneta dosegljiva po osvežitvi istega zavihka. **Prekliči zahtevo MCP** odstrani zahtevo. Ne zažene ali prekine same AI seje.
+In the app, select **MCP**, write your instructions and submit the request. Copy the displayed instruction, including its ID, into your connected Codex, Claude Code or other MCP client. MCP does not wake an AI session on its own: the client must start reading. The tools are `umlith_list_requests`, `umlith_get_request` and `umlith_submit_result`. The app automatically displays the returned response. The request and response remain available after refreshing the same tab. **Cancel MCP request** removes the request. It does not start or stop the AI session itself.
 
-MCP sprejema odgovor `{ "summary": "...", "project": { ... } }` za izdelavo, za mnenje pa `{ "summary": "..." }`. Natančna shema, izvorni model in navodila so v `umlith_get_request`. Neveljavni projekti se zavrnejo. Pregled deluje tudi pri nepopolnih aktivnostih.
+MCP accepts `{ "summary": "...", "project": { ... } }` for generation and `{ "summary": "..." }` for a review. The exact schema, source model and instructions are available in `umlith_get_request`. Invalid projects are rejected. Reviews also work with incomplete activity diagrams.
 
-CLI povezavi sledita [uradni dokumentaciji OpenAI za neinteraktivni Codex](https://developers.openai.com/codex/noninteractive/) in [dokumentaciji Claude Code CLI](https://code.claude.com/docs/en/cli-reference), most pa [MCP stdio protokolu](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
+The CLI integrations follow the [official OpenAI documentation for non-interactive Codex](https://developers.openai.com/codex/noninteractive/) and the [Claude Code CLI documentation](https://code.claude.com/docs/en/cli-reference). The bridge follows the [MCP stdio protocol](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
 
-## Prvi obseg
+## Initial scope
 
-Arhitektura podpira komponente, razrede, vmesnike, entitete, enum in opombe. ER podpira atribute in kardinalnosti povezav. Aktivnosti podpirajo začetek, korake, odločitve z dvema vejama, vzporedni razcep, združitev in konec. Izvoz aktivnosti uporablja PlantUML legacy syntax, ki podpira povezave prek aliasov in povratne zanke.
+Architecture supports components, classes, interfaces, entities, enums and notes. ER models support attributes and relationship cardinalities. Activities support a start, actions, decisions with two branches, parallel forks, joins and ends. Activity export uses PlantUML legacy syntax, which supports connections through aliases and loops.
 
-**Preveri** preverja osnovno strukturo in dosegljivost aktivnosti. To ni poslovna simulacija, preverjanje pravilnosti ER sheme ali formalni dokaz, da se vzporedne veje pravilno združijo. Nepopolne aktivnosti je treba popraviti pred izvozom. Sredinsko besedilo aktivnosti urejaš v Lastnostih pod **Besedilo / Text**. Besedilo in opisi aktivnosti so v PlantUML izvozu komentarji.
+**Check** validates basic structure and activity reachability. It does not simulate business logic, validate ER schema correctness or formally prove that parallel branches join correctly. Incomplete activities must be fixed before export. Edit the text in the center of an activity under **Properties → Text**. Activity text and descriptions are included as comments in the PlantUML export.
 
-Za zdaj ni uvoza poljubne PlantUML kode, sodelovanja več uporabnikov ali vseh vrst UML diagramov. Uvoz in AI zahteve so omejeni na 5 MB, projekti na 500 elementov in 2000 povezav na diagram. Izbrani diagram je zapisan v URL, podatki ostanejo v istem brskalniku.
+Arbitrary PlantUML import, multi-user collaboration and all UML diagram types are not supported yet. Imports and AI requests are limited to 5 MB. Projects are limited to 500 elements and 2000 connections per diagram. The selected diagram is stored in the URL. Project data stays in the same browser.
 
-Začetni projekt je manjši primer Process Order, oblikovan po priloženih referencah. Spremembe v enem diagramu namenoma ne spreminjajo drugih diagramov.
+The starter project is a small Process Order example based on the supplied references. Changes in one diagram intentionally do not modify the other diagrams.
 
-## Preverjanje
+## Verification
 
-Node.js 22.13 ali novejši:
+With Node.js 22.13 or newer:
 
 ```bash
 npm test
@@ -70,4 +70,4 @@ npm run lint
 npm run build
 ```
 
-Testi preverijo povratni uvoz JSON, validacijo, povezave in kardinalnosti, izvoz vej in sinhronizacij, zanke ter zaščito strukture izvoza. Platno uporablja [React Flow](https://reactflow.dev/learn). Sintaksa izvoza sledi [PlantUML class diagrams](https://plantuml.com/class-diagram) in [activity diagrams](https://plantuml.com/activity-diagram-legacy).
+The tests cover JSON round trips, validation, connections and cardinalities, branch and synchronization exports, loops, and export structure safeguards. The canvas uses [React Flow](https://reactflow.dev/learn). Export syntax follows [PlantUML class diagrams](https://plantuml.com/class-diagram) and [activity diagrams](https://plantuml.com/activity-diagram-legacy).
