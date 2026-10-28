@@ -1,44 +1,29 @@
 {
-  "name": "architecture-workspace",
+  "name": "umlith",
+  "version": "0.1.0",
   "private": true,
-  "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web \"node --watch --import @mrleebo/prisma-ast --import tsx server/main.ts\" \"vite --host 127.0.0.1\"",
-    "build": "tsc --noEmit && vite build",
-    "start": "node --import @mrleebo/prisma-ast --import tsx server/main.ts",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "benchmark": "tsx scripts/benchmark.ts",
-    "mcp": "node --import tsx server/mcp.ts",
-    "setup:plantuml": "node scripts/setup-plantuml.mjs"
+    "dev": "next dev --hostname 127.0.0.1",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "mcp": "node --experimental-strip-types scripts/umlith-mcp.mjs",
+    "lint": "eslint",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@fastify/static": "^10.1.5",
-    "@modelcontextprotocol/sdk": "1.32.1",
-    "@mrleebo/prisma-ast": "0.16.0",
-    "@xyflow/react": "^12.9.3",
-    "chokidar": "^5.0.0",
-    "diff": "^8.0.2",
-    "fastify": "^5.12.5",
-    "fflate": "^0.8.2",
-    "lucide-react": "^0.468.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "typescript": "6.0.3",
-    "zod": "^4.1.12"
+    "@xyflow/react": "^12.12.0",
+    "next": "16.4.3",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
-    "@types/diff": "^7.0.2",
-    "@types/node": "^22.18.0",
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
-    "@vitejs/plugin-react": "^5.0.4",
-    "concurrently": "^9.2.1",
-    "tsx": "^4.20.6",
-    "vite": "^7.1.10",
-    "vitest": "^5.0.3"
-  },
-  "engines": {
-    "node": ">=22.12"
+    "@tailwindcss/turbopack": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.3",
+    "tailwindcss": "^4",
+    "typescript": "^5"
   }
 }

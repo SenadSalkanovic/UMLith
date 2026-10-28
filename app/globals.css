@@ -1,0 +1,37 @@
+/* Hallmark · shape: app screen · genre: modern-minimal · theme: Cobalt · nav: diagram tabs · signature: live UML workbench · states: loading, empty, error, full · posture: restrained · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H4 E4 S5 R4 V4 · weakest: H, one canvas and one inspector */
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+@import "./tokens.css";
+@import "./base.css" layer(base);
+@import "./workspace.css";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-body);
+}
+
+:root {
+  --background: var(--color-paper);
+  --foreground: var(--color-ink);
+}

@@ -1,7 +1,0 @@
-{
-  "name": "fixture-typescript-relationships",
-  "version": "1.0.0",
-  "dependencies": {
-    "typescript": "6.0.3"
-  }
-}
